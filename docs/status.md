@@ -4,18 +4,11 @@
 > This file is the **public single source of truth for product status**. It describes the
 > product, not any project ASC has been pointed at.
 
-Current release: **v0.2.0, team-ready distribution** — published to npm. v0.1.0 was
-something one person could install; it could not be handed to a team, because the profile
-that describes a real project had nowhere to live except inside the package, and an agent
-given only the repository URL could not get past that. v0.2.0 is that gap closed: profiles
-live in `$ASC_HOME/profiles/`, `asc profile adopt` makes one from the repository you are
-in, and [AGENTS.md](../AGENTS.md) is the path from a URL to a running session.
-
-In development on `main`: **v0.2.1.** Re-running the two-URL path on a real machine, the
-host refused to execute the bootstrap command *before any ASC process started* — so ASC
-could not report anything at all. This release is about what sits before ASC: one canonical
-agent command, a named boundary for a host that will not run it, a deterministic answer
-about Node, and the executionMode defect closed. Not published yet.
+Current release: **v0.2.1** — published to npm. v0.2.0 proved an agent could go from a
+repository URL to a running session; re-running that on a real machine, the host refused to
+execute the bootstrap command before any ASC code ran. v0.2.1 is about what sits before ASC:
+one canonical agent command, a named boundary for a host that will not run it, a
+deterministic answer about Node, and the executionMode defect closed.
 
 Nothing below is dated by a release — it says what is true now.
 
@@ -53,10 +46,19 @@ Current standing:
 ```text
 3-OS CI (ubuntu · macOS · windows)          TEST_VERIFIED
 Zero-base agent path — a repository URL,    RUNTIME_OBSERVED — `npx` the published
-  no profile name, through adopt · attach     0.2.0 bootstrap into a machine with
+  no profile name, through adopt · attach     0.2.1 bootstrap into a machine with
   · READY · a started session                 nothing installed, against a project ASC
-                                              had never seen; no human answered anything.
-                                              Also TEST_VERIFIED on tarballs, in CI.
+                                              had never seen. Every command after the
+                                              first came from the previous command's
+                                              JSON, unedited. Also TEST_VERIFIED on
+                                              tarballs, in CI.
+Node below the supported floor stops        RUNTIME_OBSERVED — the published artifact on
+  instead of half-working                     Node 22 answers NODE_RUNTIME_REQUIRED and
+                                              names the newer Node already installed.
+The installed `asc` knows it is installed   RUNTIME_OBSERVED — `executionMode:
+                                              installed-runtime`, portables are `asc …`
+                                              and need no network. This was the defect
+                                              the 0.2.0 registry run found.
 Real registry distribution — `npx` the      RUNTIME_OBSERVED
   published bootstrap into a zero state,
   it installs the exact runtime globally
@@ -102,17 +104,16 @@ Tests cannot reach a host classifier and none was faked to look as though they c
 ## Not yet observed on 0.2.1
 
 ```text
-Published two-URL run        a tarball is not the registry. Whatever the candidate shows,
-                             the onboarding claim is re-made against published 0.2.1.
+Host classifier, published   the classifier observation above was made against the
+                             candidate build. It was not repeated against the published
+                             package, and a thing not observed is not written down as
+                             observed. Nothing in that finding depends on which build
+                             it was, but the sentence stays honest.
 ```
 
-## After v0.2.0
+## After v0.2.1
 
 ```text
-executionMode under-reports  CLOSED in 0.2.1 (unreleased). The installed `asc` reported
-                             `executionMode: "bootstrap"` and handed back `npx …` when
-                             plain `asc …` would do. The entry point now decides it,
-                             which is what `profile adopt` already did.
 Public surface English II    the deep operational renderers (monitor, investigation,
                              digest, query, closure, preflight, resolver, entities) are
                              still Korean. The entry surface is English.
