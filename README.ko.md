@@ -179,6 +179,7 @@ Host 설치물은 **project-owned가 아니라 user-owned다.** `install`은 사
 | 구현 계약 (감사·저장·상시성·자율) | [C-10](docs/contracts/C-10_orchestration-audit.md) · [C-11](docs/contracts/C-11_workspace-local-first.md) · [C-12](docs/contracts/C-12_always-on-runtime.md) · [C-13](docs/contracts/C-13_autonomous-escalation.md) | Orchestration Audit / Workspace·Local-first / Always-On Runtime / Autonomous Decision·Escalation |
 | 구현 계약 (배포·실행 진입) | [C-14](docs/contracts/C-14_distribution-runtime-entry.md) | Distribution·Runtime Entry — 실행물이 machine에 어떻게 존재하는가 |
 | 사용자 전달사항 원문 | (비공개 evidence 저장소) | 비규범 보관 — 규범은 계약 문서 |
+| 자기 Profile 가져오기 | [docs/profiles.md](docs/profiles.md) | 실 프로젝트 Profile이 사는 자리 |
 | **제품 상태 SSOT** | [docs/status.md](docs/status.md) | 무엇이 있고, 무엇이 증명됐고, 무엇을 주장하지 않는가 |
 | Block 단위 이력 | (비공개 evidence 저장소) §2 | 개발 기록 — 비공개 evidence 저장소 |
 | roadmap 후보·조사·관찰 | (비공개 evidence 저장소) · (비공개 evidence 저장소) | 후보이지 확정이 아니다 |

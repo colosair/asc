@@ -55,6 +55,21 @@ ASC ships as two packages:
 npx --yes @asc-agent/bootstrap@0.1.0 init
 ```
 
+### Bringing your own profile
+
+The packaged profiles are examples. A profile that describes *your* project lives in your
+own directory and is picked up from there:
+
+```bash
+mkdir -p ~/.asc/profiles/my-team
+cp path/to/profile.json ~/.asc/profiles/my-team/profile.json
+asc setup apply --profile my-team
+asc setup status        # profile: my-team — your own profile directory
+```
+
+Full rules — precedence, id collisions, what a profile may not do, and why moving one does
+not break an existing attachment — are in [docs/profiles.md](docs/profiles.md).
+
 ### Where `asc` comes from
 
 The command does not appear by magic, and this is the whole chain:
@@ -326,6 +341,7 @@ stays human-controlled; only drift detection is automated.
 | Contracts — audit, storage, always-on, autonomy | [C-10](docs/contracts/C-10_orchestration-audit.md) · [C-11](docs/contracts/C-11_workspace-local-first.md) · [C-12](docs/contracts/C-12_always-on-runtime.md) · [C-13](docs/contracts/C-13_autonomous-escalation.md) | Orchestration Audit / Workspace·Local-first / Always-On / Autonomous Escalation |
 | Contract — distribution | [C-14](docs/contracts/C-14_distribution-runtime-entry.md) | how the executable exists on a machine |
 | Architecture — distribution | [docs/architecture/distribution-and-runtime.md](docs/architecture/distribution-and-runtime.md) | English |
+| Profiles — bringing your own | [docs/profiles.md](docs/profiles.md) | where a real project's profile lives |
 | **Product status (SSOT)** | [docs/status.md](docs/status.md) | what exists, what is proven, what is not claimed |
 | Block-level history | (비공개 evidence 저장소) §2 | development record — private evidence repository |
 | Measured evidence | (비공개 evidence 저장소) | runtime observations — private evidence repository |
