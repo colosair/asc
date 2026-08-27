@@ -35,6 +35,11 @@ function isolated(home, extra = {}) {
     USERPROFILE: home,
     ASC_HOME: join(home, '.asc'),
     npm_config_cache: join(home, '.npm-cache'),
+    // **전역 prefix까지 빌리지 않는다.** 이것이 빠져 있었고, 이 기계에 ASC가 전역으로
+    // 설치되자 드러났다 — `npm ls -g` 가 사용자의 진짜 전역을 보고 "이미 설치돼 있다"고
+    // 답해서, 설치 전 경로를 검증하던 검사가 설치 후 경로를 검증하고 있었다.
+    // 격리를 주장하는 스크립트가 한 축을 빼놓으면, 통과가 무엇을 뜻하는지 알 수 없다.
+    npm_config_prefix: join(home, '.npm-global'),
     NO_COLOR: '1',
     ...extra,
   }
@@ -162,7 +167,7 @@ try {
     }
   })())
 
-  // ── 제로베이스 acceptance — URL 하나에서 도는 세션까지 (P0) ─────────────────
+  // ── 제로베이스 acceptance — URL 하나에서 attachment READY까지 (P0) ──────────
   //
   // 되묻지 않고 여기까지 오는가. 위 흐름은 **번들 Profile 이름을 이미 아는 사람**의
   // 경로였고, URL만 받은 agent는 그 이름을 모른다. 그 상태에서 막힌 자리가 FAIL 회차의
@@ -298,15 +303,32 @@ try {
   )
   check('and names where the profile came from', zeroStatus?.profile?.origin === 'external')
 
-  // 5. READY는 **기술적 준비**다 — 바깥 gate가 막혀 있어도 로컬 세션 루프는 선다.
+  // 5. **여기가 setup의 끝이다.** 예전에는 세션을 하나 발급해 초록 줄을 만들었는데,
+  //    그것은 없는 계약을 지어내는 것이었다 — 이 저장소에는 아직 아무 업무도 없다.
+  //    READY가 곧 "세션 루프가 선다"는 뜻이고, 그것을 시연으로 다시 증명하지 않는다.
   check('gates are blocked on this bare machine', (zeroStatus?.gates ?? []).some((gate) => gate.state === 'BLOCKED'))
-  const zeroIssue = zero('asc', [
-    'session', 'issue', 'S-20260827-90',
-    '--role', 'implementer', '--goal', 'URL 하나에서 여기까지',
-    '--boundary', 'src/**', '--criteria', 'N1', '--criteria', 'N2',
-  ])
-  check('a session is issued anyway', zeroIssue.code === 0, zeroIssue.stderr)
-  check('and starts', zero('asc', ['session', 'start', 'S-20260827-90']).code === 0)
+  check('setup created no session', /No sessions/.test(zero('asc', ['session', 'list']).stdout))
+
+  // 대신 **실제 업무가 들어왔다면** 어디까지 자동으로 가는지를 본다. 계약은 재기만 하고
+  // 발급하지 않는다 — 초안 검증과 발급은 다른 행동이다.
+  const drafted = asJson(
+    zero('asc', [
+      'session', 'plan', '--json',
+      '--id', 'S-20260828-01', '--role', 'implementer', '--goal', 'the work item requirement',
+      '--boundary', 'src/**', '--criteria', 'acceptance', '--criteria', 'tests pass',
+      '--provenance', 'id=FACT:user', '--provenance', 'goal=FACT:work_item',
+    ]),
+  )
+  check('a well-grounded draft is issuable with no question', drafted?.status === 'READY_TO_ISSUE', JSON.stringify(drafted?.unresolved))
+  check('and it says which values were read rather than guessed', (drafted?.facts ?? []).length === 2)
+  // 계약이 성립해도 발급은 사람의 것이다 (OM §450). 위임하지 않은 이 Profile에서는
+  // 실행 목록이 비어 있고 명령은 사람에게 간다.
+  check(
+    'issuing it is still the Controller’s',
+    drafted?.issuance?.authority === 'controller' && (drafted?.actions ?? []).length === 0 && Boolean(drafted?.forController),
+    JSON.stringify(drafted?.issuance),
+  )
+  check('planning still created no session', /No sessions/.test(zero('asc', ['session', 'list']).stdout))
 
   const zeroFiles = (await readdir(zeroWork)).filter((f) => f !== '.git')
   check('the repository is still untouched', zeroFiles.length === 1 && zeroFiles[0] === 'README.md', zeroFiles.join(', '))

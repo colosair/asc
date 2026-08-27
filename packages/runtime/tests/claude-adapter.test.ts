@@ -629,6 +629,9 @@ describe('worker 계약문(1층)과 skill', () => {
     assert.match(text, /asc proceed --json/)
     assert.match(text, /Do not pick one yourself/)
     assert.match(text, /Never issue automatically/)
+    // 발급 권한은 사람의 것이되, Controller가 역할 범위로 위임할 수 있다 (OM §450 해석).
+    assert.match(text, /issuance\.authority/)
+    assert.match(text, /never create a session just to show that setup worked/)
     assert.match(text, /are \*\*information only\*\*/)
     assert.match(text, /not an independent verifier PASS/)
     assert.match(text, /transitions go through the asc CLI \(SessionRuntime\)/)

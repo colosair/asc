@@ -208,14 +208,10 @@ describe('P0 — 제로베이스 경로 (CLI)', () => {
       assert.deepEqual(status.profile, { id: 'fixture', origin: 'external' })
 
       // READY는 **기술적 준비**다 — 바깥으로 나가는 gate가 막혀 있어도 로컬 세션 루프는 선다.
+      // 그것을 세션 하나 발급해서 다시 증명하지 않는다. 여기에는 아직 아무 업무도 없고,
+      // `--goal check` 같은 값은 계약이 아니라 초록 줄을 만들려고 지어낸 문자열이다.
       assert.ok(status.gates.some((gate: { state: string }) => gate.state === 'BLOCKED'))
-      const issued = run(repo, env, [
-        'session', 'issue', 'S-20260827-01',
-        '--role', 'implementer', '--goal', 'check',
-        '--boundary', 'src/**', '--criteria', 'N1', '--criteria', 'N2',
-      ])
-      assert.equal(issued.status, 0, issued.stderr)
-      assert.equal(run(repo, env, ['session', 'start', 'S-20260827-01']).status, 0)
+      assert.match(run(repo, env, ['session', 'list']).stdout, /No sessions/, 'attach가 세션을 만들었다')
     } finally {
       await cleanup()
     }

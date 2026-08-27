@@ -82,7 +82,7 @@ and the remedy.
 |---|---|
 | STARTED / RESUMED / CONTINUE_ACTIVE | read contract, checkpoint and doneCriteria, then start. If there is a checkpoint, continue from that point |
 | NEEDS_SELECTION | show the candidates to the person as they are and let them choose. **Do not pick one yourself** |
-| PROPOSE_CONTRACT | present the draft (goal/role) and show the issuing command. When proposing a write boundary, check it first with \`asc preflight\`. **Never issue automatically** — issuance is the Controller's, meaning a person's |
+| PROPOSE_CONTRACT | fill in what the request, the work item and the profile actually support, then check it with \`asc session plan --json\` — it answers READY_TO_ISSUE, NEEDS_DECISION or INVALID and writes nothing. Mark each value with \`--provenance <field>=FACT\|PROPOSAL:<source>\`. On NEEDS_DECISION ask about the one field it names, with its options and recommendation. **Never invent a goal, a boundary or acceptance to fill a gap**, and never create a session just to show that setup worked. **Never issue automatically on a READY_TO_ISSUE alone** — issuance is the Controller's, meaning a person's, unless \`issuance.authority\` says \`delegated\` for this role; when it says \`controller\`, hand them the command in \`forController\` and stop |
 | BLOCKED_CONFIG / BLOCKED_CANONICAL | show the printed reason and stop. Do not re-resolve or re-lock on their behalf |
 | FAILED | show reason and detail to the person |
 

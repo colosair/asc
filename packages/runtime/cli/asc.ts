@@ -84,6 +84,13 @@ import {
 } from '../core/distribution/runtime-select.ts'
 import { portableCommand, shorthandCommand } from '../core/distribution/release.ts'
 import { preflight, type PreflightTarget } from '../core/operator/preflight.ts'
+import {
+  DraftProvenance,
+  issueArgs,
+  planSessionContract,
+  type DraftField,
+  type SessionContractDraft,
+} from '../core/operator/contract-draft.ts'
 import { lookupAuthority, type OwnershipMap } from '../core/policy/ownership.ts'
 import { renderProgress } from '../core/operator/render.ts'
 import {
@@ -171,6 +178,9 @@ const USAGE = `asc — Agent Session Control
   asc setup apply  [--profile <id>] [--scope local|project] [--json]
   asc setup apply --json   # non-interactive apply. stdout is a single JSON document
 
+  asc session plan  [--id <S-ID>] [--role <role>] [--goal <text>] [--boundary <glob>...]
+                    [--criteria <text>...] [--owner <role>] [--provenance <f>=<STATUS>[:<src>]...]
+                    [--json]        # is this draft issuable? changes nothing
   asc session issue <ID> --role <role> --goal <text> [--block <id>]
                          [--parent <S-ID>] [--issued-by <principal>]
   asc session pause  <S-ID> --position <t> --next <t> [--physical <id>]
@@ -483,6 +493,8 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
   ownership: { type: 'string', multiple: true },
   verification: { type: 'string', multiple: true },
   why: { type: 'string', multiple: true },
+  /** 초안의 출처 — `<field>=<FACT|PROPOSAL|DECISION_REQUIRED>[:<source>]` (session plan). */
+  provenance: { type: 'string', multiple: true },
   offline: { type: 'boolean', default: false },
   id: { type: 'string' },
   intent: { type: 'string' },
@@ -2034,6 +2046,105 @@ function parseAuthority(
   return { ok: true, map }
 }
 
+/**
+ * 초안을 재 본다. **아무것도 발급하지 않는다** (C-14 §6의 plan/apply 분리와 같은 자세).
+ *
+ * agent가 사용자 요청·work item·Profile·저장소를 읽어 계약 초안을 만들고, 여기서 그것이
+ * 구조·경계로 성립하는지 확인한다. 판정은 셋뿐이다 — 발급해도 된다 / 사람이 정할 것이
+ * 남았다 / 이 초안으로는 계약이 안 된다.
+ */
+async function runSessionPlan(
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  resolved?: ResolvedRuntime,
+): Promise<number> {
+  const authority = parseAuthority(values.authority as string[] | undefined)
+  if (!authority.ok) {
+    console.error(authority.detail)
+    return 2
+  }
+
+  // 출처는 `<field>=<status>[:<source>]` 로 받는다 — 초안을 만든 쪽이 무엇을 확인했고
+  // 무엇을 제안했는지 스스로 적게 한다. 적지 않으면 제안으로 셈한다(사실로 올리지 않는다).
+  const provenance: DraftField[] = []
+  for (const raw of (values.provenance as string[] | undefined) ?? []) {
+    const [field, rest] = raw.split('=', 2)
+    const [status, source] = (rest ?? '').split(':', 2)
+    const parsed = DraftProvenance.safeParse({
+      field,
+      status,
+      source: source ?? 'agent_proposal',
+      ...(values.why ? { reason: (values.why as string[])[0] } : {}),
+    })
+    if (!parsed.success) {
+      console.error(`--provenance 는 <field>=<FACT|PROPOSAL|DECISION_REQUIRED>[:<source>] 형식이다: '${raw}'`)
+      return 2
+    }
+    provenance.push(parsed.data)
+  }
+
+  const draft: SessionContractDraft = {
+    ...(values.id ? { id: values.id as string } : {}),
+    ...(values.role ? { role: values.role as string } : {}),
+    ...(values.goal ? { goal: values.goal as string } : {}),
+    ...(values.boundary ? { boundary: values.boundary as string[] } : {}),
+    ...(values.criteria ? { criteria: values.criteria as string[] } : {}),
+    ...(values.owner ? { owner: values.owner as string } : {}),
+    ...(values.domain ? { decisionDomains: values.domain as string[] } : {}),
+    ...(Object.keys(authority.map).length > 0 ? { decisionAuthority: authority.map } : {}),
+    ...(provenance.length > 0 ? { provenance } : {}),
+  }
+
+  const plan = planSessionContract({
+    draft,
+    ...(resolved?.resolved.policy ? { policy: resolved.resolved.policy } : {}),
+    ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
+    existingIds: (await store.list('session')).map((session) => session.id),
+  })
+
+  // 통과했을 때만 실행 가능한 명령을 준다. 통과하지 않은 초안의 명령을 함께 주면
+  // agent는 그것을 "고치고 나서 쓸 것"이 아니라 "지금 쓸 것"으로 읽는다.
+  //
+  // 그리고 **완성된 계약이라고 해서 발급해도 되는 것은 아니다** (OM §450). 위임이 없으면
+  // 명령은 `forController` 로 간다 — actions에 넣으면 "portable을 실행하라"는 지시를 따르는
+  // agent가 사람의 권한을 대신 쓰게 된다.
+  const issuable = plan.status === 'READY_TO_ISSUE'
+  const command = {
+    display: shorthandCommand(issueArgs(draft)),
+    portable: shorthandCommand([...issueArgs(draft), '--json']),
+  }
+  const actions = issuable && plan.issuance.authority === 'delegated' ? [{ type: 'issue_session' as const, ...command }] : []
+  const forController = issuable && plan.issuance.authority === 'controller' ? command : undefined
+
+  if (values.json || values.agent) {
+    console.log(
+      JSON.stringify(
+        { ...plan, nextActions: actions.map((action) => action.portable), actions, ...(forController ? { forController } : {}) },
+        null,
+        2,
+      ),
+    )
+  } else {
+    console.log(`${plan.status}${plan.draft.id ? ` — ${plan.draft.id}` : ''}`)
+    for (const fact of plan.facts) console.log(`  fact      ${fact.field} (${fact.source})`)
+    for (const proposal of plan.proposals) console.log(`  proposal  ${proposal.field} — ${proposal.reason ?? proposal.source}`)
+    for (const item of plan.invalid) console.log(`  invalid   ${item.field}: ${item.detail}`)
+    for (const item of plan.unresolved) {
+      console.log(`  decide    ${item.field} [${item.reason}]: ${item.detail}`)
+      for (const [index, option] of (item.options ?? []).entries()) {
+        console.log(`              ${index + 1}. ${option}${item.recommended === index ? '   ← recommended' : ''}`)
+      }
+    }
+    for (const action of actions) console.log(`\nIssue it: ${action.display}`)
+    if (forController) {
+      console.log(`\nThe contract holds. Issuing it is the Controller's — ${plan.issuance.detail}:`)
+      console.log(`  ${forController.display}`)
+    }
+  }
+  // 사람이 정할 것이 남았거나 초안이 성립하지 않으면 1이다 — setup plan과 같은 규칙.
+  return plan.status === 'READY_TO_ISSUE' ? 0 : 1
+}
+
 async function runSession(
   command: string | undefined,
   target: string | undefined,
@@ -2064,6 +2175,10 @@ async function runSession(
     }
     return 0
   }
+
+  // `plan` 은 **아직 세션이 없을 때** 부르는 것이므로 id를 요구하지 않는다. 초안에 id가
+  // 없다는 사실 자체가 판정 대상이다 (없으면 그것이 unresolved로 나온다).
+  if (command === 'plan') return runSessionPlan(values, store, resolved)
 
   if (!target) {
     console.error(`Usage: asc session ${command ?? '<command>'} <SESSION_ID>`)

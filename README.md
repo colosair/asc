@@ -16,8 +16,9 @@ approved execution grant. Everything is auditable afterwards.
 > version** — `@latest` or an older pin is a runtime nobody tested these instructions
 > against.
 
-> **Coding agent?** Read [AGENTS.md](AGENTS.md) — it is the ordered path from this URL to a
-> working session, with the decisions already made.
+> **Coding agent?** Read [AGENTS.md](AGENTS.md) — the ordered path from this URL to a ready
+> control plane, with the decisions already made, and the rules for turning a work request
+> into a session contract once there is real work.
 
 > Korean: [README.ko.md](README.ko.md). This file is canonical.
 

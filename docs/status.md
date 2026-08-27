@@ -4,11 +4,17 @@
 > This file is the **public single source of truth for product status**. It describes the
 > product, not any project ASC has been pointed at.
 
-Current release: **v0.2.1** — published to npm. v0.2.0 proved an agent could go from a
-repository URL to a running session; re-running that on a real machine, the host refused to
-execute the bootstrap command before any ASC code ran. v0.2.1 is about what sits before ASC:
-one canonical agent command, a named boundary for a host that will not run it, a
-deterministic answer about Node, and the executionMode defect closed.
+Current release: **v0.2.1** — published to npm. v0.2.0 got an agent from a repository URL to
+an attached control plane; re-running that on a real machine, the host refused to execute
+the bootstrap command before any ASC code ran. v0.2.1 is about what sits before ASC: one
+canonical agent command, a named boundary for a host that will not run it, a deterministic
+answer about Node, and the executionMode defect closed.
+
+In development on `main`: **setup and work are separated.** Setup ends at `attachment:
+READY` — a session is no longer created to demonstrate that installation worked, because a
+session is a contract about real work and there is none at install time. When real work does
+arrive, `asc session plan` validates the contract an agent drafts from it, marking which
+values were read and which were inferred. Not published yet.
 
 Nothing below is dated by a release — it says what is true now.
 
@@ -45,13 +51,23 @@ Current standing:
 
 ```text
 3-OS CI (ubuntu · macOS · windows)          TEST_VERIFIED
-Zero-base agent path — a repository URL,    RUNTIME_OBSERVED — `npx` the published
+Zero-base setup path — a repository URL,    RUNTIME_OBSERVED — `npx` the published
   no profile name, through adopt · attach     0.2.1 bootstrap into a machine with
-  · READY · a started session                 nothing installed, against a project ASC
+  · attachment READY                          nothing installed, against a project ASC
                                               had never seen. Every command after the
                                               first came from the previous command's
-                                              JSON, unedited. Also TEST_VERIFIED on
-                                              tarballs, in CI.
+                                              JSON, unedited. Driven by a person
+                                              following the runbook. Also TEST_VERIFIED
+                                              on tarballs, in CI.
+Two-URL run under a coding agent            NOT PASSED as pure auto mode. The agent found
+  in automatic mode                           the right path on its own and classified the
+                                              refusal correctly, but Claude Code's
+                                              automatic mode blocked ASC before the
+                                              process started, and a person had to switch
+                                              the permission mode before it could
+                                              continue. Recognising the boundary and
+                                              recovering through it is RUNTIME_OBSERVED;
+                                              completing without a human is not.
 Node below the supported floor stops        RUNTIME_OBSERVED — the published artifact on
   instead of half-working                     Node 22 answers NODE_RUNTIME_REQUIRED and
                                               names the newer Node already installed.
@@ -75,6 +91,13 @@ Multi-agent orchestration end to end        DOGFOOD_VERIFIED (development checko
 Distribution dogfood            NOT OBSERVED — a real multi-agent task driven by the
                                 published package, not by a development checkout.
                                 Installing cleanly is not the same as being used.
+Pure auto-mode Two-URL          NOT OBSERVED — see above. The one run that reached READY
+                                needed a person to change the host's permission mode
+                                first, so it does not demonstrate this and is not
+                                recorded as though it does.
+True zero-base JAM              NOT OBSERVED — JAM reached ready in the same run, but on
+                                a machine that already carried JAM state. A fresh-state
+                                run is a different claim.
 Approval routing over a real    WAITING_FOR_CREDENTIAL — implemented; the end-to-end
   messenger server (B-13)       run needs a server and credentials we do not have
 Coverage health against a real  WAITING_FOR_CREDENTIAL — same shape: code complete,
