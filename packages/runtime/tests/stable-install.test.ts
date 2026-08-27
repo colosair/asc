@@ -57,6 +57,8 @@ function fakeRunner(opts: {
 }
 
 const state = (over: Partial<SetupState> = {}): SetupState => ({
+  // 이 파일의 관심사는 bootstrap이 설치를 어떻게 계획하는가다 — 그쪽 진입이 기본값이다.
+  entry: 'bootstrap',
   projectRoot: '/tmp/project',
   git: true,
   profileCandidates: ['pilot-local'],
@@ -144,6 +146,23 @@ describe('B-70 Gate — plan이 설치를 드러낸다 (불변식 ⑩)', () => {
   it('runtime 축을 넘기지 않으면 그리지 않는다 — 설치된 runtime은 자기를 다시 설치하지 않는다', () => {
     const plan = computeSetupPlan(state())
     assert.equal(plan.changes.some((c) => c.target === 'runtime-install'), false)
+  })
+
+  // v0.2.0 registry 관측이 찾은 결함. 설치된 `asc` 로 부른 plan이 자기를 bootstrap이라고
+  // 말해서, agent에게 `npx …` 를 돌려줬다 — 이미 설치돼 있는데 network가 필요한 형태를.
+  // 진입점이 곧 답이므로 관측할 것이 아니다.
+  it('설치된 asc로 들어왔으면 축이 없어도 installed-runtime이다', () => {
+    const plan = computeSetupPlan(state({ entry: 'runtime' }))
+    assert.equal(plan.executionMode, 'installed-runtime')
+    for (const action of plan.actions) {
+      assert.match(action.portable, /^asc /, '설치돼 있는데 npx 형태를 줬다')
+      assert.doesNotMatch(action.portable, /npx/)
+    }
+    for (const command of plan.nextActions) assert.match(command, /^asc /)
+  })
+
+  it('bootstrap으로 들어왔고 설치가 없으면 bootstrap이다', () => {
+    const plan = computeSetupPlan(state({ stableRuntime: runtime('NOT_INSTALLED') }))
     assert.equal(plan.executionMode, 'bootstrap')
   })
 
@@ -262,6 +281,8 @@ describe('B-70 Gate — invocation portability (C-14 §3.4, 불변식 ⑯)', () 
       assert.doesNotMatch(action.portable, /^asc /, 'fresh machine에서 실행되지 않는 명령을 줬다')
       assert.ok(action.portable.startsWith(`npx --yes ${BOOTSTRAP_SPEC}`))
       assert.match(action.display, /^asc /, '사람이 읽는 형태는 짧아야 한다')
+      // agent가 그대로 실행하는 형태다 — 답이 기계가 읽는 것으로 돌아와야 한다.
+      assert.match(action.portable, /--json$/, 'agent에게 산문으로 답하는 명령을 줬다')
     }
     for (const command of plan.nextActions) assert.doesNotMatch(command, /^asc /)
   })
@@ -279,7 +300,8 @@ describe('B-70 Gate — invocation portability (C-14 §3.4, 불변식 ⑯)', () 
       }),
     )
     assert.equal(plan.executionMode, 'installed-runtime')
-    for (const action of plan.actions) assert.equal(action.portable, action.display)
+    // 같은 명령이되 portable은 기계가 읽는 형태로 끝난다 — 사람 형태에 `--json` 을 붙이지 않는다.
+    for (const action of plan.actions) assert.equal(action.portable, `${action.display} --json`)
   })
 
   it('두 형태를 만드는 곳이 하나다', () => {

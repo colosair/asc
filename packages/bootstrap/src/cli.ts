@@ -9,13 +9,15 @@
 // 하는데, 그 한 줄이 곧 "설치까지 해 준다"는 뜻은 아니다. 설치는 plan에 적힌 변경이고
 // apply가 한다 (C-14 §3).
 
-import { runAscCommand } from '@asc-agent/runtime'
+// 버전은 runtime이 들고 있는 하나에서 온다 — 여기서 손으로 적으면 릴리스마다 갈라진다.
+import { BOOTSTRAP_SPEC, runAscCommand } from '@asc-agent/runtime'
 
 const USAGE = `asc-bootstrap — first run for ASC (Agent Session Control)
 
-  npx --yes @asc-agent/bootstrap@0.2.0 init            install the runtime and attach
-  npx --yes @asc-agent/bootstrap@0.2.0 setup plan --json    what would change; changes nothing
-  npx --yes @asc-agent/bootstrap@0.2.0 profile adopt --json  make a profile for this repository
+  npx --yes ${BOOTSTRAP_SPEC} setup apply --json     install, attach, and answer in JSON
+  npx --yes ${BOOTSTRAP_SPEC} setup plan --json      what would change; changes nothing
+  npx --yes ${BOOTSTRAP_SPEC} profile adopt --json   make a profile for this repository
+  npx --yes ${BOOTSTRAP_SPEC} init                   the same first run, for a person to read
 
 \`init\` is \`setup apply\`. It stops without changing anything when something
 is left for you to answer.

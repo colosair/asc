@@ -9,7 +9,7 @@ Prerequisite: **Node 24 or newer** (`node --version`). Nothing else.
 
 ```bash
 # 1. first run — installs the runtime on this machine
-npx --yes @asc-agent/bootstrap@0.2.0 init
+npx --yes @asc-agent/bootstrap@0.2.1 init
 
 # 2. your team's profile, in your own directory
 mkdir -p ~/.asc/profiles/<profile-id>

@@ -85,12 +85,24 @@ for (const path of executableSurfaces) {
 // AGENTS.md도 여기 있어야 한다 — agent가 실제로 실행하는 명령이 적힌 문서이므로, 핀이
 // 어긋나면 사람이 아니라 자동화가 틀린 버전을 설치한다.
 const docs = ['README.md', 'README.ko.md', 'AGENTS.md', 'packages/runtime/README.md', 'packages/bootstrap/README.md']
+// 코드가 만들어 내는 명령 문자열도 같은 규칙을 받는다. skill 본문은 사용자의
+// `~/.claude/skills/` 에 **실제로 쓰이는** 것이라 여기서 뒤처지면 사용자가 그 명령을
+// 실행한다 — 0.2.0 회차에 `@0.1.0` 을 들고 있었고 아무도 잡지 못했다.
+const emitters = ['packages/runtime/adapters/claude-code/skill.ts', 'packages/bootstrap/src/cli.ts']
 const staleSpec = new RegExp(`${SCOPE}/(runtime|bootstrap)@(?!${version.replace(/\./g, '\\.')})[0-9]`, 'g')
-for (const path of docs) {
+for (const path of [...docs, ...emitters]) {
   const source = await text(path)
   const stale = source.match(staleSpec)
   check(stale === null, `documented exact spec matches ${version} in ${path}`, stale?.join(', ') ?? '')
   check(!source.includes(`${SCOPE}/runtime@latest`), `no @latest in ${path}`)
+}
+
+// ── the agent-facing surface names one canonical form ──────────────────────
+// `--agent` 는 계속 동작하지만(호환) 문서·산출물에서는 사라졌다. `--json` 이 같은 것을
+// 더 단순하게 말하고, 진입 표면이 둘이면 agent가 무엇이 정본인지 고르게 된다.
+for (const path of [...docs, ...emitters]) {
+  const source = await text(path)
+  check(!source.includes('--agent'), `no --agent in the agent-facing surface: ${path}`)
 }
 
 // ── retired scope is gone from current surfaces ────────────────────────────

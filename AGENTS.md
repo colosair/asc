@@ -32,27 +32,79 @@ a git checkout instead. Those are runtimes nobody tested these instructions agai
 the person who asked you needs to know the release has not happened yet — that is a real
 answer, not a failure.
 
+## Two boundaries sit before ASC
+
+Everything below the next section assumes an ASC process actually started. Two things can
+stop that from happening, and neither of them can be reported by ASC — there is no ASC
+running to report it. Recognise them by the situation, not by matching an error string.
+
+### The host will not run the command — `HOST_EXECUTION_PERMISSION_REQUIRED`
+
+Your host refused to execute the command before any ASC code ran. This is not an ASC
+defect, not a setup decision, and not a secret. It is a permission boundary, and it is one
+of the three things a human is here for.
+
+What to do, in order:
+
+1. **Do not try the same thing in another shape.** Not a different wrapper, not an absolute
+   path, not a `PATH=` prefix, not another package manager. If the host is refusing to
+   start the process, every variant is the same request wearing a hat, and a pile of denied
+   attempts is worse evidence than one clear denial.
+2. Do not paraphrase or "simplify" the command. It goes to the person exactly as written.
+3. Show them the exact command, and say plainly that the host blocked it before ASC ran.
+4. Ask for **one** allow rule scoped to that exact command. In Claude Code, a project or
+   user permission rule of the form `Bash(<the exact command>)`. Never a wildcard, never
+   `npx:*` or `npm:*`, never blanket shell access. ASC does not write to
+   `~/.claude/settings.json` or any host config — granting the rule is the person's action,
+   in their own interface.
+5. Once it is granted, run **the same command again**, once. Then continue from where you
+   were. If a later `actions[].portable` is blocked too, it gets its own exact rule by the
+   same pattern.
+
+### This Node cannot run ASC — `NODE_RUNTIME_REQUIRED`
+
+ASC needs Node 24 or newer, and it says so instead of half-working. If ASC did start and
+answered with this code, read `candidates`: it lists newer Node runtimes already on the
+machine, each with a `use_node_runtime` action whose `portable` runs the same canonical
+command under that Node for this invocation only. It changes no profile, no `PATH` on disk,
+nothing outside that one command.
+
+Run it if the host allows it. **If the host refuses to run that form, do not go looking for
+another one** — that is `HOST_EXECUTION_PERMISSION_REQUIRED` above, and it is handled
+there. If `candidates` is empty, installing Node is the person's to do: say which version
+is needed and stop.
+
+### Three kinds of outcome, everywhere below
+
+```text
+human boundary   stop and ask — secrets, permissions, irreversible actions
+self-heal        the JSON handed you a portable command; run it and carry on
+hard fault       report it; do not retry it in a different shape
+```
+
 ## The path
 
 Run `actions[].portable` from the JSON you get back. Branch on `code`. Never parse prose.
+Every portable answers in JSON — that is why they end in `--json`.
 
 **1 — first run.** No `asc` exists yet, so start from the bootstrap:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.2.0 init --agent
+npx --yes @asc-agent/bootstrap@0.2.1 setup apply --json
 ```
 
-This installs the runtime and attaches, in one pass. `--agent` is the non-interactive
-form: `stdout` is a single JSON document, everything else goes to `stderr`. It changes
-nothing and exits `1` when something is genuinely left to decide — including the case in
-step 2.
+This is the canonical entry, and the only one you need to remember. `setup plan --json`
+answers the same question without changing anything; `apply` is what carries out the plan,
+and it carries out nothing that was not in it. `stdout` is a single JSON document,
+everything else goes to `stderr`. It changes nothing and exits `1` when something is
+genuinely left to decide — including the case in step 2.
 
 **2 — a profile for this project.** If the plan comes back with
 `code: "ASC_PROFILE_SELECTION_REQUIRED"`, the packaged profiles are examples and none of
 them describes this project. Run the `adopt_profile` action's `portable` command:
 
 ```bash
-asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.2.0 profile adopt --json
+asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.2.1 profile adopt --json
 ```
 
 It reads this repository's git remote and writes `~/.asc/profiles/<id>/profile.json` — in
@@ -67,7 +119,7 @@ If a profile file was handed to you instead, place it at
 **3 — attach.**
 
 ```bash
-asc setup apply --profile <id> --agent
+asc setup apply --profile <id> --json
 ```
 
 `changesApplied: true` and `remaining: []` means it is done and idempotent.
@@ -114,3 +166,7 @@ says is still blocked, and which `warnings` from adopt the team needs to answer.
   `--scope project` is a team's explicit decision, never yours.
 - Fill a profile's canonical sources or role boundaries with plausible-looking values.
 - Ask for, store, or enter a credential. Gates that need one stay blocked, and you say so.
+- Retry a host-blocked command in a different shape, or ask for a permission rule wider
+  than the one command that was blocked.
+- Edit a host's settings or a shell profile to make something run. That is the person's
+  interface, not yours.

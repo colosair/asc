@@ -9,11 +9,17 @@
 
 import { execFile, spawnSync } from 'node:child_process'
 import { parseArgs, promisify } from 'node:util'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import {
+  MINIMUM_NODE_MAJOR,
+  checkNodeRuntime,
+  type NodeRuntimeCheck,
+  type NodeRuntimeDeps,
+} from '../core/distribution/node-runtime.ts'
 
 import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
@@ -163,7 +169,7 @@ const USAGE = `asc — Agent Session Control
   asc setup plan   [--profile <id>] [--scope local|project] [--json]
                         # says what it would change — changes nothing
   asc setup apply  [--profile <id>] [--scope local|project] [--json]
-  asc setup --agent     # non-interactive apply. stdout is a single JSON document
+  asc setup apply --json   # non-interactive apply. stdout is a single JSON document
 
   asc session issue <ID> --role <role> --goal <text> [--block <id>]
                          [--parent <S-ID>] [--issued-by <principal>]
@@ -360,6 +366,13 @@ const DECISION_ERROR: Record<string, string> = {
 export type AscEntry = 'runtime' | 'bootstrap'
 
 /**
+ * bootstrap이 자기 USAGE에 적을 값. **거기서 손으로 적지 않게 하려고 내보낸다** —
+ * 두 패키지가 각자 버전 문자열을 들면 릴리스마다 한쪽이 뒤처지고, 그 지연은 곧
+ * 사용자가 실행하는 명령이 된다 (0.2.0 회차의 skill.ts가 그랬다).
+ */
+export { BOOTSTRAP_SPEC } from '../core/distribution/release.ts'
+
+/**
  * CLI 한 번의 실행. **다른 진입도 이 함수를 부른다** (C-14 불변식 ①).
  *
  * bootstrap 패키지는 아직 아무것도 설치되지 않은 machine에서 이것을 그대로 부른다 —
@@ -391,6 +404,60 @@ function explainConfigError(error: unknown): string | null {
   }
   if (error instanceof SyntaxError) return `That profile is not valid JSON — ${error.message}`
   return null
+}
+
+/** 실제 파일시스템·프로세스를 물린다. Core는 이 중 아무것도 직접 하지 않는다. */
+function nodeRuntimeDeps(): NodeRuntimeDeps {
+  return {
+    version: process.version,
+    exists: (path) => existsSync(path),
+    list: (path) => {
+      try {
+        return readdirSync(path)
+      } catch {
+        // 없는 디렉터리는 "후보 없음"이다. 이 machine에 그 배치가 없을 뿐이다.
+        return []
+      }
+    },
+    run: nodeProcessRunner,
+    home: homedir(),
+    join,
+  }
+}
+
+/**
+ * 못 돌린다는 사실과, 이 machine에서 실제로 쓸 수 있는 것을 함께 준다.
+ *
+ * 후보가 있으면 **같은 canonical 명령을 그 Node로 돌리는 형태**를 낸다 — 이것은 per-invocation
+ * 환경변수이지 PATH·profile 수정이 아니다 (불변식 ⑰). 이 형태마저 host가 실행을 거부하면
+ * 그때는 ASC의 문제가 아니라 host 경계이며, AGENTS.md가 그 자리를 정의한다.
+ */
+function reportNodeRuntime(check: Extract<NodeRuntimeCheck, { ok: false }>, asJson: boolean): void {
+  const actions = check.candidates.map((candidate) => ({
+    type: 'use_node_runtime' as const,
+    display: `PATH="${dirname(candidate.path)}:$PATH" ${shorthandCommand(['setup', 'apply', '--json'])}`,
+    portable: `PATH="${dirname(candidate.path)}:$PATH" ${portableCommand(['setup', 'apply', '--json'])}`,
+    node: candidate,
+  }))
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          code: check.code,
+          detail: check.detail,
+          runtime: { node: process.execPath, version: check.version, required: `>=${MINIMUM_NODE_MAJOR}` },
+          candidates: check.candidates,
+          nextActions: actions.map((action) => action.portable),
+          actions,
+        },
+        null,
+        2,
+      ),
+    )
+    return
+  }
+  console.error(check.detail)
+  for (const action of actions) console.error(`  ${action.node.version} at ${action.node.path}\n    ${action.display}`)
 }
 
 export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime'): Promise<number> {
@@ -498,6 +565,18 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
   if (values.help || group === undefined) {
     console.log(USAGE)
     return 0
+  }
+
+  // **지원 하한을 먼저 답한다** (C-14 §3). `engines` 는 npm에게 하는 말이라 기본값에서
+  // 경고로만 나가고, 그러면 "경고 뒤에 그래도 돌아감"이 된다 — 사용자는 자기가 지원
+  // 범위 안인지 끝내 모른다. 여기서 한 번, 결정적으로 답한다.
+  //
+  // 이 자리인 이유: 설치된 `asc` 와 bootstrap이 **같은 문으로 들어온다**. bootstrap에
+  // 두면 그쪽에 정책이 생기고(C-14 불변식 ⑦), 그러면 두 진입의 답이 갈릴 수 있다.
+  const runnable = await checkNodeRuntime(nodeRuntimeDeps())
+  if (!runnable.ok) {
+    reportNodeRuntime(runnable, Boolean(values.json) || Boolean(values.agent))
+    return 1
   }
 
   // 선택된 build로 넘길 것이 있으면 여기서 넘긴다. **선택 자체를 다루는 명령은 넘기지
@@ -1029,7 +1108,7 @@ function declaredPolicies(resolved?: ResolvedRuntime): PolicyId[] {
   return declared
 }
 
-const ASC_VERSION = '0.2.0'
+const ASC_VERSION = '0.2.1'
 const CAPABILITIES = ['scm.github', 'state.markdown', 'approval.local']
 const ADAPTER_VERSIONS = { 'scm.github': ASC_VERSION, 'state.markdown': ASC_VERSION }
 
@@ -1182,6 +1261,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
   const scope = values.scope === 'project' ? 'project' : 'local'
   const hostReport = await verifyInstall(defaultPaths())
   return {
+    entry,
     projectRoot,
     git,
     ...(ascRoot ? { ascRoot } : {}),
@@ -1436,10 +1516,12 @@ async function runProfileAdopt(values: Record<string, unknown>, entry: AscEntry)
   // 다음 한 걸음은 두 형태로 준다 — agent는 portable, 사람은 display (C-14 불변식 ⑯).
   // 여기서는 설치 상태를 다시 관측하지 않는다: 이 명령이 도는 방식이 곧 그 답이다.
   const args = ['setup', 'apply', '--profile', adopted.id]
+  // portable은 agent가 그대로 실행한다 — 기계가 읽는 형태로 끝난다 (setup-plan.ts와 같은 규칙).
+  const machine = [...args, '--json']
   const action = {
     type: 'apply_setup' as const,
     display: shorthandCommand(args),
-    portable: entry === 'bootstrap' ? portableCommand(args) : shorthandCommand(args),
+    portable: entry === 'bootstrap' ? portableCommand(machine) : shorthandCommand(machine),
   }
   if (asJson) {
     console.log(

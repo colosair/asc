@@ -11,7 +11,7 @@ disagree, C-14 wins.
 
 > Entry may branch. Runtime resolution may branch. Nothing past that point may.
 
-A human typing `asc` and an agent calling `asc setup apply --agent` reach the same
+A human typing `asc` and an agent calling `asc setup apply --json` reach the same
 planner. A packaged install and a development checkout reach the same core. If two
 entry points need to behave differently, that difference belongs in a **plan**, never in
 a second implementation.
@@ -179,7 +179,7 @@ So each action carries both:
 ```jsonc
 { "type": "apply_setup",
   "display":  "asc setup apply",
-  "portable": "npx --yes @asc-agent/bootstrap@0.2.0 setup apply" }
+  "portable": "npx --yes @asc-agent/bootstrap@0.2.1 setup apply" }
 ```
 
 **An agent runs `portable`.** A person reads `display`. `executionMode` says which world

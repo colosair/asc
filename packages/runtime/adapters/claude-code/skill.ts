@@ -14,6 +14,11 @@
 // skill이 정하는 것은 다섯뿐이다 — 언제 어떤 표면을 부르는가 / 무엇을 모으는가 /
 // 무엇을 직접 판단하면 안 되는가 / depth를 언제 올리는가 / 언제 돌려주는가.
 
+// 버전은 **한 곳에서만** 온다. 손으로 적으면 릴리스마다 여기가 뒤처지고, 이 문자열은
+// 사용자의 `~/.claude/skills/` 에 실제로 쓰이므로 그 지연이 사용자의 명령이 된다 —
+// 0.2.0 회차에 이 파일이 `@0.1.0` 을 들고 있었다.
+import { BOOTSTRAP_SPEC } from '../../core/distribution/release.ts'
+
 /** 설치 단위. 파일이 늘어도 manifest 기반 설치·제거 계약은 그대로다 (C-05 §5). */
 export function skillBundle(): { name: string; text: string }[] {
   return [
@@ -47,8 +52,11 @@ The user does not need to know this sequence. This is the one the skill follows.
 \`\`\`text
 0. Is ASC even installed? If \`asc\` is not on PATH, this machine has no runtime yet.
      Start from the bootstrap, not from \`asc\`:
-       npx --yes @asc-agent/bootstrap@0.1.0 setup --agent
+       npx --yes ${BOOTSTRAP_SPEC} setup apply --json
      Its JSON carries \`actions[].portable\` — run that, never \`display\`.
+     If the host refuses to run that command at all, that is a permission boundary, not an
+     ASC failure: show the person the exact command and ask for it, and do not try other
+     shapes of the same thing. AGENTS.md in the repository carries the recipe.
 
 1. Attached?              asc setup status
      not yet  → asc init (it shows profile candidates; a person chooses)

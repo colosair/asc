@@ -1,6 +1,6 @@
 {
   "name": "asc-workspace",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "ASC (Agent Session Control) — workspace root",
   "type": "module",

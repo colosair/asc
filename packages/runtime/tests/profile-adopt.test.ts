@@ -199,7 +199,7 @@ describe('P0 — 제로베이스 경로 (CLI)', () => {
       const plan = JSON.parse(run(repo, env, ['setup', 'plan', '--json']).stdout)
       assert.ok(plan.profiles.includes('fixture'), '만든 것이 후보로 보여야 한다')
 
-      const applied = JSON.parse(run(repo, env, ['setup', 'apply', '--profile', 'fixture', '--agent']).stdout)
+      const applied = JSON.parse(run(repo, env, ['setup', 'apply', '--profile', 'fixture', '--json']).stdout)
       assert.equal(applied.changesApplied, true)
       assert.deepEqual(applied.remaining, [])
 
@@ -224,7 +224,7 @@ describe('P0 — 제로베이스 경로 (CLI)', () => {
   it('고를 Profile이 없으면 만드는 길을 함께 준다', async () => {
     const { repo, env, cleanup } = await scratch()
     try {
-      const out = run(repo, env, ['setup', 'apply', '--agent'])
+      const out = run(repo, env, ['setup', 'apply', '--json'])
       const plan = JSON.parse(out.stdout)
       assert.equal(plan.code, 'ASC_PROFILE_SELECTION_REQUIRED')
       const adopt = plan.actions.find((action: { type: string }) => action.type === 'adopt_profile')
@@ -244,7 +244,7 @@ describe('P0 — 제로베이스 경로 (CLI)', () => {
         ascHome: await snapshot(ascHome),
         home: await snapshot(home),
       }
-      const out = run(repo, env, ['setup', 'apply', '--agent'])
+      const out = run(repo, env, ['setup', 'apply', '--json'])
       assert.equal(out.status, 1)
       assert.deepEqual(JSON.parse(out.stdout).changesApplied, false)
 

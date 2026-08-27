@@ -11,6 +11,12 @@ given only the repository URL could not get past that. v0.2.0 is that gap closed
 live in `$ASC_HOME/profiles/`, `asc profile adopt` makes one from the repository you are
 in, and [AGENTS.md](../AGENTS.md) is the path from a URL to a running session.
 
+In development on `main`: **v0.2.1.** Re-running the two-URL path on a real machine, the
+host refused to execute the bootstrap command *before any ASC process started* — so ASC
+could not report anything at all. This release is about what sits before ASC: one canonical
+agent command, a named boundary for a host that will not run it, a deterministic answer
+about Node, and the executionMode defect closed. Not published yet.
+
 Nothing below is dated by a release — it says what is true now.
 
 ## What is implemented
@@ -76,15 +82,29 @@ Coverage health against a real  WAITING_FOR_CREDENTIAL — same shape: code comp
 Waiting for a credential is not the same as unfinished code. Neither is written down as
 done.
 
+## Not yet observed on 0.2.1
+
+```text
+Host classifier behaviour    the denial that started this release happens in a real
+                             auto-mode session, before ASC exists. Tests cannot reach it
+                             and will not be made to look as though they can. The
+                             candidate build is measured on a real Mac before publishing
+                             (docs/release/v0.2.1-checklist.md, "Host observation").
+                             The classifier is not deterministic — a read-only command
+                             was denied in the same session that allowed four others —
+                             so no single trial settles anything, and no cause is written
+                             down until the arms separate.
+Published two-URL run        a tarball is not the registry. Whatever the candidate shows,
+                             the onboarding claim is re-made against published 0.2.1.
+```
+
 ## After v0.2.0
 
 ```text
-executionMode under-reports  the installed `asc` always reports `executionMode:
-                             "bootstrap"`, so its `actions[].portable` hands back the
-                             `npx …` form when plain `asc …` would do. Observed on the
-                             registry run. It works — it is slower and needs a network
-                             it should not — and it is a 0.2.1 fix, because a published
-                             version is never re-published.
+executionMode under-reports  CLOSED in 0.2.1 (unreleased). The installed `asc` reported
+                             `executionMode: "bootstrap"` and handed back `npx …` when
+                             plain `asc …` would do. The entry point now decides it,
+                             which is what `profile adopt` already did.
 Public surface English II    the deep operational renderers (monitor, investigation,
                              digest, query, closure, preflight, resolver, entities) are
                              still Korean. The entry surface is English.

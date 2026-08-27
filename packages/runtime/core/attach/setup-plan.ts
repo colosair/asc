@@ -12,6 +12,15 @@ import type { StableInstallState } from '../distribution/runtime-install.ts'
 
 /** 세상의 스냅샷. 읽기만 해서 만든다. */
 export type SetupState = {
+  /**
+   * 이 판단이 **어느 실행물 안에서** 나오는가 (C-14 §3.4).
+   *
+   * `runtime` 이면 지금 도는 것이 곧 설치된 `asc` 다 — 그 사실은 관측할 것이 아니라
+   * 이미 아는 것이다. 예전에는 이 축이 없어 `stableRuntime` 의 부재를 "설치 안 됨"으로
+   * 읽었고, 그래서 설치된 `asc` 가 자기를 bootstrap이라고 말하며 agent에게 `npx …` 를
+   * 돌려줬다 (v0.2.0 registry 관측). 진입점 자체가 이미 답의 일부다.
+   */
+  entry: 'runtime' | 'bootstrap'
   projectRoot: string
   git: boolean
   /** 이미 붙어 있으면 그 runtime 뿌리. 없으면 안 붙은 것이다. */
@@ -107,12 +116,23 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
 
   // 지금 명령이 어디서 도는가. 설치된 `asc` 가 없으면 bootstrap이고, 그때 agent에게
   // `asc …` 를 실행하라고 주면 안 된다 (C-14 §3.4 · 불변식 ⑯).
+  //
+  // **진입점이 먼저다.** `asc` 로 들어왔다면 그 `asc` 는 이미 이 machine에 있다 — 그것을
+  // npm에게 물어볼 이유가 없다. bootstrap으로 들어왔을 때만 설치 축이 판정에 쓰인다.
   const mode: SetupPlan['executionMode'] =
-    state.stableRuntime?.status === 'CURRENT' ? 'installed-runtime' : 'bootstrap'
-  const command = (args: readonly string[]): { display: string; portable: string } => ({
-    display: shorthandCommand(args),
-    portable: mode === 'installed-runtime' ? shorthandCommand(args) : portableCommand(args),
-  })
+    state.entry === 'runtime' || state.stableRuntime?.status === 'CURRENT'
+      ? 'installed-runtime'
+      : 'bootstrap'
+  const command = (args: readonly string[]): { display: string; portable: string } => {
+    // portable은 **agent가 그대로 실행하는 것**이므로 기계가 읽을 수 있는 형태로 끝나야
+    // 한다. `--json` 이 빠져 있으면 agent는 자기가 실행한 명령의 답을 산문으로 받는다 —
+    // "산문을 파싱하지 마라"고 적어 놓고 산문을 주는 꼴이었다. display는 사람 형태 그대로.
+    const machine = args.includes('--json') ? args : [...args, '--json']
+    return {
+      display: shorthandCommand(args),
+      portable: mode === 'installed-runtime' ? shorthandCommand(machine) : portableCommand(machine),
+    }
+  }
 
   const changes: SetupChange[] = []
 

@@ -23,6 +23,7 @@ const CLI = join(import.meta.dirname, '..', 'cli', 'asc.ts')
 const ANSI = new RegExp(String.fromCharCode(27) + '\\[')
 
 const state = (over: Partial<SetupState> = {}): SetupState => ({
+  entry: 'bootstrap',
   projectRoot: '/tmp/project',
   git: true,
   profileCandidates: ['pilot-local'],
@@ -179,11 +180,11 @@ describe('B-69 Gate — agent 표면 (C-14 §7, 불변식 ⑫)', () => {
     }
   })
 
-  it('apply --agent 도 stdout은 JSON 하나이고, 저장소 footprint는 0이다', async () => {
+  it('apply --json 도 stdout은 JSON 하나이고, 저장소 footprint는 0이다', async () => {
     const { repo, env, cleanup } = await scratch()
     try {
       const before = await snapshot(repo)
-      const out = run(repo, env, ['setup', 'apply', '--profile', 'pilot-local', '--agent'])
+      const out = run(repo, env, ['setup', 'apply', '--profile', 'pilot-local', '--json'])
       const parsed = JSON.parse(out.stdout)
       assert.equal(parsed.changesApplied, true)
       assert.deepEqual(parsed.remaining, [], 'apply 뒤에는 남은 변경이 없어야 한다 (멱등)')
@@ -193,10 +194,25 @@ describe('B-69 Gate — agent 표면 (C-14 §7, 불변식 ⑫)', () => {
     }
   })
 
+  // `--agent` 는 문서에서 사라졌지만 **동작은 남는다.** 0.2.0을 읽고 그 형태를 저장해 둔
+  // agent가 다음 릴리스에서 갑자기 실패하면, 그것은 우리가 문서를 정리한 대가를 사용자가
+  // 무는 것이다. canonical은 `--json` 하나이고, 이 검사는 옛 형태가 살아 있음을 고정한다.
+  it('--agent 는 --json apply의 살아 있는 alias다 — 같은 판단, 같은 출력', async () => {
+    const { repo, env, cleanup } = await scratch()
+    try {
+      const viaAgent = run(repo, env, ['setup', 'apply', '--profile', 'pilot-local', '--agent'])
+      const viaJson = run(repo, env, ['setup', 'plan', '--profile', 'pilot-local', '--json'])
+      assert.equal(JSON.parse(viaAgent.stdout).status, 'applied')
+      assert.equal(JSON.parse(viaJson.stdout).status, 'already_configured', 'apply가 실제로 붙였어야 한다')
+    } finally {
+      await cleanup()
+    }
+  })
+
   it('사람이 답해야 하면 코드로 말한다 — 산문을 읽게 하지 않는다', async () => {
     const { repo, env, cleanup } = await scratch()
     try {
-      const out = run(repo, env, ['setup', 'apply', '--agent'])
+      const out = run(repo, env, ['setup', 'apply', '--json'])
       const parsed = JSON.parse(out.stdout)
       assert.equal(parsed.requiresUserAction, true)
       assert.equal(parsed.code, 'ASC_PROFILE_SELECTION_REQUIRED')

@@ -233,14 +233,22 @@ try {
   const beforeRepo = await treeOf(zeroWork)
   const beforeHome = await treeOf(zeroHome)
 
-  // 1. 첫 실행. AGENTS.md가 첫 줄로 주는 명령이 이것이다 — `--agent` 는 비대화 형태이고,
-  //    stdout은 JSON 문서 하나다.
-  const init = zero('asc-bootstrap', ['init', '--agent'])
+  // 1. 첫 실행. **AGENTS.md가 주는 canonical 명령 그대로다** — 문서와 여기가 갈리면
+  //    검사하는 것은 문서가 아니라 우리의 기억이 된다.
+  const init = zero('asc-bootstrap', ['setup', 'apply', '--json'])
   const initPlan = asJson(init)
-  check('bootstrap init answers with a plan, not a status rendering', initPlan !== null && Array.isArray(initPlan.changes))
+  check('the canonical entry answers with a plan, not a status rendering', initPlan !== null && Array.isArray(initPlan.changes))
   check(
     'it stops at the profile wall',
     initPlan?.code === 'ASC_PROFILE_SELECTION_REQUIRED' && initPlan?.requiresUserAction === true && init.code === 1,
+  )
+  // agent가 그대로 실행하는 형태다. 산문으로 답하는 명령을 주면 "산문을 파싱하지 마라"는
+  // 지시와 제품이 서로 어긋난다.
+  check(
+    'every portable answers in JSON, at the exact version',
+    (initPlan?.actions ?? []).length > 0 &&
+      (initPlan?.actions ?? []).every((action) => /^npx --yes @asc-agent\/bootstrap@\S+ .*--json$/.test(action.portable)),
+    (initPlan?.actions ?? []).map((a) => a.portable).join(' | '),
   )
   // 멈췄으면 **아무 데도 남기지 않는다.** setup apply가 알아서 그럴 것이라고 가정하지
   // 않는다 — init이 실제로 도는 경로를 여기서 본다 (저장소 · HOME · ASC_HOME · host 설정).
@@ -263,12 +271,31 @@ try {
   check('it says what it left empty', (adopt?.warnings ?? []).some((w) => /canonical\.sources/.test(w)))
 
   // 3. 그 Profile로 붙는다.
-  const zeroApply = asJson(zero('asc', ['setup', 'apply', '--profile', adopt?.id ?? 'fixture', '--agent']))
+  // adopt가 낸 다음 걸음도 그대로 실행한다 — 여기서도 우리가 명령을 짓지 않는다.
+  //
+  // 다만 **어느 진입으로 보내는지는 이 환경의 제약이다.** portable의 `npx …` 형태는
+  // registry에서 그 버전을 받아오는 것이고, 아직 게시되지 않은 candidate로 도는 여기서는
+  // 그것이 성립하지 않는다(그리고 성립하는 척하면 게시 전에 게시 후를 증명했다고 적게 된다).
+  // 문자열이 맞는지는 문자열로 확인하고, 실행은 설치된 같은 진입으로 보낸다. registry
+  // 경로의 관측은 9B — 게시 뒤에 따로 한다.
+  const applyPortable = adopt?.actions?.[0]?.portable ?? ''
+  const applyForwarded = /^npx --yes (@[^@\s]+\/[^@\s]+)@(\S+) (.+)$/.exec(applyPortable)
+  check("adopt's next step is machine-runnable", applyForwarded !== null && /--json$/.test(applyPortable), applyPortable)
+  const zeroApply = asJson(zero('asc', (applyForwarded?.[3] ?? '').split(' ')))
   check('attaching with the adopted profile', zeroApply?.changesApplied === true && zeroApply?.remaining?.length === 0)
 
   // 4. agent가 스스로 READY를 판정한다.
   const zeroStatus = asJson(zero('asc', ['setup', 'status', '--json']))
   check('status says READY', zeroStatus?.attachment === 'READY')
+
+  // 설치된 `asc` 는 자기를 bootstrap이라 말하지 않는다 (v0.2.0 registry 관측이 찾은 결함).
+  const installedPlan = asJson(zero('asc', ['setup', 'plan', '--json']))
+  check('the installed asc knows it is installed', installedPlan?.executionMode === 'installed-runtime')
+  check(
+    'and hands back asc commands, not npx',
+    (installedPlan?.actions ?? []).every((action) => action.portable.startsWith('asc ')),
+    (installedPlan?.actions ?? []).map((a) => a.portable).join(' | '),
+  )
   check('and names where the profile came from', zeroStatus?.profile?.origin === 'external')
 
   // 5. READY는 **기술적 준비**다 — 바깥 gate가 막혀 있어도 로컬 세션 루프는 선다.
