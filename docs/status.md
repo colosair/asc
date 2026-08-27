@@ -4,8 +4,8 @@
 > This file is the **public single source of truth for product status**. It describes the
 > product, not any project ASC has been pointed at.
 
-Current release: **v0.1.0 release candidate** — built, packaged, and verified on three
-operating systems. Not yet published to npm.
+Current release: **v0.1.0** — published to npm and installed from the registry into a
+throwaway machine state to check that the published path actually works.
 
 ## What is implemented
 
@@ -40,6 +40,9 @@ Current standing:
 
 ```text
 3-OS CI (ubuntu · macOS · windows)          TEST_VERIFIED
+Real registry distribution — `npx` the      RUNTIME_OBSERVED
+  published bootstrap into a zero state,
+  it installs the exact runtime globally
 Windows physical machine — npm global,      RUNTIME_OBSERVED
   `asc.cmd` resolution, new-process `asc`
 Installed ASC with no network — local       RUNTIME_OBSERVED
@@ -50,10 +53,9 @@ Multi-agent orchestration end to end        DOGFOOD_VERIFIED (development checko
 ## What is not claimed
 
 ```text
-Real registry distribution      NOT OBSERVED — nothing is published yet, so there is
-                                nothing to observe. Tarball evidence is not the same thing.
-Distribution dogfood            NOT OBSERVED — a real task driven by the published
-                                package, not by a development checkout
+Distribution dogfood            NOT OBSERVED — a real multi-agent task driven by the
+                                published package, not by a development checkout.
+                                Installing cleanly is not the same as being used.
 Approval routing over a real    WAITING_FOR_CREDENTIAL — implemented; the end-to-end
   messenger server (B-13)       run needs a server and credentials we do not have
 Coverage health against a real  WAITING_FOR_CREDENTIAL — same shape: code complete,
