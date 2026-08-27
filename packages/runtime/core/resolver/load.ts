@@ -17,12 +17,15 @@ import { join } from 'node:path'
 import { OperationalPreset, ProfileLock, ProjectProfile, UserOverride } from '../../schemas/profile.ts'
 import type { MonitorConfig } from '../monitor/signals.ts'
 import type { OwnershipMap } from '../policy/ownership.ts'
+import { resolveProfileLocation, type ProfileOrigin } from './profile-source.ts'
 import { resolveProfile, type ConfigLayer, type ResolvedProfile } from './resolve.ts'
 import { satisfies } from './version.ts'
 
 export type LoadedLayers = {
   profile: ProjectProfile
   profileSource: string
+  /** 그 Profile이 어디서 왔는가 — 배포본 안인가, 사용자 소유 공간인가. */
+  profileOrigin: ProfileOrigin
   preset?: OperationalPreset
   presetSource?: string
   override?: UserOverride
@@ -58,16 +61,26 @@ async function readJson(path: string): Promise<unknown> {
 }
 
 /**
- * 설치 경로에서 Profile과 Preset을, 프로젝트에서 Override를 읽는다.
+ * Profile과 Preset을 읽고, 프로젝트에서 Override를 읽는다.
  * Override가 없는 것은 정상이다 — 팀 설정만으로도 돌아가야 한다.
+ *
+ * Profile은 설치 경로 안일 수도, 사용자 소유 공간일 수도 있다. **어디서 고를지는
+ * 여기서 정하지 않는다** — profile-source.ts가 정하고 여기는 그 결과를 읽는다.
+ * Preset은 아직 배포본 안에만 있다(팀이 나눠 갖는 것은 Profile 쪽이다).
  */
 export async function loadLayers(input: {
   installRoot: string
   profileId: string
+  /** 사용자 소유 Profile 디렉터리. 보통 `ASC_HOME/profiles`. */
+  externalProfileRoot?: string
   presetId?: string
   overridePath?: string
 }): Promise<LoadedLayers> {
-  const profileSource = join(input.installRoot, 'profiles', input.profileId, 'profile.json')
+  const location = await resolveProfileLocation(input.profileId, {
+    installRoot: input.installRoot,
+    ...(input.externalProfileRoot ? { externalRoot: input.externalProfileRoot } : {}),
+  })
+  const profileSource = location.path
   const profile = ProjectProfile.parse(await readJson(profileSource))
 
   let preset: OperationalPreset | undefined
@@ -89,6 +102,7 @@ export async function loadLayers(input: {
   return {
     profile,
     profileSource,
+    profileOrigin: location.origin,
     ...(preset ? { preset } : {}),
     ...(presetSource ? { presetSource } : {}),
     ...(override ? { override } : {}),
@@ -268,6 +282,8 @@ export type BootstrapOutcome =
 export async function bootstrapGuard(input: {
   ascRoot: string
   installRoot: string
+  /** 사용자 소유 Profile 디렉터리. 붙을 때 쓴 것과 같은 자리를 봐야 한다. */
+  externalProfileRoot?: string
   profileId?: string
   presetId?: string
   capabilities: readonly string[]
@@ -298,6 +314,7 @@ export async function bootstrapGuard(input: {
 
   const layers = await loadLayers({
     installRoot: input.installRoot,
+    ...(input.externalProfileRoot ? { externalProfileRoot: input.externalProfileRoot } : {}),
     profileId: input.profileId ?? locked.profile.id,
     ...(input.presetId ?? locked.preset?.id ? { presetId: input.presetId ?? locked.preset!.id } : {}),
     overridePath: join(input.ascRoot, 'override.json'),

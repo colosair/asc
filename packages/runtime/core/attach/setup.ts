@@ -36,6 +36,8 @@ export type SetupGate = {
 
 export type SetupStatus = {
   attachment: AttachmentState
+  /** 지금 붙어 있는 Profile과 그 출처. 붙지 않았으면 없다. */
+  profile?: { id: string; origin: 'built-in' | 'external' }
   /** 설정과 무관하게 지금 되는 것. */
   ready: string[]
   gates: SetupGate[]
@@ -43,6 +45,8 @@ export type SetupStatus = {
 
 export type SetupInput = {
   attachment: AttachmentState
+  /** 붙어 있는 Profile의 id와 출처. **Surface가 읽어 넘긴다** — Core는 경로를 모른다. */
+  profile?: { id: string; origin: 'built-in' | 'external' }
   /** 승인 권한자 매핑이 하나라도 있는가. */
   hasApprovers: boolean
   /** override의 controller.identities가 채워졌는가. */
@@ -72,6 +76,7 @@ const RESOLVE_AGAIN =
 export function assessSetup(input: SetupInput): SetupStatus {
   return {
     attachment: input.attachment,
+    ...(input.profile ? { profile: input.profile } : {}),
     ready: [...ALWAYS_READY],
     gates: [approvalGate(input), monitorGate(input), externalWriteGate(input)],
   }
@@ -170,6 +175,17 @@ export function renderSetup(status: SetupStatus): string {
       break
     case 'READY':
       break
+  }
+
+  // 어떤 Profile로 도는지, 그리고 그것이 **어디서 왔는지**. 배포본에 딸려 온 예시로
+  // 실 프로젝트를 돌리고 있는 상태를 사람이 모르고 지나가지 않게 한다.
+  if (status.profile) {
+    const origin =
+      status.profile.origin === 'external'
+        ? 'your own profile directory'
+        : 'bundled with the installed package'
+    lines.push(`profile: ${status.profile.id} — ${origin}`)
+    lines.push('')
   }
 
   lines.push('Working now:')

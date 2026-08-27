@@ -16,6 +16,7 @@ import { join } from 'node:path'
 
 import type { AdapterRuntime, BindingPlan, Capability, ResolvedBinding } from '../binding/types.ts'
 import { availableCapabilities } from '../binding/types.ts'
+import { listProfileLocations } from '../resolver/profile-source.ts'
 import { discoverProjectRoot, exists } from './init.ts'
 
 export type ProfileChoice =
@@ -67,8 +68,13 @@ export type BootstrapPlan = {
 
 export type BootstrapInput = {
   cwd: string
-  /** ASC 설치 경로. `profiles/` 를 여기서 읽는다. */
+  /** ASC 설치 경로. 내장 `profiles/` 를 여기서 읽는다. */
   installRoot: string
+  /**
+   * 사용자 소유 Profile 디렉터리(보통 `ASC_HOME/profiles`). **Surface가 정해서 넘긴다** —
+   * Core가 홈 경로를 스스로 알면 그 순간 저장소·사용자 공간의 경계를 Core가 쥐게 된다.
+   */
+  externalProfileRoot?: string
   /**
    * 이 위치가 붙어 있다면 그 runtime 뿌리. **Surface가 정해서 넘긴다** — Core가 여기서
    * 다시 찾으면 저장소 안의 `.asc` 만 보게 되고, 그것이 기본이 아닌 지금은
@@ -96,19 +102,21 @@ export type BootstrapInput = {
   askPolicy?: boolean
 }
 
-/** 설치 경로의 Profile 후보. 없으면 빈 목록이다 — 그것도 사람이 알아야 할 사실이다. */
-export async function availableProfiles(installRoot: string): Promise<string[]> {
-  try {
-    const entries = await readdir(join(installRoot, 'profiles'), { withFileTypes: true })
-    const ids: string[] = []
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      if (await exists(join(installRoot, 'profiles', entry.name, 'profile.json'))) ids.push(entry.name)
-    }
-    return ids.sort()
-  } catch {
-    return []
-  }
+/**
+ * 지금 고를 수 있는 Profile. 설치된 배포본 안과 **사용자 소유 공간** 둘 다 본다 —
+ * 팀이 나눠 갖는 실 Profile은 배포본에 들어가지 않으므로 후자가 없으면 후보가 없다.
+ *
+ * 없으면 빈 목록이다 — 그것도 사람이 알아야 할 사실이다.
+ */
+export async function availableProfiles(
+  installRoot: string,
+  externalProfileRoot?: string,
+): Promise<string[]> {
+  const found = await listProfileLocations({
+    installRoot,
+    ...(externalProfileRoot ? { externalRoot: externalProfileRoot } : {}),
+  })
+  return [...new Set(found.map((location) => location.id))].sort()
 }
 
 /** 붙어 있다면 무엇으로 붙었는가. lock을 읽지 못하면 붙이다 만 상태로 본다. */
@@ -129,7 +137,7 @@ export async function planBootstrap(input: BootstrapInput): Promise<BootstrapPla
   // 넘겨받은 것이 없을 때만 저장소 안을 본다 — 옛 경로를 계속 지원하되 기본으로 두지 않는다.
   const ascRoot = input.ascRoot ?? join(projectRoot, '.asc')
   const attached = await exists(ascRoot)
-  const candidates = await availableProfiles(input.installRoot)
+  const candidates = await availableProfiles(input.installRoot, input.externalProfileRoot)
   const hosts = [...(input.hosts ?? [])]
   const plan: BindingPlan = input.bindings ?? { bindings: [] }
   const locked = attached ? await attachedProfile(ascRoot) : null

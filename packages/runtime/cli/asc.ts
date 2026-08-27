@@ -877,6 +877,7 @@ async function runInit(values: Record<string, unknown>): Promise<number> {
     const plan = await planBootstrap({
       cwd: process.cwd(),
       installRoot: installRoot(),
+      externalProfileRoot: externalProfileRoot(),
       ...(attachedRoot ? { ascRoot: attachedRoot } : {}),
       hosts: [{ id: 'claude', installed: await verifyInstalled(defaultPaths()) }],
       bindings,
@@ -934,6 +935,7 @@ async function attachedRuntime(ascRoot: string): Promise<ResolvedRuntime | undef
   const outcome = await bootstrapGuard({
     ascRoot,
     installRoot: installRoot(),
+    externalProfileRoot: externalProfileRoot(),
     capabilities: CAPABILITIES,
     adapters: ADAPTER_VERSIONS,
     ascVersion: ASC_VERSION,
@@ -1118,7 +1120,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     git,
     ...(ascRoot ? { ascRoot } : {}),
     ...(values.profile ? { requestedProfile: values.profile as string } : {}),
-    profileCandidates: await availableProfiles(installRoot()),
+    profileCandidates: await availableProfiles(installRoot(), externalProfileRoot()),
     scope,
     host: [{ id: 'claude', status: hostReport.status }],
     // **bootstrap으로 들어왔을 때만 본다.** 설치된 runtime이 자기를 다시 설치할 이유가
@@ -1234,6 +1236,7 @@ async function inspectSetup(root: string): Promise<SetupStatus> {
   const outcome = await bootstrapGuard({
     ascRoot: root,
     installRoot: installRoot(),
+    externalProfileRoot: externalProfileRoot(),
     capabilities: CAPABILITIES,
     adapters: ADAPTER_VERSIONS,
     ascVersion: ASC_VERSION,
@@ -1250,6 +1253,9 @@ async function inspectSetup(root: string): Promise<SetupStatus> {
   const runtime = outcome.ok ? outcome.runtime : undefined
   return assessSetup({
     attachment,
+    ...(runtime
+      ? { profile: { id: runtime.layers.profile.id, origin: runtime.layers.profileOrigin } }
+      : {}),
     hasApprovers: Object.keys(await loadIdentityMap(root)).length > 0,
     hasControllerIdentities: Object.keys(runtime?.controllerIdentities ?? {}).length > 0,
     hasMonitorIdentities: (runtime?.monitor.identities?.length ?? 0) > 0,
@@ -1267,10 +1273,19 @@ const hasToken = async () => (await discoverToken()) !== null
 /** 이 저장소(또는 설치된 패키지)의 뿌리. profiles/ · presets/ 를 여기서 읽는다. */
 const installRoot = () => join(dirname(fileURLToPath(import.meta.url)), '..')
 
+/**
+ * 사용자 소유 Profile 디렉터리. 팀이 나눠 갖는 실 Profile이 여기 온다 —
+ * 배포본에는 예시만 있고, 남의 프로젝트 설정은 패키지에 실리지 않는다.
+ *
+ * **경로를 아는 것은 Surface의 몫이다.** Core에 홈을 알려 주지 않는다 (C-11).
+ */
+const externalProfileRoot = () => join(ascHome(), 'profiles')
+
 async function checkBootstrap(root: string): Promise<{ code: number; runtime?: ResolvedRuntime }> {
   const outcome = await bootstrapGuard({
     ascRoot: root,
     installRoot: installRoot(),
+    externalProfileRoot: externalProfileRoot(),
     capabilities: CAPABILITIES,
     adapters: ADAPTER_VERSIONS,
     ascVersion: ASC_VERSION,
@@ -1316,6 +1331,7 @@ async function runProfile(command: string | undefined, values: Record<string, un
   const installPath = (values.install as string) ?? installRoot()
   const layers = await loadLayers({
     installRoot: installPath,
+    externalProfileRoot: externalProfileRoot(),
     profileId: values.profile as string,
     ...(values.preset ? { presetId: values.preset as string } : {}),
     overridePath: join(root, 'override.json'),
