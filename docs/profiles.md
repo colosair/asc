@@ -20,6 +20,27 @@ That is a user-owned location: not inside the repository ASC is attached to, and
 inside the installed package. Attaching ASC to a project still leaves the repository
 untouched.
 
+## Making one from the repository you are in
+
+```bash
+asc profile adopt          # or: asc profile adopt --id <name>
+asc setup apply --profile <id>
+```
+
+`adopt` reads the repository's git remote and writes a profile there. **It records only
+what the remote proves** — the project's identity. Canonical branches, role boundaries and
+policy stay empty, and the `warnings` in its output say so.
+
+That restraint is the point. A canonical source you did not declare would make session
+issue try to read a baseline it has no credential for; a role boundary you did not choose
+would stop you with a scope error you never agreed to. An adopted profile is a starting
+point the team grows — the file says the same thing in its own comments.
+
+It refuses to overwrite. If a profile of that name already exists, adopt stops and names
+the file, so nobody's policy is replaced by a generated one.
+
+## Placing one you were given
+
 ```bash
 mkdir -p ~/.asc/profiles/my-team
 cp path/to/profile.json ~/.asc/profiles/my-team/profile.json

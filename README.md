@@ -8,10 +8,16 @@ on what it owns, and stops it at the boundaries that are yours: ownership, share
 contracts, secrets, irreversible actions. Nothing reaches an external system without an
 approved execution grant. Everything is auditable afterwards.
 
-> **Status: pre-release.** The packages below are **not published to npm yet**, so the
-> install commands describe what v0.1.0 will be, not something you can run today. Until
-> then, use the [development path](#development). The commands themselves are accurate —
-> they are the ones the release will provide.
+> **The packages are on npm.** Install them with the exact commands below. Cloning this
+> repository is the [contributor path](#development) — it is not how you use ASC.
+>
+> If the version pinned here is not on the registry, this source is ahead of the release:
+> report that the exact version is unpublished and stop. **Do not fall back to another
+> version** — `@latest` or an older pin is a runtime nobody tested these instructions
+> against.
+
+> **Coding agent?** Read [AGENTS.md](AGENTS.md) — it is the ordered path from this URL to a
+> working session, with the decisions already made.
 
 > Korean: [README.ko.md](README.ko.md). This file is canonical.
 
@@ -55,16 +61,28 @@ ASC ships as two packages:
 npx --yes @asc-agent/bootstrap@0.1.0 init
 ```
 
-### Bringing your own profile
+### A profile for your project
 
-The packaged profiles are examples. A profile that describes *your* project lives in your
-own directory and is picked up from there:
+The packaged profiles are examples — neither describes a real project. A profile that
+describes *yours* lives in your own directory and is picked up from there.
+
+Make one from the repository you are in:
+
+```bash
+asc profile adopt          # writes ~/.asc/profiles/<repo>/profile.json
+asc setup apply --profile <repo>
+asc setup status           # profile: <repo> — your own profile directory
+```
+
+`adopt` writes only what a git remote proves: the project's identity. Canonical branches
+and role boundaries stay empty, because this repository cannot tell you what your team
+decided — add them as you agree on them. If someone already handed you a profile file, put
+it in place instead:
 
 ```bash
 mkdir -p ~/.asc/profiles/my-team
 cp path/to/profile.json ~/.asc/profiles/my-team/profile.json
 asc setup apply --profile my-team
-asc setup status        # profile: my-team — your own profile directory
 ```
 
 Full rules — precedence, id collisions, what a profile may not do, and why moving one does
@@ -109,6 +127,10 @@ asc runtime status   # which build is in use
 
 ### For a coding agent
 
+**[AGENTS.md](AGENTS.md) is the runbook** — the ordered path, and the rules for what you
+decide yourself versus what you bring to a human. This section describes the data it works
+on.
+
 Non-interactive and machine-readable. `stdout` is a single JSON document; diagnostics go
 to `stderr`.
 
@@ -133,6 +155,8 @@ The document carries a stable shape:
   "requiresUserAction": false,
   "changesApplied": false,
   "actions": [
+    // ordered by what actually opens the way. `adopt_profile` appears when a profile
+    // must exist before anything can be selected.
     { "type": "apply_setup",
       "display":  "asc setup apply",
       "portable": "npx --yes @asc-agent/bootstrap@0.1.0 setup apply" }

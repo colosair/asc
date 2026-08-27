@@ -82,7 +82,9 @@ for (const path of executableSurfaces) {
 }
 
 // ── documented exact commands match the release ────────────────────────────
-const docs = ['README.md', 'README.ko.md', 'packages/runtime/README.md', 'packages/bootstrap/README.md']
+// AGENTS.md도 여기 있어야 한다 — agent가 실제로 실행하는 명령이 적힌 문서이므로, 핀이
+// 어긋나면 사람이 아니라 자동화가 틀린 버전을 설치한다.
+const docs = ['README.md', 'README.ko.md', 'AGENTS.md', 'packages/runtime/README.md', 'packages/bootstrap/README.md']
 const staleSpec = new RegExp(`${SCOPE}/(runtime|bootstrap)@(?!${version.replace(/\./g, '\\.')})[0-9]`, 'g')
 for (const path of docs) {
   const source = await text(path)

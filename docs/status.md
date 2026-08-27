@@ -74,13 +74,16 @@ done.
 
 ```text
 External Profile discovery   done on `main`, not yet released: a profile can live in
-                             `$ASC_HOME/profiles/` and is picked up from there
-                             (docs/profiles.md). Until v0.2.0 ships, the released
-                             package still only sees what it bundles.
+                             `$ASC_HOME/profiles/` and is picked up from there, and
+                             `asc profile adopt` writes one for the repository you are in
+                             (docs/profiles.md, AGENTS.md). Until v0.2.0 ships, the
+                             released package still only sees what it bundles.
 Public surface English II    the deep operational renderers (monitor, investigation,
                              digest, query, closure, preflight, resolver, entities) are
                              still Korean. The entry surface is English.
-Distribution dogfood         see above — after the packages are published.
+Distribution dogfood         a real multi-agent task driven by the published package.
+                             v0.1.0 is published, so this is now only waiting on the run
+                             itself.
 ```
 
 ## Where the detail lives

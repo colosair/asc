@@ -14,6 +14,8 @@ npx --yes @asc-agent/bootstrap@0.1.0 init
 # 2. your team's profile, in your own directory
 mkdir -p ~/.asc/profiles/<profile-id>
 cp <the file your team shared> ~/.asc/profiles/<profile-id>/profile.json
+#    — no profile to share yet? make one from the repository instead:
+#      cd <your project> && asc profile adopt
 
 # 3. attach the project you actually work in
 cd <your project>
@@ -37,7 +39,10 @@ the package.
 
 ### What a teammate has to hand you
 
-Only the profile file, and only if the team uses one. Nothing about ASC needs a shared
+Only the profile file, and only if the team has one yet. The first person does not need
+anyone to hand them anything: `asc profile adopt` writes a starting profile from the
+repository's own remote, and the team fills in canonical branches and role boundaries as
+it agrees on them ([docs/profiles.md](profiles.md)). Whoever does that shares the file. Nothing about ASC needs a shared
 server, an account, or a token. Adapters that talk to GitHub, GitLab or a messenger read
 credentials from your environment when you enable them — the profile never carries them.
 

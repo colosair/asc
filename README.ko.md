@@ -19,20 +19,23 @@ workspace 개념의 정본은 [C-11](docs/contracts/C-11_workspace-local-first.m
   없이 되는 런타임**이어야 한다. 안 되는 버전에서는 문법 오류처럼 보이는 실패가 난다.
 - 의존성은 `zod` 하나뿐이다.
 
-## 받아서 돌려보기
+## 설치
 
 ```bash
-git clone https://github.com/colosair/asc.git
-cd asc
-npm ci
-npm test
-npm run typecheck
+npx --yes @asc-agent/bootstrap@0.1.0 init
 ```
 
-**`npm ci`를 먼저 해야 한다.** 건너뛰면 `Cannot find package 'zod'`로 전 테스트 파일이
-실패해 저장소가 통째로 깨진 것처럼 보인다.
+**이 저장소를 clone하는 것은 ASC를 쓰는 방법이 아니다** — 아래 [기여자 경로](#기여자-경로)이며,
+ASC 자체를 고치는 사람을 위한 것이다.
 
-## 설치와 실행 — `asc` 는 어디서 오는가
+여기 적힌 정확한 버전이 registry에 없다면 이 소스가 릴리스보다 앞선 것이다. **그 사실을
+말하고 멈춰라 — 다른 버전으로 물러서지 않는다.** `@latest`도, 낮은 핀도 이 문서로 아무도
+시험하지 않은 runtime이다.
+
+> **agent가 읽는 중이라면** [AGENTS.md](AGENTS.md)가 정본 runbook이다 — URL 하나에서
+> 동작하는 세션까지, 판단이 이미 내려진 순서로 적혀 있다.
+
+## 실행 — `asc` 는 어디서 오는가
 
 ASC는 패키지 둘로 나온다.
 
@@ -40,9 +43,6 @@ ASC는 패키지 둘로 나온다.
 |---|---|
 | `@asc-agent/runtime` | 본체 — Core·CLI·adapters. `asc` 명령을 제공한다 |
 | `@asc-agent/bootstrap` | zero-install 첫 진입. 자체 setup 정책이 없다 |
-
-> **아직 게시하지 않았다.** 둘 다 npm에 없으므로 아래 명령은 의도된 형태이지 지금
-> 실행할 수 있는 것이 아니다. 그때까지는 아래 개발 경로를 쓴다.
 
 ```text
 npx --yes @asc-agent/bootstrap@0.1.0 init
@@ -61,31 +61,41 @@ asc ...      이후로는 이것이 안정적인 명령이다
 ASC는 shell 설정도 PATH도 고치지 않는다. 설치는 됐는데 지금 프로세스에서 `asc` 가 안
 보이면 성공으로 뭉개지 않고 그렇게 말한다 — 새 터미널을 열라고 안내한다.
 
-**개발 경로**(기여자용, 소비자 설치 방법이 아니다):
-
-```bash
-node packages/runtime/cli/asc.ts --help
-```
-
 ## 프로젝트에 붙이기
 
 ```bash
 cd /path/to/your-project
-node /path/to/asc/packages/runtime/cli/asc.ts init
+asc setup plan          # 무엇이 바뀔지만 보여준다. 아무것도 바꾸지 않는다
 ```
 
-`--profile` 없이 부르면 **무엇이 있고 무엇이 정해지지 않았는지**를 보여주고 멈춘다 —
-git 뿌리, Profile 후보, Host 설치 여부, 다음 순서. 후보가 하나뿐이어도 대신 고르지 않는다.
-고른 뒤 붙인다.
+**무엇이 있고 무엇이 정해지지 않았는지**를 보여주고 멈춘다 — git 뿌리, Profile 후보,
+Host 설치 여부, 다음 순서. 후보가 하나뿐이어도 대신 고르지 않는다.
+
+### 이 프로젝트의 Profile
+
+배포본에 담긴 Profile은 **예시**이고, 어느 것도 실 프로젝트를 설명하지 않는다. 지금 있는
+저장소로 하나 만든다:
 
 ```bash
-node /path/to/asc/packages/runtime/cli/asc.ts init --profile <profile-id>
-node /path/to/asc/packages/runtime/cli/asc.ts setup status
+asc profile adopt                      # ~/.asc/profiles/<repo>/profile.json 을 쓴다
+asc setup apply --profile <repo>
+asc setup status
 ```
 
-`init`은 runtime을 만들고, 끝에 **지금 되는 것과 아직 열리지 않은 것**을 이유·해법과 함께
-출력한다. 같은 요약은 언제든 `setup status`로 다시 본다. 사용 가능한 Profile은
-[`packages/runtime/profiles/`](packages/runtime/profiles/)에 있다.
+`adopt`는 **git remote가 증명하는 것만** 적는다 — 프로젝트 정체성뿐이다. 정본 branch와
+role 경계는 비워 둔다. 저장소를 봐서 알 수 없는 팀의 결정이고, 잘못 지어내면 나중에 세션이
+막힌다. 비운 것은 `warnings`가 말해 준다.
+
+이미 받은 Profile 파일이 있으면 그것을 자리에 놓는다:
+
+```bash
+mkdir -p ~/.asc/profiles/my-team
+cp path/to/profile.json ~/.asc/profiles/my-team/profile.json
+asc setup apply --profile my-team
+```
+
+`setup apply`는 runtime을 만들고, 끝에 **지금 되는 것과 아직 열리지 않은 것**을 이유·해법과
+함께 출력한다. 같은 요약은 언제든 `setup status`로 다시 본다.
 
 붙인 직후에도 **로컬 개발 루프는 설정 편집 없이 돈다** — 세션 발급·진행·중단·재개·종료,
 진행 기록, 산출 경로 사전 대조, 회수와 마무리 확인이 전부 그대로 동작한다. 채워야 열리는
@@ -120,14 +130,14 @@ node /path/to/asc/packages/runtime/cli/asc.ts setup status
 가리킬 수 있다.
 
 ```bash
-node /path/to/asc/packages/runtime/cli/asc.ts workspace list
+asc workspace list
 ```
 
 옮긴 뒤 그 위치를 같은 workspace에 다시 등록할 때는 사람이 선언한다 — alias가 맞아떨어져도
 ASC가 대신 고르지 않고 후보만 알린다.
 
 ```bash
-node /path/to/asc/packages/runtime/cli/asc.ts init --profile <id> --workspace <W-id>
+asc init --profile <id> --workspace <W-id>
 ```
 
 ### 저장소 안의 `.asc/` 가 이미 있다면 (legacy)
@@ -135,7 +145,7 @@ node /path/to/asc/packages/runtime/cli/asc.ts init --profile <id> --workspace <W
 예전 방식으로 만들어진 `repo/.asc` 는 그대로 동작한다. 사용자 소유 공간으로 옮기려면:
 
 ```bash
-node /path/to/asc/packages/runtime/cli/asc.ts workspace migrate
+asc workspace migrate
 ```
 
 - 먼저 **팀이 채택한 것인지 개인 legacy인지 판정**하고, 모르면 옮기지 않는다.
@@ -154,9 +164,9 @@ node /path/to/asc/packages/runtime/cli/asc.ts workspace migrate
 Claude Code를 host로 쓸 때의 진입점이다.
 
 ```bash
-node /path/to/asc/packages/runtime/cli/asc.ts host claude install   # 3층 guard hook + skill bundle (~/.claude)
-node /path/to/asc/packages/runtime/cli/asc.ts host claude guard     # 2층 worker-settings (attach된 프로젝트에서)
-node /path/to/asc/packages/runtime/cli/asc.ts host claude probe     # capability 실측 + 설치 상태 판정
+asc host claude install   # 3층 guard hook + skill bundle (~/.claude)
+asc host claude guard     # 2층 worker-settings (attach된 프로젝트에서)
+asc host claude probe     # capability 실측 + 설치 상태 판정
 ```
 
 Host 설치물은 **project-owned가 아니라 user-owned다.** `install`은 사용자 홈(`~/.claude`)에
@@ -167,6 +177,22 @@ Host 설치물은 **project-owned가 아니라 user-owned다.** `install`은 사
 **`probe`에는 `claude` 실행파일이 PATH에 있어야 한다.** 없으면 안전 필수 capability
 (`external_write_guard`)를 실측할 수 없어 `STOP`으로 떨어진다(exit 1). 이는 ASC 결함이 아니라
 **prerequisite 부재**이며, 그 상태에서도 위 install/guard와 로컬 루프는 정상 동작한다.
+
+## 기여자 경로
+
+ASC 자체를 고칠 때만 쓴다. **이것으로 ASC를 쓰지 않는다.**
+
+```bash
+git clone https://github.com/colosair/asc.git
+cd asc
+npm ci
+npm test
+npm run typecheck
+node packages/runtime/cli/asc.ts --help   # 소스를 그대로 실행한다
+```
+
+**`npm ci`를 먼저 해야 한다.** 건너뛰면 `Cannot find package 'zod'`로 전 테스트 파일이
+실패해 저장소가 통째로 깨진 것처럼 보인다.
 
 ## 문서 지도
 

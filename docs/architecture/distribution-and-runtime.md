@@ -248,13 +248,19 @@ The smoke run clears `ASC_*` and provider credentials and overrides `HOME`,
 real `~/.claude`, or a real token would make a broken package look healthy. Running the
 repository sources directly does not count as a package smoke.
 
+## Done since this was written
+
+```text
+2026-08-27  npm publish                 v0.1.0 is on the registry, and installing it from
+                                        there into a zero state was observed
+2026-08-27  @asc-agent scope ownership  held; the packages publish under it
+2026-08-27  repository visibility       public
+2026-08-27  Windows fresh install       observed on a real machine — global install,
+                                        `asc.cmd` resolution, a new process running `asc`
+```
+
 ## Not done
 
 ```text
-npm publish                 nothing is on the registry
-@asc-agent scope ownership  to be confirmed immediately before publishing — a registry
-                            constraint, not a naming question
-repository visibility       still private
 license                     still ISC
-Windows fresh install       policy decided, fixtures tested, real device not observed
 ```

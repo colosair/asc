@@ -23,4 +23,7 @@ npx --yes @asc-agent/bootstrap@0.1.0 setup --agent
 `stdout` is a single JSON document. Run `actions[].portable`, not `display` — they differ
 exactly while the runtime is not yet installed.
 
+The full runbook — the ordered path and the decisions already made — is `AGENTS.md` in the
+[repository](https://github.com/colosair/asc).
+
 See the [repository README](https://github.com/colosair/asc#readme).

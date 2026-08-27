@@ -143,10 +143,24 @@ describe('release — 절차가 문서로 고정돼 있다', () => {
     assert.doesNotMatch(security, /security@|@example\.com/, '읽는 사람이 없는 주소를 적었다')
   })
 
-  it('README가 아직 게시되지 않았다는 사실을 말한다', async () => {
+  // 이 검사는 한 번 뒤집혔다. 게시 전에는 "아직 게시되지 않았다"를 강제했고, 게시된 뒤에도
+  // 그 문장이 README 넷째 문단에 남아 있었다 — 그래서 URL만 받은 agent가 제품을 pre-release로
+  // 읽고 사람에게 되물었다. 문서가 현실보다 늦으면 그 지연이 곧 사용자의 막힘이다.
+  it('README가 게시된 현실을 말하고, 다른 버전으로 도망가지 말라고 말한다', async () => {
     const readme = await read('README.md')
-    assert.match(readme, /not published to npm yet/i, 'registry 현실을 과장하고 있다')
+    assert.doesNotMatch(readme, /not published to npm yet/i, '게시된 것을 미게시라고 말한다')
     assert.match(readme, new RegExp(`@asc-agent/bootstrap@${RELEASE_VERSION.replace(/\./g, '\\.')}`))
+    // exact pin이 registry에 없을 때의 정답은 **멈추는 것**이다. `@latest` 로 물러서면
+    // 아무도 이 문서로 시험하지 않은 runtime을 쓰게 된다 (C-14 불변식 ⑧).
+    // 줄바꿈에 인용부호(`>`)가 끼어도 같은 문장이다 — 서식으로 검사가 빠져나가지 않게.
+    assert.match(readme, /Do not fall back to another[\s>]+version/i, 'no-fallback 규칙이 없다')
+    assert.match(readme, /not how you use ASC/i, 'clone이 사용 경로가 아니라는 사실이 없다')
+  })
+
+  it('agent 진입이 정본 하나를 가리킨다', async () => {
+    const agents = await read('AGENTS.md')
+    assert.match(agents, new RegExp(`@asc-agent/bootstrap@${RELEASE_VERSION.replace(/\./g, '\\.')}`))
+    assert.match(await read('README.md'), /AGENTS\.md/, 'README가 runbook을 가리키지 않는다')
   })
 
   it('CI가 검증만 하고 게시하지 않는다', async () => {

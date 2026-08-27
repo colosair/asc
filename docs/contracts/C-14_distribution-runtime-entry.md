@@ -450,9 +450,13 @@ offline           설치 후 local control plane은 network를 요구하지 않�
 
 **정하지 않는 것**
 
+> **2026-08-27 갱신** — 아래 둘은 그 뒤 사람이 결정했다: repository는 **공개**이고,
+> v0.1.0은 **npm에 게시됐다**. 남은 문장(license·Node 하한·Windows)은 그대로 유효하다.
+> 게시 여부의 정본은 [docs/status.md](../status.md)다.
+
 ```text
-license · repository 공개  사용자 결정이다. 현재 ISC · private 유지.
-npm publish               사용자의 명시적 지시 없이는 하지 않는다.
+license                   사용자 결정이다. 현재 ISC.
+npm publish               사용자의 명시적 지시 없이는 하지 않는다 (v0.1.0은 지시로 게시됨).
 Node 하한 변경             compiled JS가 됐다고 낮은 Node 호환이 증명되지 않는다.
                           현재 `>=24` 를 유지하고, 낮추려면 그 Node에서 실측한다.
 Windows 지원 선언          architecture는 확정(§3.1)이나, 실 장비 없이

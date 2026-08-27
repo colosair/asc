@@ -19,4 +19,7 @@ network access. Only bootstrap, install and update do.
 On a machine with nothing installed yet, start from
 [`@asc-agent/bootstrap`](https://www.npmjs.com/package/@asc-agent/bootstrap) instead.
 
+Driving this from a coding agent? The runbook is `AGENTS.md` in the
+[repository](https://github.com/colosair/asc).
+
 See the [repository README](https://github.com/colosair/asc#readme).
