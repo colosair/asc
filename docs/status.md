@@ -4,17 +4,14 @@
 > This file is the **public single source of truth for product status**. It describes the
 > product, not any project ASC has been pointed at.
 
-Current release: **v0.1.0** — published to npm and installed from the registry into a
-throwaway machine state to check that the published path actually works.
+Current release: **v0.2.0, team-ready distribution** — published to npm. v0.1.0 was
+something one person could install; it could not be handed to a team, because the profile
+that describes a real project had nowhere to live except inside the package, and an agent
+given only the repository URL could not get past that. v0.2.0 is that gap closed: profiles
+live in `$ASC_HOME/profiles/`, `asc profile adopt` makes one from the repository you are
+in, and [AGENTS.md](../AGENTS.md) is the path from a URL to a running session.
 
-In development on `main`: **v0.2.0, team-ready distribution.** v0.1.0 is something one
-person can install; it is not yet something a team can be handed, because the profile that
-describes a real project had nowhere to live except inside the package. That is what the
-next release is about. Nothing below is dated by a release — it says what is true now.
-
-`main` is versioned 0.2.0 and is not published. Until it is, an exact 0.2.0 pin is
-genuinely absent from the registry, and the correct behaviour is to say so and stop —
-never to fall back to 0.1.0 or `@latest` ([AGENTS.md](../AGENTS.md)).
+Nothing below is dated by a release — it says what is true now.
 
 ## What is implemented
 
@@ -49,10 +46,11 @@ Current standing:
 
 ```text
 3-OS CI (ubuntu · macOS · windows)          TEST_VERIFIED
-Zero-base agent path — a repository URL,    TEST_VERIFIED (packaged tarballs, not the
-  no profile name, through adopt · attach     registry). The same run against published
-  · READY · a started session                 0.2.0 is a separate observation, after it
-                                              is published.
+Zero-base agent path — a repository URL,    RUNTIME_OBSERVED — `npx` the published
+  no profile name, through adopt · attach     0.2.0 bootstrap into a machine with
+  · READY · a started session                 nothing installed, against a project ASC
+                                              had never seen; no human answered anything.
+                                              Also TEST_VERIFIED on tarballs, in CI.
 Real registry distribution — `npx` the      RUNTIME_OBSERVED
   published bootstrap into a zero state,
   it installs the exact runtime globally
@@ -78,23 +76,21 @@ Coverage health against a real  WAITING_FOR_CREDENTIAL — same shape: code comp
 Waiting for a credential is not the same as unfinished code. Neither is written down as
 done.
 
-## After v0.1.0
+## After v0.2.0
 
 ```text
-External Profile discovery   done on `main`, not yet released: a profile can live in
-                             `$ASC_HOME/profiles/` and is picked up from there, and
-                             `asc profile adopt` writes one for the repository you are in
-                             (docs/profiles.md, AGENTS.md). Until v0.2.0 ships, the
-                             released package still only sees what it bundles.
-Two-URL agent run, for real  the zero-base path is proven on tarballs. Proving it on the
-                             registry needs 0.2.0 published, and that is a person's call
-                             (docs/release/v0.2.0-checklist.md).
+executionMode under-reports  the installed `asc` always reports `executionMode:
+                             "bootstrap"`, so its `actions[].portable` hands back the
+                             `npx …` form when plain `asc …` would do. Observed on the
+                             registry run. It works — it is slower and needs a network
+                             it should not — and it is a 0.2.1 fix, because a published
+                             version is never re-published.
 Public surface English II    the deep operational renderers (monitor, investigation,
                              digest, query, closure, preflight, resolver, entities) are
                              still Korean. The entry surface is English.
 Distribution dogfood         a real multi-agent task driven by the published package.
-                             v0.1.0 is published, so this is now only waiting on the run
-                             itself.
+                             Setting it up from a URL is now observed; being used for a
+                             real task is not the same thing, and is still owed.
 ```
 
 ## Where the detail lives
