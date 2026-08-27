@@ -162,6 +162,128 @@ try {
     }
   })())
 
+  // ── 제로베이스 acceptance — URL 하나에서 도는 세션까지 (P0) ─────────────────
+  //
+  // 되묻지 않고 여기까지 오는가. 위 흐름은 **번들 Profile 이름을 이미 아는 사람**의
+  // 경로였고, URL만 받은 agent는 그 이름을 모른다. 그 상태에서 막힌 자리가 FAIL 회차의
+  // 자리이므로, 여기서는 아무 이름도 알려 주지 않고 시작한다.
+  //
+  // 격리는 그대로 쓰되 **작업 디렉터리와 ASC_HOME을 새로 판다** — 위에서 이미 붙여 놓은
+  // 상태를 물려받으면 "처음부터"가 아니게 된다.
+  console.log('\nZero-base: a repository URL and nothing else')
+
+  const zeroHome = join(base, 'home2')
+  const zeroWork = join(base, 'work2')
+  for (const dir of [zeroHome, zeroWork]) await mkdir(dir, { recursive: true })
+  execFileSync('git', ['init', '-q', zeroWork])
+  await writeFile(join(zeroWork, 'README.md'), '# zero base\n', 'utf8')
+  // network를 쓰지 않는다 — remote는 주소일 뿐이고 아무도 여기에 접속하지 않는다.
+  execFileSync('git', ['-C', zeroWork, 'remote', 'add', 'origin', 'git@github.com:example/fixture.git'])
+
+  const zero = (name, args) => {
+    try {
+      return {
+        code: 0,
+        stdout: execFileSync(join(bin, binName(name)), args, {
+          cwd: zeroWork,
+          env: isolated(zeroHome),
+          encoding: 'utf8',
+          stdio: 'pipe',
+          shell: process.platform === 'win32',
+        }),
+      }
+    } catch (error) {
+      return { code: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }
+    }
+  }
+  const asJson = (result) => {
+    try {
+      return JSON.parse(result.stdout)
+    } catch {
+      return null
+    }
+  }
+  /**
+   * 있는 파일 전부. 없으면 빈 표 — "없었다"도 상태다.
+   *
+   * npm 자신의 cache는 뺀다. ASC가 전역 설치 상태를 조회하려고 npm을 부르면 npm이 거기에
+   * 자기 기록을 남긴다 — 그것은 ASC가 남긴 상태가 아니고, 격리 환경이 일부러 그리로
+   * 돌려놓은 자리다.
+   */
+  const treeOf = async (dir) => {
+    const found = []
+    const walk = async (current, prefix) => {
+      let entries
+      try {
+        entries = await readdir(current, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (rel === '.npm-cache' || rel.startsWith('.npm-cache/')) continue
+        if (entry.isDirectory()) await walk(join(current, entry.name), rel)
+        else found.push(rel)
+      }
+    }
+    await walk(dir, '')
+    return found.sort().join('\n')
+  }
+
+  const beforeRepo = await treeOf(zeroWork)
+  const beforeHome = await treeOf(zeroHome)
+
+  // 1. 첫 실행. AGENTS.md가 첫 줄로 주는 명령이 이것이다 — `--agent` 는 비대화 형태이고,
+  //    stdout은 JSON 문서 하나다.
+  const init = zero('asc-bootstrap', ['init', '--agent'])
+  const initPlan = asJson(init)
+  check('bootstrap init answers with a plan, not a status rendering', initPlan !== null && Array.isArray(initPlan.changes))
+  check(
+    'it stops at the profile wall',
+    initPlan?.code === 'ASC_PROFILE_SELECTION_REQUIRED' && initPlan?.requiresUserAction === true && init.code === 1,
+  )
+  // 멈췄으면 **아무 데도 남기지 않는다.** setup apply가 알아서 그럴 것이라고 가정하지
+  // 않는다 — init이 실제로 도는 경로를 여기서 본다 (저장소 · HOME · ASC_HOME · host 설정).
+  check('stopping leaves the repository untouched', (await treeOf(zeroWork)) === beforeRepo)
+  check('stopping leaves no user state behind', (await treeOf(zeroHome)) === beforeHome)
+
+  // 2. 벽에서 빠져나오는 길을 plan이 데이터로 준다. **그 문자열을 우리가 조립하지 않는다** —
+  //    조립하면 검증되는 것은 우리의 조립이지 제품이 주는 명령이 아니다.
+  const adoptAction = initPlan?.actions?.find((action) => action.type === 'adopt_profile')
+  check('the plan carries a way to make one', adoptAction !== undefined, initPlan?.actions?.map((a) => a.type).join(', '))
+  const portable = adoptAction?.portable ?? ''
+  // 설치 전 형태는 `npx --yes <bootstrap>@<version> …` 이다. registry가 없는 이 환경에서
+  // 그대로 실행할 수는 없으므로, **앞머리가 그 배포본을 가리키는지 확인하고** 꼬리의
+  // 인자들을 설치된 같은 진입으로 넘긴다. 확인하는 것은 문자열 자체다.
+  const forwarded = /^npx --yes (@[^@\s]+\/[^@\s]+)@(\S+) (.+)$/.exec(portable)
+  check('the portable form names the bootstrap package at an exact version', forwarded !== null, portable)
+  const adopt = asJson(zero('asc-bootstrap', (forwarded?.[3] ?? '').split(' ')))
+  check('adopt writes a profile for this repository', adopt?.id === 'fixture', JSON.stringify(adopt?.id))
+  check('it reads the identity off the remote', adopt?.project?.repository === 'example/fixture')
+  check('it says what it left empty', (adopt?.warnings ?? []).some((w) => /canonical\.sources/.test(w)))
+
+  // 3. 그 Profile로 붙는다.
+  const zeroApply = asJson(zero('asc', ['setup', 'apply', '--profile', adopt?.id ?? 'fixture', '--agent']))
+  check('attaching with the adopted profile', zeroApply?.changesApplied === true && zeroApply?.remaining?.length === 0)
+
+  // 4. agent가 스스로 READY를 판정한다.
+  const zeroStatus = asJson(zero('asc', ['setup', 'status', '--json']))
+  check('status says READY', zeroStatus?.attachment === 'READY')
+  check('and names where the profile came from', zeroStatus?.profile?.origin === 'external')
+
+  // 5. READY는 **기술적 준비**다 — 바깥 gate가 막혀 있어도 로컬 세션 루프는 선다.
+  check('gates are blocked on this bare machine', (zeroStatus?.gates ?? []).some((gate) => gate.state === 'BLOCKED'))
+  const zeroIssue = zero('asc', [
+    'session', 'issue', 'S-20260827-90',
+    '--role', 'implementer', '--goal', 'URL 하나에서 여기까지',
+    '--boundary', 'src/**', '--criteria', 'N1', '--criteria', 'N2',
+  ])
+  check('a session is issued anyway', zeroIssue.code === 0, zeroIssue.stderr)
+  check('and starts', zero('asc', ['session', 'start', 'S-20260827-90']).code === 0)
+
+  const zeroFiles = (await readdir(zeroWork)).filter((f) => f !== '.git')
+  check('the repository is still untouched', zeroFiles.length === 1 && zeroFiles[0] === 'README.md', zeroFiles.join(', '))
+
   // ── 배포본에 무엇이 실렸는가 ────────────────────────────────────────────────
   //
   // 설치된 트리가 곧 artifact다. 여기서 보는 것은 "도는가"가 아니라 **남의 것이 실려

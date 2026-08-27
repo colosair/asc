@@ -39,11 +39,13 @@ Run `actions[].portable` from the JSON you get back. Branch on `code`. Never par
 **1 — first run.** No `asc` exists yet, so start from the bootstrap:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.1.0 init
+npx --yes @asc-agent/bootstrap@0.1.0 init --agent
 ```
 
-This installs the runtime and attaches, in one pass. It changes nothing and exits `1` when
-something is genuinely left to decide — including the case in step 2.
+This installs the runtime and attaches, in one pass. `--agent` is the non-interactive
+form: `stdout` is a single JSON document, everything else goes to `stderr`. It changes
+nothing and exits `1` when something is genuinely left to decide — including the case in
+step 2.
 
 **2 — a profile for this project.** If the plan comes back with
 `code: "ASC_PROFILE_SELECTION_REQUIRED"`, the packaged profiles are examples and none of
