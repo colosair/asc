@@ -1,0 +1,26 @@
+{
+  "name": "asc-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ASC (Agent Session Control) — workspace root",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run build -w @asc-agent/runtime && npm run build -w @asc-agent/bootstrap",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "tsc --noEmit",
+    "pack:all": "node scripts/pack-all.mjs",
+    "smoke": "node scripts/tarball-smoke.mjs",
+    "release:check": "node scripts/release-check.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "ISC"
+}

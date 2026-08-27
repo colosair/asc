@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "$comment": "공개 예시 Profile. 실 프로젝트가 아니라 스키마와 계층 병합이 어떻게 서는지 보여 주기 위한 것이다 — 개인 계정·토큰은 여기가 아니라 User Override와 자격 저장소에 둔다.",
+  "id": "example-team",
+  "requires": {
+    "asc": ">=0.1 <1.0",
+    "capabilities": [
+      "scm.github"
+    ]
+  },
+  "optionalCapabilities": [
+    "messenger.mattermost"
+  ],
+  "project": {
+    "scm": "github",
+    "repository": "example-org/example-repo"
+  },
+  "canonical": {
+    "sources": [
+      {
+        "id": "shared-spec",
+        "$comment": "파트 공용 spec과 계약. develop이 정본이다.",
+        "provider": "git",
+        "remote": "origin",
+        "ref": "develop",
+        "paths": [
+          "specs/**"
+        ]
+      },
+      {
+        "id": "fe-plan",
+        "$comment": "FE plan·tasks는 front 브랜치에만 있고 develop에 병합돼 있지 않다.",
+        "provider": "git",
+        "remote": "origin",
+        "ref": "front",
+        "paths": [
+          "specs/**/FE/**"
+        ]
+      }
+    ]
+  },
+  "monitor": {
+    "$comment": "reasonSignals는 GitHub Adapter의 GITHUB_REASON_SIGNALS와 같은 표다. signalPriority는 실측으로 조정하는 자리이며, 여기 값은 형태를 보여 주는 예시다.",
+    "reasonSignals": {
+      "assign": "assigned_to_me",
+      "mention": "mentioned_me",
+      "team_mention": "mentioned_me",
+      "review_requested": "review_requested",
+      "author": "my_pr_reviewed",
+      "comment": "participated_thread_changed",
+      "subscribed": "participated_thread_changed",
+      "state_change": "participated_thread_changed"
+    },
+    "priorityLabels": {
+      "front": "P1"
+    },
+    "escalationLabels": [
+      "blocker"
+    ],
+    "signalPriority": {
+      "mentioned_me": "P1",
+      "participated_thread_changed": "P2",
+      "my_pr_reviewed": "P1"
+    }
+  },
+  "workflow": {
+    "$comment": "포인터만 둔다. 내용은 복사하지 않는다.",
+    "blockSource": "docs/backlog.md",
+    "taskSource": [
+      "speckit_tasks",
+      "session_objective"
+    ]
+  },
+  "policy": {
+    "$comment": "파트 경계를 넘는 변경은 Session 계약으로 열 수 없다.",
+    "hardDeny": [
+      "spec.change",
+      "cross-part-contract.change",
+      "mvp-scope.change"
+    ],
+    "softDeny": [
+      "shared-module.change"
+    ],
+    "roleScopes": {
+      "implementer": [
+        "web-frontend/**"
+      ],
+      "verifier": []
+    },
+    "settings": {
+      "independentVerifier": true
+    },
+    "lockedSettings": [
+      "independentVerifier"
+    ]
+  },
+  "terminology": {
+    "Block": "Spec 하위 작업 묶음 (B-NN)",
+    "Canonical": "정본 — spec·contracts는 develop, FE plan은 front"
+  }
+}

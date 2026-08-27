@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    // Node는 타입만 지워서 .ts를 그대로 실행한다. enum·namespace·parameter property처럼
+    // 지우기만 해서는 안 되는 문법을 여기서 막아, 런타임에서야 발견하는 일을 없앤다.
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  // cli·composition·schemas 가 빠져 있어 타입 검사가 그 셋을 보지 않았다. 실제로
+  // cli/asc.ts 의 깨진 정규식 리터럴이 검사를 통과하고 런타임에서야 터졌다.
+  "include": [
+    "packages/runtime/core",
+    "packages/runtime/ports",
+    "packages/runtime/adapters",
+    "packages/runtime/cli",
+    "packages/runtime/composition",
+    "packages/runtime/schemas",
+    "packages/runtime/tests"
+  ]
+}

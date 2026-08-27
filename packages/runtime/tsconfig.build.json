@@ -1,0 +1,22 @@
+{
+  // 검사 설정은 workspace 뿌리 하나뿐이다 — 여기서 복제하면 둘이 갈라진다
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    // 개발 중에는 Node가 타입만 지워 `.ts` 를 그대로 실행한다. 배포본은 그럴 수 없다 —
+    // Node는 node_modules 아래의 type stripping을 거부한다
+    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). 그래서 배포본만 컴파일한다.
+    "noEmit": false,
+    // 소스의 `.ts` specifier를 emit 시점에 `.js` 로 바꾼다. 이것이 없으면 543개 import를
+    // 전부 손으로 고쳐야 하고, 그러면 개발 중 `.ts` 직접 실행이 죽는다 (C-14 §1.1).
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": ".",
+    "outDir": "dist",
+    // bootstrap이 `runAscCommand` 를 부른다 — 소비자에게 타입이 필요하다
+    "declaration": true,
+    "sourceMap": false
+  },
+  // 테스트는 배포되지 않는다. 타입 검사 범위는 tsconfig.json 이 그대로 본다 — 여기서
+  // 줄이는 것은 emit 대상이지 검사 대상이 아니다.
+  "include": ["core", "ports", "adapters", "cli", "composition", "schemas"],
+  "exclude": ["dist", "node_modules", "tests"]
+}

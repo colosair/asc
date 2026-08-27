@@ -1,0 +1,45 @@
+{
+  "name": "@asc-agent/bootstrap",
+  "version": "0.1.0",
+  "description": "Zero-install entry point for ASC (Agent Session Control) — first run for humans and coding agents",
+  "keywords": [
+    "agent",
+    "control-plane",
+    "setup",
+    "bootstrap",
+    "claude-code"
+  ],
+  "homepage": "https://github.com/colosair/asc#readme",
+  "bugs": {
+    "url": "https://github.com/colosair/asc/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/colosair/asc.git",
+    "directory": "packages/bootstrap"
+  },
+  "author": "colosair (https://github.com/colosair)",
+  "type": "module",
+  "bin": {
+    "asc-bootstrap": "./dist/cli.js"
+  },
+  "main": "./dist/cli.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@asc-agent/runtime": "0.1.0"
+  },
+  "license": "ISC",
+  "publishConfig": {
+    "access": "public"
+  }
+}

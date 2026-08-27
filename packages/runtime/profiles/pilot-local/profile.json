@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "$comment": "fixture·demo·pilot 전용 Profile. canonical 없음 = 정본 검증이 성립하지 않는다 — 실 프로젝트에 attach하지 않는다.",
+  "id": "pilot-local",
+  "requires": {
+    "asc": ">=0.1 <1.0",
+    "capabilities": []
+  },
+  "project": {
+    "scm": "local",
+    "repository": "pilot/fixture"
+  },
+  "canonical": {
+    "sources": []
+  },
+  "policy": {
+    "roleScopes": {
+      "implementer": [
+        "src/**"
+      ],
+      "verifier": []
+    },
+    "unionLists": {
+      "closureChecklist": [
+        "tasks-synced",
+        "backlog-updated",
+        "worklog-recorded"
+      ]
+    }
+  },
+  "ownership": {
+    "frontend": {
+      "paths": [
+        "src/**"
+      ],
+      "authorities": [
+        "client-ui",
+        "client-routing"
+      ]
+    },
+    "backend": {
+      "paths": [
+        "server/**"
+      ],
+      "authorities": [
+        "api-contract",
+        "persistence"
+      ]
+    },
+    "product": {
+      "authorities": [
+        "product-policy"
+      ]
+    }
+  }
+}

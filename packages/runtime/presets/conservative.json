@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "conservative",
+  "$comment": "의심스러우면 멈춘다. 공용 모듈 변경과 의존성 추가를 더 조인다.",
+  "policy": {
+    "softDeny": ["test.skip", "migration.run"],
+    "settings": { "deepAnalysisP2": true }
+  }
+}

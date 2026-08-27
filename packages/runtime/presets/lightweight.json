@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "lightweight",
+  "$comment": "혼자 빠르게 도는 환경. 조사 깊이를 줄이되 HARD DENY는 그대로다.",
+  "policy": {
+    "settings": { "deepAnalysisP2": false, "independentVerifier": false }
+  }
+}

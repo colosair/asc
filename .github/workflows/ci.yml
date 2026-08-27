@@ -1,0 +1,70 @@
+# Verification only. This workflow never publishes, never tags, and never touches a
+# real global npm prefix — the package smoke installs into a throwaway HOME.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NO_COLOR: '1'
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux carries the full suite. The other two exist to catch platform
+        # assumptions — path separators, npm shims — not to duplicate coverage.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The declared floor in `engines`. Building on it is the point: a newer
+          # runtime passing says nothing about the version we tell people to use.
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: build
+        run: npm run build
+
+      - name: test
+        run: npm test
+
+      - name: release consistency
+        run: npm run release:check
+
+      - name: pack
+        run: npm run pack:all
+
+      # The smoke installs the tarballs into a temporary HOME and drives the real
+      # node_modules/.bin/asc. It must not leave anything on the runner's global npm.
+      - name: tarball smoke
+        run: npm run smoke
+
+      - name: no ASC in the runner's global npm
+        shell: bash
+        run: |
+          if npm ls -g --depth=0 --parseable '@asc-agent/runtime' 2>/dev/null | grep -q asc-agent; then
+            echo "ASC was installed into the runner's global prefix — the smoke is not isolated"
+            exit 1
+          fi
+          echo "global prefix clean"

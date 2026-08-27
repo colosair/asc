@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "balanced",
+  "$comment": "기본값. 검증은 지키고 조사 깊이만 조절한다.",
+  "policy": {
+    "settings": { "deepAnalysisP2": false }
+  }
+}
