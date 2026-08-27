@@ -65,7 +65,7 @@ export type SetupCode =
  * agent는 `portable` 만 실행하면 되고, 산문을 읽을 필요가 없다.
  */
 export type NextAction = {
-  type: 'select_profile' | 'install_runtime' | 'apply_setup' | 'proceed' | 'force_host_install'
+  type: 'select_profile' | 'adopt_profile' | 'install_runtime' | 'apply_setup' | 'proceed' | 'force_host_install'
   display: string
   portable: string
 }
@@ -174,9 +174,25 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
       changes,
       requiresUserAction: true,
       profiles: state.profileCandidates,
-      ...actions(mode, evidence, [
-        { type: 'select_profile', ...command(['setup', 'apply', '--profile', '<id>']) },
-      ]),
+      // 고를 것이 **없을** 수도 있다 — 배포본이 들고 있는 것은 예시뿐이고, 이 프로젝트를
+      // 설명하는 Profile은 아직 아무도 만들지 않았다. 그때 "골라라"만 주면 막다른 길이
+      // 된다(FAIL 회차에서 agent가 사람에게 되물은 자리). 만드는 길을 함께 든다.
+      //
+      // 순서는 **지금 무엇이 실제로 길을 여는가**로 정한다. 첫 action이 늘 같으면
+      // agent는 첫 줄만 보고 막힌 길로 간다.
+      ...actions(
+        mode,
+        evidence,
+        state.profileCandidates.length > 0
+          ? [
+              { type: 'select_profile', ...command(['setup', 'apply', '--profile', '<id>']) },
+              { type: 'adopt_profile', ...command(['profile', 'adopt', '--json']) },
+            ]
+          : [
+              { type: 'adopt_profile', ...command(['profile', 'adopt', '--json']) },
+              { type: 'select_profile', ...command(['setup', 'apply', '--profile', '<id>']) },
+            ],
+      ),
     }
   }
 

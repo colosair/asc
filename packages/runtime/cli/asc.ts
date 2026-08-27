@@ -13,7 +13,7 @@ import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
@@ -27,6 +27,7 @@ import { Executor } from '../core/execution/executor.ts'
 import { GrantService } from '../core/execution/grant.ts'
 import { DecisionKind } from '../core/model/entities.ts'
 import { discoverProjectRoot, excludeFromGit, identitiesTemplate, overrideTemplate, writeIfAbsent } from '../core/attach/init.ts'
+import { AdoptError, buildAdoptedProfile, type AdoptedProfile, type RemoteEntry } from '../core/attach/adopt.ts'
 import { locatorsOf, lookupLocator, readIndex, register, writeIndex } from '../core/workspace/index-store.ts'
 import { adoptionLine, judgeAdoption, migrate } from '../core/workspace/migrate.ts'
 import { newWorkspaceId, normalizeRemote, recoverCandidates, recoverLines } from '../core/workspace/identity.ts'
@@ -75,6 +76,7 @@ import {
   selectionPath,
   writeRuntimeSelection,
 } from '../core/distribution/runtime-select.ts'
+import { portableCommand, shorthandCommand } from '../core/distribution/release.ts'
 import { preflight, type PreflightTarget } from '../core/operator/preflight.ts'
 import { lookupAuthority, type OwnershipMap } from '../core/policy/ownership.ts'
 import { renderProgress } from '../core/operator/render.ts'
@@ -107,7 +109,7 @@ import { Checkpoint, Handoff, SessionRole, type Session } from '../core/model/en
 import { archiveLock, bootstrapGuard, buildLock, compareLock, loadLayers, resolveRuntime } from '../core/resolver/load.ts'
 import { ProfileSourceError } from '../core/resolver/profile-source.ts'
 import { renderAscMd, renderControllerMd } from '../core/resolver/render.ts'
-import { ProfileLock } from '../schemas/profile.ts'
+import { ProfileLock, ProjectProfile } from '../schemas/profile.ts'
 import { LocalOperator } from '../core/operator/local-operator.ts'
 import { loadIdentityMap } from './identity-config.ts'
 
@@ -132,6 +134,7 @@ const USAGE = `asc — Agent Session Control
   asc monitor census    [--as <controller>]   # full reconcile + detect disappearances
   asc monitor status    [--json]              # how far coverage has been confirmed
 
+  asc profile adopt   [--id <name>] [--json]  # make a profile for this repository
   asc profile resolve --profile <id> [--preset <id>] [--install <path>] [--write]
 
   asc runtime start [--interval-min <n>] [--delta-min <n>] [--reconcile-min <n>]
@@ -519,6 +522,10 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
   // 그러면 "아직 안 붙었다"를 확인하려고 부른 명령이 안 붙었다는 이유로 죽는다.
   if (group === 'setup') return runSetup(command, values, entry)
 
+  // adopt는 **붙기 전의 명령이다.** 붙을 Profile을 만드는 것이 일이므로 attach를 요구하면
+  // 순서가 뒤집힌다. 나머지 profile 명령은 아래 attach 경로에 그대로 남는다.
+  if (group === 'profile' && command === 'adopt') return runProfileAdopt(values, entry)
+
   if (!['inbox', 'grant', 'monitor', 'runtime', 'front', 'freeze', 'thaw', 'escalate', 'profile', 'session', 'controller', 'proceed', 'progress', 'preflight', 'closure', 'query'].includes(group)) {
     console.error(`Unknown command: ${group}\n\n${USAGE}`)
     return 2
@@ -727,7 +734,7 @@ async function attachLocalWorkspace(
   }
 
   const remotes = git ? await gitRemotes(projectRoot) : []
-  const aliases = remotes.map(normalizeRemote).filter((alias): alias is string => alias !== null)
+  const aliases = remoteAliases(remotes)
 
   // 사람이 "이건 그 프로젝트다"라고 말한 경우 — 이어붙인다. 추론이 아니라 선언이다.
   if (declaredWorkspace) {
@@ -751,7 +758,7 @@ async function attachLocalWorkspace(
     return root
   }
 
-  const hits = recoverCandidates(Object.values(index.workspaces), remotes)
+  const hits = recoverCandidates(Object.values(index.workspaces), aliases)
   if (hits.length > 0) {
     // 붙일지는 사람이 정한다. 여기서 이어붙이면 남의 workspace를 조용히 가져올 수 있다.
     for (const line of recoverLines(hits)) console.log(line)
@@ -779,19 +786,33 @@ async function attachLocalWorkspace(
   return root
 }
 
-/** 모든 remote를 evidence로 모은다. origin을 primary로 단정하지 않는다 (C-11 불변식 ④). */
-async function gitRemotes(projectRoot: string): Promise<string[]> {
+/**
+ * 모든 remote를 evidence로 모은다. origin을 primary로 단정하지 않는다 (C-11 불변식 ④).
+ *
+ * 이름을 함께 든다 — identity alias는 이름이 필요 없지만, `profile adopt` 는 어느 remote가
+ * 이 프로젝트를 대표하는지 골라야 하고 `git remote -v` 의 출력 순서는 알파벳순이라
+ * "첫 줄이 origin"이 아니다.
+ */
+async function gitRemotes(projectRoot: string): Promise<RemoteEntry[]> {
   try {
     const { stdout } = await execFileAsync('git', ['-C', projectRoot, 'remote', '-v'])
-    const urls = stdout
-      .split(/\r?\n/)
-      .map((line) => line.split(/\s+/)[1])
-      .filter((url): url is string => Boolean(url))
-    return [...new Set(urls)]
+    const seen = new Map<string, RemoteEntry>()
+    for (const line of stdout.split(/\r?\n/)) {
+      const [name, url] = line.split(/\s+/)
+      if (!name || !url || seen.has(`${name} ${url}`)) continue
+      seen.set(`${name} ${url}`, { name, url })
+    }
+    return [...seen.values()]
   } catch {
     return []
   }
 }
+
+/** identity alias는 이름을 쓰지 않는다 — URL만 정규화한다. */
+const remoteAliases = (remotes: readonly RemoteEntry[]): string[] =>
+  [...new Set(remotes.map((remote) => remote.url))]
+    .map(normalizeRemote)
+    .filter((alias): alias is string => alias !== null)
 
 /**
  * 저장소 안에 있던 `.asc/` 를 사용자 소유 공간으로 옮긴다 (C-11 §6).
@@ -856,7 +877,7 @@ ${USAGE}`)
       workspaceId,
       root: target,
       locator: { path: projectRoot, platform: process.platform, observedAt: new Date().toISOString() },
-      aliases: remotes.map(normalizeRemote).filter((alias): alias is string => alias !== null),
+      aliases: remoteAliases(remotes),
       now: new Date().toISOString(),
     }),
   )
@@ -1357,6 +1378,84 @@ async function checkBootstrap(root: string): Promise<{ code: number; runtime?: R
   for (const drift of outcome.drifts) console.error(`  ${drift.field}: ${drift.locked} → ${drift.current}`)
   console.error('\nOnce you have checked it, re-lock with `asc profile resolve --write`.')
   return { code: 2 }
+}
+
+/**
+ * 지금 이 저장소를 설명하는 Profile을 사용자 소유 공간에 만든다 (P0).
+ *
+ * **이것이 되물음을 없앤다.** 배포본에 담긴 Profile은 예시뿐이고, 그래서 URL만 받은 agent는
+ * `ASC_PROFILE_SELECTION_REQUIRED` 앞에서 고를 것이 없어 사람에게 물었다. 여기서 만드는 것은
+ * git remote가 증명하는 사실뿐이다 — 정본 branch·role 경계·정책은 짓지 않는다 (adopt.ts 주석).
+ *
+ * 쓰는 곳은 `$ASC_HOME/profiles/<id>/` 이고 저장소는 건드리지 않는다. 이미 있으면 덮지 않고
+ * 멈춘다 — 남이 쓰던 Profile을 조용히 갈아 끼우는 것이 이 명령의 일이 아니다.
+ */
+async function runProfileAdopt(values: Record<string, unknown>, entry: AscEntry): Promise<number> {
+  const asJson = Boolean(values.json) || Boolean(values.agent)
+  const { root: projectRoot, git } = await discoverProjectRoot(process.cwd())
+  const remotes = git ? await gitRemotes(projectRoot) : []
+
+  let adopted: AdoptedProfile
+  try {
+    adopted = buildAdoptedProfile({
+      dirName: basename(projectRoot),
+      remotes,
+      // provider를 아는 것은 Adapter를 아는 이 층이다 (C-09 §6.1). host 하나로 단정하는
+      // 것은 여기까지고, 모르는 host는 `git` 이라고만 적는다 — 그것이 사실이다.
+      scmForHost: (host) => (host === 'github.com' ? 'github' : 'git'),
+      ...(values.id ? { requestedId: values.id as string } : {}),
+    })
+  } catch (error) {
+    if (!(error instanceof AdoptError)) throw error
+    console.error(error.message)
+    return 2
+  }
+
+  // 스스로 만든 것이 스키마를 통과하는지 **쓰기 전에** 본다. 통과하지 못하는 파일을 놓고
+  // 나가면 그 다음 명령이 남의 설정 오류처럼 죽는다 (95250da가 닫은 것과 같은 모양).
+  const parsed = ProjectProfile.safeParse(adopted.profile)
+  if (!parsed.success) {
+    console.error(`Built a profile that ASC itself rejects — this is a bug in \`profile adopt\`:`)
+    for (const issue of parsed.error.issues) console.error(`  - ${issue.path.join('.')}: ${issue.message}`)
+    return 1
+  }
+
+  const dir = join(externalProfileRoot(), adopted.id)
+  const path = join(dir, 'profile.json')
+  if (existsSync(path)) {
+    console.error(
+      `A profile called '${adopted.id}' is already there: ${path}\n` +
+        `Attach with it (\`asc setup apply --profile ${adopted.id}\`), or adopt under another name with --id <name>.`,
+    )
+    return 1
+  }
+
+  await mkdir(dir, { recursive: true })
+  await writeFile(path, `${JSON.stringify(adopted.profile, null, 2)}\n`, 'utf8')
+
+  // 다음 한 걸음은 두 형태로 준다 — agent는 portable, 사람은 display (C-14 불변식 ⑯).
+  // 여기서는 설치 상태를 다시 관측하지 않는다: 이 명령이 도는 방식이 곧 그 답이다.
+  const args = ['setup', 'apply', '--profile', adopted.id]
+  const action = {
+    type: 'apply_setup' as const,
+    display: shorthandCommand(args),
+    portable: entry === 'bootstrap' ? portableCommand(args) : shorthandCommand(args),
+  }
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        { id: adopted.id, path, project: parsed.data.project, warnings: adopted.warnings, nextActions: [action.portable], actions: [action] },
+        null,
+        2,
+      ),
+    )
+    return 0
+  }
+  console.log(`Adopted ${projectRoot} as profile '${adopted.id}' — ${path}`)
+  console.log(`Project: ${parsed.data.project.scm} ${parsed.data.project.repository}`)
+  for (const warning of adopted.warnings) console.log(`  note: ${warning}`)
+  console.log(`\nAttach with it: ${action.display}`)
+  return 0
 }
 
 /**
