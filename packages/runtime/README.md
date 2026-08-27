@@ -7,7 +7,7 @@ proceed-by-default, escalation, audit, the external-write guard, host integratio
 here.
 
 ```bash
-npm install -g @asc-agent/runtime@0.1.0
+npm install -g @asc-agent/runtime@0.2.0
 ```
 
 npm owns the executable link (on Windows, npm's own `asc.cmd`). This package never edits

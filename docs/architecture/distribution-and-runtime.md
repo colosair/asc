@@ -179,7 +179,7 @@ So each action carries both:
 ```jsonc
 { "type": "apply_setup",
   "display":  "asc setup apply",
-  "portable": "npx --yes @asc-agent/bootstrap@0.1.0 setup apply" }
+  "portable": "npx --yes @asc-agent/bootstrap@0.2.0 setup apply" }
 ```
 
 **An agent runs `portable`.** A person reads `display`. `executionMode` says which world

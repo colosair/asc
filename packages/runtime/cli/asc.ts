@@ -1029,7 +1029,7 @@ function declaredPolicies(resolved?: ResolvedRuntime): PolicyId[] {
   return declared
 }
 
-const ASC_VERSION = '0.1.0'
+const ASC_VERSION = '0.2.0'
 const CAPABILITIES = ['scm.github', 'state.markdown', 'approval.local']
 const ADAPTER_VERSIONS = { 'scm.github': ASC_VERSION, 'state.markdown': ASC_VERSION }
 

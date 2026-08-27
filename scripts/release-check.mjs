@@ -140,7 +140,7 @@ for (const [label, pkg, dir] of [
 
 // runtime → bootstrap 순서가 문서에 남아 있어야 한다. bootstrap이 exact로 runtime을
 // 가리키므로 반대 순서로 게시하면 첫 설치가 깨진다.
-const checklist = await text('docs/release/v0.1.0-checklist.md')
+const checklist = await text(`docs/release/v${version}-checklist.md`)
 check(
   checklist.indexOf('publish @asc-agent/runtime') < checklist.indexOf('publish @asc-agent/bootstrap'),
   'release checklist publishes runtime before bootstrap',

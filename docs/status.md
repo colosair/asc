@@ -12,6 +12,10 @@ person can install; it is not yet something a team can be handed, because the pr
 describes a real project had nowhere to live except inside the package. That is what the
 next release is about. Nothing below is dated by a release — it says what is true now.
 
+`main` is versioned 0.2.0 and is not published. Until it is, an exact 0.2.0 pin is
+genuinely absent from the registry, and the correct behaviour is to say so and stop —
+never to fall back to 0.1.0 or `@latest` ([AGENTS.md](../AGENTS.md)).
+
 ## What is implemented
 
 ```text
@@ -45,6 +49,10 @@ Current standing:
 
 ```text
 3-OS CI (ubuntu · macOS · windows)          TEST_VERIFIED
+Zero-base agent path — a repository URL,    TEST_VERIFIED (packaged tarballs, not the
+  no profile name, through adopt · attach     registry). The same run against published
+  · READY · a started session                 0.2.0 is a separate observation, after it
+                                              is published.
 Real registry distribution — `npx` the      RUNTIME_OBSERVED
   published bootstrap into a zero state,
   it installs the exact runtime globally
@@ -78,6 +86,9 @@ External Profile discovery   done on `main`, not yet released: a profile can liv
                              `asc profile adopt` writes one for the repository you are in
                              (docs/profiles.md, AGENTS.md). Until v0.2.0 ships, the
                              released package still only sees what it bundles.
+Two-URL agent run, for real  the zero-base path is proven on tarballs. Proving it on the
+                             registry needs 0.2.0 published, and that is a person's call
+                             (docs/release/v0.2.0-checklist.md).
 Public surface English II    the deep operational renderers (monitor, investigation,
                              digest, query, closure, preflight, resolver, entities) are
                              still Korean. The entry surface is English.

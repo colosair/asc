@@ -58,7 +58,7 @@ ASC ships as two packages:
 ### First run, on a machine with nothing installed
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.1.0 init
+npx --yes @asc-agent/bootstrap@0.2.0 init
 ```
 
 ### A profile for your project
@@ -93,10 +93,10 @@ not break an existing attachment — are in [docs/profiles.md](docs/profiles.md)
 The command does not appear by magic, and this is the whole chain:
 
 ```text
-npx --yes @asc-agent/bootstrap@0.1.0 init
+npx --yes @asc-agent/bootstrap@0.2.0 init
         ↓  the bootstrap runs ASC's ordinary setup: detect → plan → apply → verify
         ↓  the plan lists "install the runtime on this machine" as a change
-        ↓  apply runs: npm install -g @asc-agent/runtime@0.1.0
+        ↓  apply runs: npm install -g @asc-agent/runtime@0.2.0
         ↓  npm owns the executable link (on Windows, npm's own asc.cmd)
         ↓  verify checks the installed version and that a NEW process can run it
 bootstrap exits
@@ -137,7 +137,7 @@ to `stderr`.
 On a fresh machine, start from the bootstrap — there is no `asc` yet:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.1.0 setup --agent
+npx --yes @asc-agent/bootstrap@0.2.0 setup --agent
 ```
 
 The document carries a stable shape:
@@ -149,7 +149,7 @@ The document carries a stable shape:
   "executionMode": "bootstrap",     // or installed-runtime
   "changes": [
     { "target": "runtime-install", "package": "@asc-agent/runtime",
-      "version": "0.1.0", "strategy": "npm-global", "from": "NOT_INSTALLED" },
+      "version": "0.2.0", "strategy": "npm-global", "from": "NOT_INSTALLED" },
     { "target": "attach-workspace", "scope": "local", "profile": "..." }
   ],
   "requiresUserAction": false,
@@ -159,9 +159,9 @@ The document carries a stable shape:
     // must exist before anything can be selected.
     { "type": "apply_setup",
       "display":  "asc setup apply",
-      "portable": "npx --yes @asc-agent/bootstrap@0.1.0 setup apply" }
+      "portable": "npx --yes @asc-agent/bootstrap@0.2.0 setup apply" }
   ],
-  "nextActions": ["npx --yes @asc-agent/bootstrap@0.1.0 setup apply"],
+  "nextActions": ["npx --yes @asc-agent/bootstrap@0.2.0 setup apply"],
   "evidence": ["project=/path", "git=yes", "attached=no", "runtime=NOT_INSTALLED"]
 }
 ```

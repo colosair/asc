@@ -22,7 +22,7 @@ workspace 개념의 정본은 [C-11](docs/contracts/C-11_workspace-local-first.m
 ## 설치
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.1.0 init
+npx --yes @asc-agent/bootstrap@0.2.0 init
 ```
 
 **이 저장소를 clone하는 것은 ASC를 쓰는 방법이 아니다** — 아래 [기여자 경로](#기여자-경로)이며,
@@ -45,10 +45,10 @@ ASC는 패키지 둘로 나온다.
 | `@asc-agent/bootstrap` | zero-install 첫 진입. 자체 setup 정책이 없다 |
 
 ```text
-npx --yes @asc-agent/bootstrap@0.1.0 init
+npx --yes @asc-agent/bootstrap@0.2.0 init
         ↓  bootstrap이 ASC의 평소 setup을 돌린다 (detect → plan → apply → verify)
         ↓  plan에 "이 machine에 runtime을 설치한다"가 변경으로 적힌다
-        ↓  apply: npm install -g @asc-agent/runtime@0.1.0
+        ↓  apply: npm install -g @asc-agent/runtime@0.2.0
         ↓  실행물 링크는 npm의 몫이다 (Windows에서는 npm이 만든 asc.cmd)
         ↓  verify: 설치된 버전 + **새 프로세스에서** 실행되는지까지 본다
 bootstrap 종료

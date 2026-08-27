@@ -176,7 +176,11 @@ describe('B-70 Gate — plan이 설치를 드러낸다 (불변식 ⑩)', () => {
 
   it('사람이 읽는 줄이 무엇을 설치하는지 말한다', () => {
     const plan = computeSetupPlan(state({ stableRuntime: runtime('NOT_INSTALLED') }))
-    assert.match(renderSetupPlan(plan).join('\n'), /install @asc-agent\/runtime@0\.1\.0 globally/)
+    // 버전을 손으로 적지 않는다 — release마다 이 검사가 같이 틀리면 검사가 아니라 짐이다.
+    assert.match(
+      renderSetupPlan(plan).join('\n'),
+      new RegExp(`install @asc-agent/runtime@${RELEASE_VERSION.replace(/\./g, '\\.')} globally`),
+    )
   })
 })
 

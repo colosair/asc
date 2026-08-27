@@ -39,7 +39,7 @@ Run `actions[].portable` from the JSON you get back. Branch on `code`. Never par
 **1 — first run.** No `asc` exists yet, so start from the bootstrap:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.1.0 init --agent
+npx --yes @asc-agent/bootstrap@0.2.0 init --agent
 ```
 
 This installs the runtime and attaches, in one pass. `--agent` is the non-interactive
@@ -52,7 +52,7 @@ step 2.
 them describes this project. Run the `adopt_profile` action's `portable` command:
 
 ```bash
-asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.1.0 profile adopt --json
+asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.2.0 profile adopt --json
 ```
 
 It reads this repository's git remote and writes `~/.asc/profiles/<id>/profile.json` — in

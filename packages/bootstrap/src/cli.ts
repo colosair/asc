@@ -13,9 +13,9 @@ import { runAscCommand } from '@asc-agent/runtime'
 
 const USAGE = `asc-bootstrap — first run for ASC (Agent Session Control)
 
-  npx --yes @asc-agent/bootstrap@0.1.0 init            install the runtime and attach
-  npx --yes @asc-agent/bootstrap@0.1.0 setup plan --json    what would change; changes nothing
-  npx --yes @asc-agent/bootstrap@0.1.0 profile adopt --json  make a profile for this repository
+  npx --yes @asc-agent/bootstrap@0.2.0 init            install the runtime and attach
+  npx --yes @asc-agent/bootstrap@0.2.0 setup plan --json    what would change; changes nothing
+  npx --yes @asc-agent/bootstrap@0.2.0 profile adopt --json  make a profile for this repository
 
 \`init\` is \`setup apply\`. It stops without changing anything when something
 is left for you to answer.

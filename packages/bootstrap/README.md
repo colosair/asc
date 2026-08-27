@@ -3,7 +3,7 @@
 Zero-install first run for ASC (Agent Session Control).
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.1.0 init
+npx --yes @asc-agent/bootstrap@0.2.0 init
 ```
 
 **This package holds no setup logic of its own.** It depends on `@asc-agent/runtime` at an
@@ -17,7 +17,7 @@ install in a new process, `asc` is the stable command and this package has no fu
 For a coding agent on a fresh machine:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.1.0 setup --agent
+npx --yes @asc-agent/bootstrap@0.2.0 setup --agent
 ```
 
 `stdout` is a single JSON document. Run `actions[].portable`, not `display` — they differ
