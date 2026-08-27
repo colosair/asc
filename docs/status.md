@@ -7,6 +7,11 @@
 Current release: **v0.1.0** — published to npm and installed from the registry into a
 throwaway machine state to check that the published path actually works.
 
+In development on `main`: **v0.2.0, team-ready distribution.** v0.1.0 is something one
+person can install; it is not yet something a team can be handed, because the profile that
+describes a real project had nowhere to live except inside the package. That is what the
+next release is about. Nothing below is dated by a release — it says what is true now.
+
 ## What is implemented
 
 ```text
@@ -68,10 +73,10 @@ done.
 ## After v0.1.0
 
 ```text
-External Profile discovery   today a Profile ships inside the package or lives in a
-                             source checkout. Installing only the published package and
-                             then using your own Profile needs a user-owned input path
-                             (`$ASC_HOME/profiles/`). Designed separately.
+External Profile discovery   done on `main`, not yet released: a profile can live in
+                             `$ASC_HOME/profiles/` and is picked up from there
+                             (docs/profiles.md). Until v0.2.0 ships, the released
+                             package still only sees what it bundles.
 Public surface English II    the deep operational renderers (monitor, investigation,
                              digest, query, closure, preflight, resolver, entities) are
                              still Korean. The entry surface is English.
