@@ -16,7 +16,7 @@
 // 읽기·검증·digest는 기존 resolver 계약(load.ts)이 그대로 한다.
 
 import { constants } from 'node:fs'
-import { access, readdir } from 'node:fs/promises'
+import { access, readdir, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export type ProfileOrigin = 'built-in' | 'external'
@@ -36,7 +36,11 @@ export type ProfileRoots = {
 }
 
 /** 왜 Profile을 고르지 못했는가. 문장이 아니라 코드로 든다 — Surface가 다르게 말해야 한다. */
-export type ProfileSourceCode = 'INVALID_PROFILE_ID' | 'PROFILE_COLLISION'
+export type ProfileSourceCode =
+  | 'INVALID_PROFILE_ID'
+  | 'PROFILE_COLLISION'
+  | 'PROFILE_ESCAPES_ROOT'
+  | 'PROFILE_ID_MISMATCH'
 
 export class ProfileSourceError extends Error {
   code: ProfileSourceCode
@@ -66,10 +70,30 @@ export function assertProfileId(id: string): void {
   }
 }
 
-/** 이 경로가 정말 그 뿌리 안인가. 문법 검사 뒤의 두 번째 자물쇠다. */
-function within(root: string, target: string): boolean {
+/** 글자만 보고 판단한다. 첫 번째 자물쇠 — symlink·junction은 여기를 그냥 통과한다. */
+function withinLexically(root: string, target: string): boolean {
   const rel = relative(resolve(root), resolve(target))
   return rel !== '' && !rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)
+}
+
+/**
+ * **실제로** 그 뿌리 안인가. 두 번째 자물쇠다.
+ *
+ * 글자 검사만으로는 부족하다는 것을 독립 검증이 실물로 보였다 — Windows junction
+ * (`mklink /J`)이나 symlink를 `profiles/` 안에 만들면 이름은 한 칸이고 경로도 뿌리 안처럼
+ * 보이는데, 실제 파일은 바깥에 있다. 그 파일이 프로젝트의 정책이 되면 lock에 적히는
+ * 출처마저 link 경로라 사람이 진짜 자리를 알 수 없다.
+ *
+ * 그래서 존재하는 것은 realpath로 한 번 더 본다. 없는 경로는 판정 대상이 아니다.
+ */
+async function withinReally(root: string, target: string): Promise<boolean> {
+  try {
+    const [realRoot, realTarget] = await Promise.all([realpath(root), realpath(target)])
+    return withinLexically(realRoot, realTarget)
+  } catch {
+    // 아직 없는 파일이면 글자 판단만으로 충분하다 — 읽는 쪽에서 없다는 사실을 만난다.
+    return withinLexically(root, target)
+  }
 }
 
 const profilePath = (root: string, id: string) => join(root, id, 'profile.json')
@@ -99,10 +123,13 @@ export async function listProfileLocations(roots: ProfileRoots): Promise<Profile
       continue // 없는 디렉터리는 "Profile 0개"다. 오류가 아니다.
     }
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue
+      // junction·symlink는 Windows에서 `isDirectory()` 가 아니다. 목록에서만 빼면
+      // "후보에는 없는데 --profile 로는 붙는" 상태가 되므로 여기서도 같이 본다 —
+      // 발견과 해석이 다른 답을 하면 사람은 둘 다 못 믿는다.
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
       if (!SAFE_ID.test(entry.name)) continue // 이름이 문법 밖이면 고를 수 없는 것이다
       const path = profilePath(dir, entry.name)
-      if (!within(dir, path)) continue
+      if (!(await withinReally(dir, path))) continue
       if (await exists(path)) found.push({ id: entry.name, origin, path })
     }
   }
@@ -125,11 +152,19 @@ export async function resolveProfileLocation(
 
   const externalDir = roots.externalRoot
   const external = externalDir ? profilePath(externalDir, id) : undefined
-  if (external && !within(externalDir!, external)) {
+  if (external && !withinLexically(externalDir!, external)) {
     throw new ProfileSourceError('INVALID_PROFILE_ID', `'${id}' escapes the profile directory`)
   }
 
   const hasExternal = external ? await exists(external) : false
+  if (external && hasExternal && !(await withinReally(externalDir!, external))) {
+    throw new ProfileSourceError(
+      'PROFILE_ESCAPES_ROOT',
+      `'${id}' points outside ${externalDir} — a link leads to another place on disk. ` +
+        'Put the profile itself in the directory: policy must not come from somewhere the ' +
+        'recorded source does not name.',
+    )
+  }
   const hasBuiltIn = await exists(builtIn)
 
   if (hasExternal && hasBuiltIn) {

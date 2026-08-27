@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { OperationalPreset, ProfileLock, ProjectProfile, UserOverride } from '../../schemas/profile.ts'
 import type { MonitorConfig } from '../monitor/signals.ts'
 import type { OwnershipMap } from '../policy/ownership.ts'
-import { resolveProfileLocation, type ProfileOrigin } from './profile-source.ts'
+import { ProfileSourceError, resolveProfileLocation, type ProfileOrigin } from './profile-source.ts'
 import { resolveProfile, type ConfigLayer, type ResolvedProfile } from './resolve.ts'
 import { satisfies } from './version.ts'
 
@@ -82,6 +82,20 @@ export async function loadLayers(input: {
   })
   const profileSource = location.path
   const profile = ProjectProfile.parse(await readJson(profileSource))
+
+  // 디렉터리 이름과 선언된 id가 다르면 여기서 멈춘다.
+  //
+  // 둘이 다르면 lock에는 **선언된 id**가 박히고 다음 실행은 그 id로 파일을 찾는다 —
+  // 그런 디렉터리는 없으므로 붙자마자 아무 명령도 돌지 않는 workspace가 된다.
+  // 독립 검증이 실물로 보인 결함이고, 되돌리려면 `.asc/` 를 손으로 지워야 했다.
+  if (profile.id !== input.profileId) {
+    throw new ProfileSourceError(
+      'PROFILE_ID_MISMATCH',
+      `${profileSource} declares id '${profile.id}' but lives in a directory named ` +
+        `'${input.profileId}'. Make the two the same — everything after this point looks ` +
+        'the profile up by the id it declares.',
+    )
+  }
 
   let preset: OperationalPreset | undefined
   let presetSource: string | undefined

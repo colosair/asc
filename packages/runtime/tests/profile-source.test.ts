@@ -208,3 +208,87 @@ describe('External Profile — symlink', () => {
     }
   })
 })
+
+// ── 독립 검증이 찾은 것들 ─────────────────────────────────────────────────────
+//
+// 아래 셋은 구현자가 통과시킨 회귀가 아니라 **별도 실행의 검증자가 실물로 만든 상태**다.
+// 각각이 어떻게 사용자를 망가뜨렸는지 함께 적는다 — 다음에 이 검사를 지우려는 사람이
+// 그 대가를 알아야 한다.
+
+describe('External Profile — 선언된 id와 디렉터리 이름', () => {
+  it('둘이 다르면 붙기 전에 멈춘다 — 붙고 나서 알면 되돌릴 수 없었다', async () => {
+    const { installRoot, externalRoot } = await roots()
+    await mkdir(join(externalRoot, 'dirname-alpha'), { recursive: true })
+    await writeFile(
+      join(externalRoot, 'dirname-alpha', 'profile.json'),
+      JSON.stringify({ ...PROFILE, id: 'declared-beta' }),
+      'utf8',
+    )
+    await assert.rejects(
+      loadLayers({ installRoot, externalProfileRoot: externalRoot, profileId: 'dirname-alpha' }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProfileSourceError)
+        assert.equal(error.code, 'PROFILE_ID_MISMATCH')
+        // 사람이 고칠 수 있게 둘 다 말한다
+        assert.match(error.message, /declared-beta/)
+        assert.match(error.message, /dirname-alpha/)
+        return true
+      },
+    )
+  })
+
+  it('같으면 그대로 읽힌다 — 이 검사가 정상 경로를 막지 않는다', async () => {
+    const { installRoot, externalRoot } = await roots()
+    await write(externalRoot, 'same-name')
+    const layers = await loadLayers({
+      installRoot,
+      externalProfileRoot: externalRoot,
+      profileId: 'same-name',
+    })
+    assert.equal(layers.profile.id, 'same-name')
+  })
+})
+
+describe('External Profile — link로 뿌리를 벗어나는 것', () => {
+  /** junction·symlink를 만들 수 있는 환경에서만 관측할 수 있다. 못 만들면 그 사실을 남긴다. */
+  const linkOutside = async (externalRoot: string, id: string): Promise<string | null> => {
+    const outside = join(externalRoot, '..', 'outside-target')
+    await mkdir(outside, { recursive: true })
+    await writeFile(join(outside, 'profile.json'), JSON.stringify({ ...PROFILE, id }), 'utf8')
+    try {
+      await symlink(outside, join(externalRoot, id), 'junction')
+      return outside
+    } catch {
+      try {
+        await symlink(outside, join(externalRoot, id), 'dir')
+        return outside
+      } catch {
+        return null
+      }
+    }
+  }
+
+  it('link가 가리키는 바깥 파일은 Profile이 되지 못한다', async (t) => {
+    const { installRoot, externalRoot } = await roots()
+    if ((await linkOutside(externalRoot, 'escape')) === null) {
+      return t.skip('이 환경에서는 link를 만들 수 없다 — 검사를 건너뛴다')
+    }
+    await assert.rejects(
+      resolveProfileLocation('escape', { installRoot, externalRoot }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProfileSourceError)
+        assert.equal(error.code, 'PROFILE_ESCAPES_ROOT')
+        return true
+      },
+    )
+  })
+
+  it('발견과 해석이 같은 답을 한다 — 목록에 없는데 붙는 일이 없다', async (t) => {
+    const { installRoot, externalRoot } = await roots()
+    if ((await linkOutside(externalRoot, 'escape')) === null) {
+      return t.skip('이 환경에서는 link를 만들 수 없다 — 검사를 건너뛴다')
+    }
+    const listed = await listProfileLocations({ installRoot, externalRoot })
+    assert.deepEqual(listed.map((location) => location.id), [], '목록이 바깥 파일을 후보로 들었다')
+  })
+})

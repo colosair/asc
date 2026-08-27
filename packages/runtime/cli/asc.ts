@@ -105,6 +105,7 @@ import type { ResolvedRuntime } from '../core/resolver/load.ts'
 import { SessionRuntime } from '../core/runtime/session.ts'
 import { Checkpoint, Handoff, SessionRole, type Session } from '../core/model/entities.ts'
 import { archiveLock, bootstrapGuard, buildLock, compareLock, loadLayers, resolveRuntime } from '../core/resolver/load.ts'
+import { ProfileSourceError } from '../core/resolver/profile-source.ts'
 import { renderAscMd, renderControllerMd } from '../core/resolver/render.ts'
 import { ProfileLock } from '../schemas/profile.ts'
 import { LocalOperator } from '../core/operator/local-operator.ts'
@@ -362,6 +363,33 @@ export type AscEntry = 'runtime' | 'bootstrap'
  * 진입이 둘이어도 판단은 하나다. 그래서 export이고, 그래서 아래 자동 실행은 이 파일이
  * 진짜 진입점일 때만 돈다.
  */
+/**
+ * 설정을 읽다 실패한 것을 **사람이 읽을 문장**으로 바꾼다.
+ *
+ * 여기가 없으면 Profile 하나가 잘못됐을 때 사용자가 보는 것은 Node의 stack dump다 —
+ * 내부 파일 이름과 프레임이 줄줄이 나오고, 정작 "무엇을 고쳐야 하는지"는 없다.
+ * 독립 검증이 다섯 갈래(충돌·깨진 JSON·디렉터리가 아닌 것·EISDIR·긴 id)에서 같은 모양을
+ * 관측했다. 예상 못 한 오류는 그대로 던진다 — 삼키면 그게 더 나쁘다.
+ */
+function explainConfigError(error: unknown): string | null {
+  if (error instanceof ProfileSourceError) return error.message
+  const failure = error as NodeJS.ErrnoException
+  const path = failure?.path ? ` (${failure.path})` : ''
+  switch (failure?.code) {
+    case 'ENOENT':
+      return `That profile is not there${path}. \`asc setup status\` lists what is.`
+    case 'EISDIR':
+      return `A profile has to be a file, and that is a directory${path}.`
+    case 'EACCES':
+    case 'EPERM':
+      return `No permission to read that profile${path}.`
+    default:
+      break
+  }
+  if (error instanceof SyntaxError) return `That profile is not valid JSON — ${error.message}`
+  return null
+}
+
 export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime'): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -893,6 +921,23 @@ async function runInit(values: Record<string, unknown>): Promise<number> {
   }
   const { root: projectRoot, git } = await discoverProjectRoot(process.cwd())
   console.log(`Project: ${projectRoot}${git ? '' : ' (not a git repository)'}`)
+
+  // **읽을 수 있는 Profile인지 먼저 본다.** 아래부터는 `.git/info/exclude` 를 고치고
+  // 템플릿을 만드는 등 세상을 바꾸는 일이고, 그 뒤에 Profile이 잘못된 것을 알면 반쯤 만든
+  // `.asc/` 가 남는다 — 독립 검증이 실제로 그 상태를 만들었다. 여기서 멈추면 아무것도 남지 않는다.
+  try {
+    await loadLayers({
+      installRoot: installRoot(),
+      externalProfileRoot: externalProfileRoot(),
+      profileId: values.profile as string,
+    })
+  } catch (error) {
+    const explained = explainConfigError(error)
+    if (explained === null) throw error
+    console.error(explained)
+    console.error('Nothing was changed.')
+    return 2
+  }
 
   const ascRoot =
     scope === 'project'
@@ -3263,4 +3308,13 @@ const invokedDirectly = (() => {
   }
 })()
 
-if (invokedDirectly) process.exitCode = await runAscCommand(process.argv.slice(2))
+if (invokedDirectly) {
+  try {
+    process.exitCode = await runAscCommand(process.argv.slice(2))
+  } catch (error) {
+    const explained = explainConfigError(error)
+    if (explained === null) throw error // 모르는 고장은 감추지 않는다
+    console.error(explained)
+    process.exitCode = 1
+  }
+}
