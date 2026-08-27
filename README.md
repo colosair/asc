@@ -342,6 +342,7 @@ stays human-controlled; only drift detection is automated.
 | Contract — distribution | [C-14](docs/contracts/C-14_distribution-runtime-entry.md) | how the executable exists on a machine |
 | Architecture — distribution | [docs/architecture/distribution-and-runtime.md](docs/architecture/distribution-and-runtime.md) | English |
 | Profiles — bringing your own | [docs/profiles.md](docs/profiles.md) | where a real project's profile lives |
+| Team setup and upgrading | [docs/team-setup.md](docs/team-setup.md) | onboarding a teammate; moving to a newer runtime |
 | **Product status (SSOT)** | [docs/status.md](docs/status.md) | what exists, what is proven, what is not claimed |
 | Block-level history | (비공개 evidence 저장소) §2 | development record — private evidence repository |
 | Measured evidence | (비공개 evidence 저장소) | runtime observations — private evidence repository |
