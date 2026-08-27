@@ -52,14 +52,21 @@ What to do, in order:
    attempts is worse evidence than one clear denial.
 2. Do not paraphrase or "simplify" the command. It goes to the person exactly as written.
 3. Show them the exact command, and say plainly that the host blocked it before ASC ran.
-4. Ask for **one** allow rule scoped to that exact command. In Claude Code, a project or
-   user permission rule of the form `Bash(<the exact command>)`. Never a wildcard, never
-   `npx:*` or `npm:*`, never blanket shell access. ASC does not write to
-   `~/.claude/settings.json` or any host config — granting the rule is the person's action,
-   in their own interface.
-5. Once it is granted, run **the same command again**, once. Then continue from where you
-   were. If a later `actions[].portable` is blocked too, it gets its own exact rule by the
-   same pattern.
+4. Ask them to **switch the session's permission mode** — in Claude Code, out of automatic
+   approval and into the mode where each command is approved as it is asked for. Do not ask
+   for a broad standing rule: no `Bash(npx:*)`, no `npm:*`, no blanket shell access. ASC
+   never writes to `~/.claude/settings.json` or any host config; changing the mode is the
+   person's action in their own interface.
+5. Once they have switched, run **the same command again**, once, and let them approve that
+   single run. Then continue from where you were. A later `actions[].portable` that is
+   blocked is handled the same way.
+
+A measured note, so nobody repeats the experiment: on the machine where this was observed,
+adding an allow rule for the exact command **did not** get it through — the same denial came
+back. Switching the mode and approving the one run did. An allow rule is not the recipe
+here, and the reason the automatic mode refuses is not established: the same command was
+denied twice in one session and allowed in another, so treat the denial as a property of the
+session you are in, not of the command you are holding.
 
 ### This Node cannot run ASC — `NODE_RUNTIME_REQUIRED`
 
@@ -73,6 +80,11 @@ Run it if the host allows it. **If the host refuses to run that form, do not go 
 another one** — that is `HOST_EXECUTION_PERMISSION_REQUIRED` above, and it is handled
 there. If `candidates` is empty, installing Node is the person's to do: say which version
 is needed and stop.
+
+This form exists to remove ambiguity about which Node runs ASC. It is not a way around a
+host that is refusing to execute things, and it must not be reached for as one — that a
+`PATH=`-prefixed command was once allowed where a plain one was denied says something about
+that session, not something you can rely on.
 
 ### Three kinds of outcome, everywhere below
 
@@ -166,7 +178,7 @@ says is still blocked, and which `warnings` from adopt the team needs to answer.
   `--scope project` is a team's explicit decision, never yours.
 - Fill a profile's canonical sources or role boundaries with plausible-looking values.
 - Ask for, store, or enter a credential. Gates that need one stay blocked, and you say so.
-- Retry a host-blocked command in a different shape, or ask for a permission rule wider
-  than the one command that was blocked.
+- Retry a host-blocked command in a different shape, or ask for a standing permission rule
+  when what is needed is one approved run.
 - Edit a host's settings or a shell profile to make something run. That is the person's
   interface, not yours.

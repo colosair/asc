@@ -55,8 +55,9 @@ The user does not need to know this sequence. This is the one the skill follows.
        npx --yes ${BOOTSTRAP_SPEC} setup apply --json
      Its JSON carries \`actions[].portable\` — run that, never \`display\`.
      If the host refuses to run that command at all, that is a permission boundary, not an
-     ASC failure: show the person the exact command and ask for it, and do not try other
-     shapes of the same thing. AGENTS.md in the repository carries the recipe.
+     ASC failure. Do not try other shapes of the same thing. Show the person the exact
+     command and ask them to switch this session's permission mode so they can approve the
+     single run — a standing allow rule for the command was measured and did not work.
 
 1. Attached?              asc setup status
      not yet  → asc init (it shows profile candidates; a person chooses)

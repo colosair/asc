@@ -82,18 +82,26 @@ Coverage health against a real  WAITING_FOR_CREDENTIAL — same shape: code comp
 Waiting for a credential is not the same as unfinished code. Neither is written down as
 done.
 
+## What the host observation found (0.2.1 candidate)
+
+```text
+Host denial is not about the   RUNTIME_OBSERVED. The canonical command was denied twice in
+  command                      one session and allowed in another; substituting `--agent`
+                               changed nothing. Whatever the automatic classifier is
+                               reacting to, it is not a property of the command, and no
+                               cause is claimed here.
+Recovery that works            RUNTIME_OBSERVED. Adding an allow rule for the exact command
+                               did NOT get it through — the same denial returned. Switching
+                               the session's permission mode and approving the single run
+                               did, and ASC then started and answered normally. AGENTS.md
+                               carries that path and no other.
+```
+
+Tests cannot reach a host classifier and none was faked to look as though they can.
+
 ## Not yet observed on 0.2.1
 
 ```text
-Host classifier behaviour    the denial that started this release happens in a real
-                             auto-mode session, before ASC exists. Tests cannot reach it
-                             and will not be made to look as though they can. The
-                             candidate build is measured on a real Mac before publishing
-                             (docs/release/v0.2.1-checklist.md, "Host observation").
-                             The classifier is not deterministic — a read-only command
-                             was denied in the same session that allowed four others —
-                             so no single trial settles anything, and no cause is written
-                             down until the arms separate.
 Published two-URL run        a tarball is not the registry. Whatever the candidate shows,
                              the onboarding claim is re-made against published 0.2.1.
 ```
