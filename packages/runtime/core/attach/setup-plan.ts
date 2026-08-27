@@ -156,6 +156,11 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
   }
 
   if (state.ascRoot) {
+    // 붙어 있어도 **무엇을 고를 수 있었는지**는 사실이다. 사용자 소유 Profile을 새로 놓고
+    // 계획을 물었을 때 그것이 어디에도 안 보이면, 놓은 사람은 경로를 의심하게 된다.
+    if (state.profileCandidates.length > 0) {
+      evidence.push(`profile candidates=${state.profileCandidates.join(', ')}`)
+    }
     return finish(changes, evidence, state, mode, command)
   }
 
