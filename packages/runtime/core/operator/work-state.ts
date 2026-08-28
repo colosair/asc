@@ -101,7 +101,8 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   if (input.change === 'UNAVAILABLE') limitations.push('MR·리뷰 상태를 읽지 못했다 (원격 provider 미인증/불가)')
 
   const onCanonical = Object.entries(repo.pathsOnCanonical ?? {}).filter(([, exists]) => exists)
-  const merged = repo.mergedIntoCanonical === true || onCanonical.length > 0
+  const mentioned = repo.mentionedOnCanonical ?? []
+  const merged = repo.mergedIntoCanonical === true || onCanonical.length > 0 || mentioned.length > 0
   const hasBranch = repo.refs.length > 0
   const artifacts = Object.entries(repo.pathsExist).filter(([, exists]) => exists)
 
@@ -110,6 +111,7 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   if (repo.mergedIntoCanonical === true) evidence.push('작업 가지가 정본에 병합돼 있다')
   if (onCanonical.length > 0) evidence.push(`정본에 산출물이 있다: ${onCanonical.map(([p]) => p).join(', ')}`)
   if (artifacts.length > 0) evidence.push(`작업 트리 산출물: ${artifacts.map(([p]) => p).join(', ')}`)
+  if (mentioned.length > 0) evidence.push(`정본 이력이 이 작업을 언급한다: ${mentioned.join(' / ')}`)
 
   const openDependencies = (input.dependencies ?? []).filter((d) => d.open === true)
   if (openDependencies.length > 0) {

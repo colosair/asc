@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -33,8 +34,17 @@ const PROVIDES: readonly Capability[] = [
   'context.thread',
 ]
 
-/** 프로젝트가 어느 작업 항목 묶음에 붙어 있는지 선언하는 파일. 없으면 붙어 있지 않은 것이다. */
+/** 프로젝트가 어느 작업 항목 묶음에 붙어 있는지 선언하는 파일. 팀이 채택했을 때 저장소에 생긴다. */
 const DECLARATION = join('.jira-agent', 'project.yaml')
+
+/**
+ * 같은 선언의 **개인 자리**. 저장소를 건드리지 않고 붙여 쓰는 것이 provider 의 기본값이라,
+ * 저장소 안만 보면 "붙어 있는데 안 붙은 것으로 보이는" 경우가 생긴다. 그 상태에서 조사를
+ * 포기하면 읽을 수 있는 것을 안 읽은 것이 된다 — 그래서 여기도 본다.
+ *
+ * 개인 선언은 remote 로 맞춘다(파일의 `path` 는 출처 기록일 뿐이다).
+ */
+const PERSONAL_BINDINGS = join('.jam', 'projects.yaml')
 
 export type JamAdapterDeps = {
   /**
@@ -47,6 +57,10 @@ export type JamAdapterDeps = {
   authStatus?: (context: DiscoveryContext) => Promise<AuthStatus>
   /** 선언 파일 읽기 통로. */
   readDeclaration?: (projectRoot: string) => Promise<string | null>
+  /** 개인 선언 파일 읽기 통로. */
+  readPersonalBindings?: (home: string) => Promise<string | null>
+  /** 이 저장소의 remote 들. 개인 선언과 맞출 때만 쓴다. */
+  listRemotes?: (projectRoot: string) => Promise<string[]>
 }
 
 /** `jam auth status --json` 의 응답. **토큰 값은 여기 오지 않는다.** */
@@ -91,12 +105,16 @@ export class JamAdapter implements Adapter {
   #args: readonly string[]
   #authStatus: ((context: DiscoveryContext) => Promise<AuthStatus>) | undefined
   #readDeclaration: (projectRoot: string) => Promise<string | null>
+  #readPersonalBindings: (home: string) => Promise<string | null>
+  #listRemotes: (projectRoot: string) => Promise<string[]>
 
   constructor(deps: JamAdapterDeps = {}) {
     this.#command = deps.command ?? 'jam'
     this.#args = deps.args ?? []
     this.#authStatus = deps.authStatus
     this.#readDeclaration = deps.readDeclaration ?? defaultRead
+    this.#readPersonalBindings = deps.readPersonalBindings ?? defaultReadPersonal
+    this.#listRemotes = deps.listRemotes ?? defaultListRemotes
   }
 
   describe(): AdapterDescriptor {
@@ -121,10 +139,27 @@ export class JamAdapter implements Adapter {
    */
   async discover(context: DiscoveryContext): Promise<BindingCandidate[]> {
     const text = await this.#readDeclaration(context.projectRoot)
-    if (!text) return []
-    const key = parseProjectKey(text)
-    if (!key) return []
-    return [{ adapterId: 'jam', resource: key, provides: PROVIDES, discoveredBy: DECLARATION }]
+    const key = text ? parseProjectKey(text) : null
+    if (key) return [{ adapterId: 'jam', resource: key, provides: PROVIDES, discoveredBy: DECLARATION }]
+
+    // 저장소에 선언이 없다고 붙어 있지 않은 것은 아니다 — 개인 자리를 본다.
+    const personal = await this.#personalKey(context)
+    if (!personal) return []
+    return [{ adapterId: 'jam', resource: personal, provides: PROVIDES, discoveredBy: PERSONAL_BINDINGS }]
+  }
+
+  /** 개인 선언에서 이 저장소의 키를 찾는다. remote 가 일치할 때만 — 이름이 비슷한 것은 근거가 아니다. */
+  async #personalKey(context: DiscoveryContext): Promise<string | null> {
+    const home = context.env?.ASC_JAM_HOME ?? context.env?.HOME ?? homedir()
+    const text = await this.#readPersonalBindings(home)
+    if (!text) return null
+    const remotes = await this.#listRemotes(context.projectRoot).catch(() => [])
+    const mine = new Set(remotes.map(normalizeWorkspace).filter((value): value is string => value !== null))
+    if (mine.size === 0) return null
+    for (const entry of parsePersonalBindings(text)) {
+      if (mine.has(entry.workspace)) return entry.key
+    }
+    return null
   }
 
   async probe(candidate: BindingCandidate, context: DiscoveryContext): Promise<ProbeResult> {
@@ -181,4 +216,53 @@ async function defaultRead(projectRoot: string): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+async function defaultReadPersonal(home: string): Promise<string | null> {
+  try {
+    return await readFile(join(home, PERSONAL_BINDINGS), 'utf8')
+  } catch {
+    return null
+  }
+}
+
+async function defaultListRemotes(projectRoot: string): Promise<string[]> {
+  const { stdout } = await run('git', ['-C', projectRoot, 'remote', '-v'])
+  return stdout
+    .split('\n')
+    .map((line) => line.split(/\s+/)[1])
+    .filter((url): url is string => Boolean(url))
+}
+
+/**
+ * 개인 선언에서 `workspace` 와 `key` 짝만 꺼낸다. YAML 파서를 들이지 않는다 —
+ * 읽을 것이 두 줄이고, 의존성 하나가 그 값보다 비싸다.
+ */
+export function parsePersonalBindings(text: string): { workspace: string; key: string }[] {
+  const found: { workspace: string; key: string }[] = []
+  let workspace: string | null = null
+  for (const line of text.split('\n')) {
+    const w = /^\s*-?\s*workspace:\s*"?([^"\n]+?)"?\s*$/.exec(line)
+    if (w?.[1]) {
+      workspace = w[1]
+      continue
+    }
+    const k = /^\s*key:\s*"?([^"\n]+?)"?\s*$/.exec(line)
+    if (k?.[1] && workspace) {
+      found.push({ workspace: normalizeWorkspace(workspace) ?? workspace, key: k[1] })
+      workspace = null
+    }
+  }
+  return found
+}
+
+/** `git:host/group/project` 형태로 맞춘다. remote URL 도 같은 형태로 접어 비교한다. */
+export function normalizeWorkspace(value: string): string | null {
+  const raw = value.trim().replace(/^git:/, '')
+  const ssh = /^[^@]+@([^:]+):(.+?)(?:\.git)?$/.exec(raw)
+  const https = /^https?:\/\/([^/]+)\/(.+?)(?:\.git)?$/.exec(raw)
+  const plain = /^([^/]+)\/(.+?)(?:\.git)?$/.exec(raw)
+  const match = ssh ?? https ?? plain
+  if (!match) return null
+  return `git:${match[1]!.toLowerCase()}/${match[2]!.toLowerCase()}`
 }

@@ -97,11 +97,13 @@ const FACTORIES: Record<string, Factory> = {
   jam(binding, input) {
     // JAM은 토큰을 받지 않는다 — 자격은 도구가 자기 안에서 관리하고 ASC는 상태만 읽는다.
     if (!input.jam) return {}
-    const client = new JamMcpClient({
+    const client = registerToolClient(
+      new JamMcpClient({
       command: input.jam.command,
       ...(input.jam.args ? { args: input.jam.args } : {}),
-      ...(input.jam.cwd ? { cwd: input.jam.cwd } : {}),
-    })
+        ...(input.jam.cwd ? { cwd: input.jam.cwd } : {}),
+      }),
+    )
     const projectKey = binding.resource
     const timezone = input.jam.timezone
     const inventory = new JamInventory({ client, projectKey, ...(timezone ? { timezone } : {}) })
@@ -120,6 +122,24 @@ const FACTORIES: Record<string, Factory> = {
 
 /** 이 adapter는 토큰 없이 조립된다. 자격은 도구가 자기 안에서 진다. */
 const TOKENLESS = new Set(['jam'])
+
+/**
+ * 자식 프로세스를 띄우는 도구 클라이언트들. 명령이 끝나면 닫아야 한다 — 안 닫으면
+ * CLI 가 할 일을 다 하고도 종료하지 못하고 서버 프로세스가 남는다(실제로 그렇게 됐다).
+ */
+const toolClients = new Set<{ stop(): Promise<void> }>()
+
+function registerToolClient<T extends { stop(): Promise<void> }>(client: T): T {
+  toolClients.add(client)
+  return client
+}
+
+/** 이 프로세스가 띄운 도구 자식들을 정리한다. 여러 번 불러도 안전하다. */
+export async function closeToolClients(): Promise<void> {
+  const clients = [...toolClients]
+  toolClients.clear()
+  await Promise.all(clients.map((client) => client.stop().catch(() => undefined)))
+}
 
 /**
  * capability와 Port의 대응. **이 표가 없으면 조립이 덮어쓰기가 된다** —

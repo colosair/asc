@@ -25,6 +25,11 @@ export type RepoObservation = {
   pathsExist: Record<string, boolean>
   /** 정본 가지에 그 경로가 있는가 (squash 병합 대비). */
   pathsOnCanonical?: Record<string, boolean>
+  /**
+   * 정본 가지의 이력에서 이 작업을 언급하는 커밋들. **가지가 지워진 뒤에도 남는 증거다** —
+   * 병합 후 브랜치를 지우는 팀에서는 ref 대조만으로는 "구현이 정본에 있다"를 알 수 없다.
+   */
+  mentionedOnCanonical?: readonly string[]
   /** git 자체를 쓸 수 없었던 이유. 있으면 이 관측은 비어 있다. */
   unavailable?: string
 }

@@ -81,25 +81,43 @@ export class LocalRepoAdapter implements LocalRepoPort {
       )
     }
 
-    if (query.canonicalRef) {
-      observation.canonicalRef = query.canonicalRef
-      observation.mergedIntoCanonical = await this.#anyMerged(observation.refs, query.canonicalRef)
+    const canonicalRef = query.canonicalRef ?? (await this.#defaultCanonicalRef())
+    if (canonicalRef) {
+      observation.canonicalRef = canonicalRef
+      observation.mergedIntoCanonical = await this.#anyMerged(observation.refs, canonicalRef)
+      if (query.refHint) {
+        // 가지가 지워졌어도 이력은 남는다 — 커밋 메시지가 이 작업을 언급하는지 본다.
+        const log = await this.#git(['log', '--format=%h %s', `--grep=${query.refHint}`, '-n', '5', canonicalRef])
+        observation.mentionedOnCanonical = (log ?? '')
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+      }
     }
 
     for (const path of query.paths ?? []) {
       observation.pathsExist[path] = await this.#exists(join(this.#cwd, path))
     }
 
-    if (query.canonicalRef && (query.paths?.length ?? 0) > 0) {
+    if (canonicalRef && (query.paths?.length ?? 0) > 0) {
       const onCanonical: Record<string, boolean> = {}
       for (const path of query.paths ?? []) {
         // squash 병합이면 ref 는 조상이 아니다. 산출물이 정본에 있는지는 따로 물어야 한다.
-        onCanonical[path] = (await this.#git(['cat-file', '-e', `${query.canonicalRef}:${path}`])) !== null
+        onCanonical[path] = (await this.#git(['cat-file', '-e', `${canonicalRef}:${path}`])) !== null
       }
       observation.pathsOnCanonical = onCanonical
     }
 
     return observation
+  }
+
+  /**
+   * Profile 이 정본 ref 를 선언하지 않았을 때, 저장소 자신에게 묻는다 (origin/HEAD).
+   * 추측이 아니라 관측이다 — 없으면 없는 대로 둔다.
+   */
+  async #defaultCanonicalRef(): Promise<string | undefined> {
+    const head = await this.#git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+    return head?.trim() || undefined
   }
 
   async #anyMerged(refs: readonly string[], canonicalRef: string): Promise<boolean> {

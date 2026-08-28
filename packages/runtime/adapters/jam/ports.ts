@@ -161,8 +161,16 @@ export class JamInventory extends JamBase implements InventoryPort {
 }
 
 export class JamResourceContext extends JamBase implements ResourceContextPort {
+  /**
+   * `jira_context` 가 아니라 `jira_full` 을 부른다.
+   *
+   * context 단계는 본문(description)을 싣지 않는다. 그런데 ResourceSnapshot 의 `body` 는
+   * 조사와 계약 초안이 완료 조건을 읽는 유일한 자리다 — 그것을 비운 채 넘기면 "작업 항목에
+   * 완료 조건이 없다"는 **거짓 사실**이 만들어지고, 없는 조건을 사람에게 되묻게 된다.
+   * provider 자신의 지침도 계약·합의 판정에는 full 을 쓰라고 말한다.
+   */
   async getResource(reference: string): Promise<ResourceSnapshot> {
-    const response = await this.client.callTool<JamPayload>('jira_context', { issueKeys: [reference] })
+    const response = await this.client.callTool<JamPayload>('jira_full', { issueKeys: [reference] })
     if (!response.ok) return missing(reference)
 
     const issue = response.value.issues?.[0]

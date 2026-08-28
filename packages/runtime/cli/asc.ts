@@ -64,12 +64,15 @@ import { evaluateHealth, healthAlertLines } from '../core/monitor/health-alerts.
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
 import { LocalRepoAdapter } from '../adapters/local/repo.ts'
+import { GitHubAdapter } from '../adapters/github/adapter.ts'
+import { GitLabAdapter } from '../adapters/gitlab/adapter.ts'
+import { JamAdapter } from '../adapters/jam/adapter.ts'
 import type { ChangeSummary } from '../ports/change-context.ts'
 import type { ContextComment } from '../ports/resource-context.ts'
 import { statusIndicatesDone } from '../adapters/jam/ports.ts'
 import { ProgressService } from '../core/operator/progress.ts'
 import { composeBindings, defaultAdapters } from '../composition/registry.ts'
-import { buildRuntimePorts, rolesFor } from '../composition/runtime.ts'
+import { buildRuntimePorts, closeToolClients, rolesFor } from '../composition/runtime.ts'
 import { buildEventObservation } from '../composition/observe.ts'
 import { availableProfiles, planBootstrap, renderPlan, type PolicyId } from '../core/attach/bootstrap.ts'
 import {
@@ -1940,6 +1943,9 @@ async function runProceed(
     ...(workRef ? { workRef } : {}),
   })
 
+  // 도구 자식(JAM MCP 서버 등)을 여기서 닫는다 — 안 닫으면 출력까지 끝내고도 종료하지 못한다.
+  await closeToolClients()
+
   if (values.json) {
     console.log(JSON.stringify(outcome, null, 2))
     return outcome.kind.startsWith('BLOCKED') || outcome.kind === 'FAILED' ? 1 : 0
@@ -2067,7 +2073,13 @@ async function buildWorkIngress(
   resolved?: ResolvedRuntime,
 ): Promise<WorkIngress | undefined> {
   const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const adapters = defaultAdapters()
+  // JAM 은 아직 `jam` 바이너리를 깔지 않는 설치가 기본이다 — 그 경우 launcher 를 통해 부른다.
+  const jamCommand = process.env.ASC_JAM_PATH ? undefined : { command: 'npx', args: ['--yes', '@jam-mcp/launcher'] }
+  const adapters = [
+    new GitHubAdapter(),
+    new GitLabAdapter(),
+    new JamAdapter(jamCommand ?? {}),
+  ]
   const declared = resolved?.layers.profile.bindings ?? []
   const plan = await composeBindings({
     context: { projectRoot, env: process.env },
@@ -2078,7 +2090,7 @@ async function buildWorkIngress(
     plan,
     roles: rolesFor(plan, declared),
     perPage: 30,
-    jam: { command: 'npx', args: ['--yes', '@jam-mcp/launcher', 'serve'], cwd: projectRoot },
+    jam: { command: jamCommand?.command ?? 'jam', args: [...(jamCommand?.args ?? []), 'serve'], cwd: projectRoot },
     endpointFor: (binding) => endpointOf(adapters, binding),
   })
 

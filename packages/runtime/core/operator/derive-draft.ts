@@ -42,8 +42,11 @@ export type DeriveInput = {
  * 못 찾으면 **비운다**. 없는 인수 조건을 만들어 넣는 것이 이 함수가 할 수 있는 최악이다.
  */
 const ACCEPTANCE_HEADING = /(완료\s*조건|인수\s*조건|acceptance|done\s*criteria)/i
-const BULLET = /^\s*(?:[-*+]\s*(?:\[[ xX]\]\s*)?|\d+[.)]\s*)(.+?)\s*$/
-const HEADING = /^\s{0,3}#{1,6}\s|^\s*###/
+// 불릿·번호·체크박스 어느 형태든 항목으로 본다. provider 마다 본문을 다르게 눌러 담는다 —
+// 마크다운을 그대로 주는 곳도 있고, 헤딩·불릿 기호를 떼고 평문으로 주는 곳도 있다.
+const BULLET = /^\s*(?:[-*+]\s*)?(?:\[[ xX]\]\s*)(.+?)\s*$|^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$/
+/** 짧고 항목이 아닌 줄은 구획 이름으로 읽는다 (`### 완료 조건` 도, 평문 `완료 조건` 도). */
+const SECTION_LABEL = /^\s{0,3}(?:#{1,6}\s*|\*\*)?([^\n]{1,30}?)(?:\*\*)?\s*$/
 
 export function deriveSessionContractDraft(input: DeriveInput): SessionContractDraft {
   const provenance: DraftField[] = []
@@ -161,18 +164,21 @@ const stripGlob = (scope: string): string => scope.replace(/\*.*$/, '')
 
 function acceptanceLines(body?: string): string[] {
   if (!body) return []
-  const lines = body.split('\n')
   const found: string[] = []
   let inside = false
-  for (const line of lines) {
-    if (HEADING.test(line) || /^\s*\*\*/.test(line)) {
-      inside = ACCEPTANCE_HEADING.test(line)
+  for (const line of body.split('\n')) {
+    if (line.trim() === '') continue
+
+    const bullet = BULLET.exec(line)
+    const item = bullet?.[1] ?? bullet?.[2]
+    if (item) {
+      if (inside) found.push(item.trim())
       continue
     }
-    if (!inside) continue
-    const bullet = BULLET.exec(line)
-    if (bullet?.[1]) found.push(bullet[1].trim())
-    else if (line.trim() === '') continue
+
+    // 항목이 아닌 줄은 구획 이름이거나 설명이다. 구획 이름이면 여기서 들고 나간다.
+    const label = SECTION_LABEL.exec(line)
+    if (label) inside = ACCEPTANCE_HEADING.test(label[1] ?? '')
   }
   return found
 }
