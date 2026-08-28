@@ -48,19 +48,19 @@ const repo = (over: Partial<RepoObservation> = {}): RepoObservation => ({
 
 const actionable: WorkStateResult = { state: 'ACTIONABLE', evidence: [], limitations: [], missing: [] }
 
-// contract-draft.test.ts 와 같은 방식 — 판정에 쓰이는 두 칸만 채운다.
-const policy = (): DeriveInput['policy'] =>
+// planSessionContract 에 넘길 정책. 판정에 쓰이는 두 칸만 채운다.
+const policy = () =>
   ({
-    roleScopes: { implementer: ['fe/src/**', 'be/src/**'] },
+    roleScopes: { implementer: ['fe/**', 'be/**'] },
     lists: { issuanceDelegation: ['implementer'] },
-  }) as unknown as DeriveInput['policy']
+  }) as unknown as Parameters<typeof planSessionContract>[0]['policy']
 
 const input = (over: Partial<DeriveInput> = {}): DeriveInput => ({
   intent: { workRef: 'PROJ-187' },
   workItem: workItem(),
   workState: actionable,
   repo: repo(),
-  policy: policy(),
+  maxScopes: ['fe/**', 'be/**'],
   existingIds: [],
   today: '20260828',
   ...over,
@@ -88,7 +88,7 @@ describe('P0-C — 조사 결과에서 계약 초안 도출', () => {
   it('boundary 는 절대 FACT 가 아니며 저장소에서 확인된 경로로 좁힌다', () => {
     const draft = deriveSessionContractDraft(input())
 
-    assert.deepEqual(draft.boundary, ['fe/src/**'])
+    assert.deepEqual(draft.boundary, ['fe/src/entities/asset/**'])
     assert.equal(provenanceOf(draft, 'boundary')?.status, 'PROPOSAL')
     assert.equal(provenanceOf(draft, 'boundary')?.source, 'repository')
   })
@@ -123,11 +123,7 @@ describe('P0-C — 조사 결과에서 계약 초안 도출', () => {
 
   it('도출한 초안이 실제 planSessionContract 에서 READY_TO_ISSUE 가 된다', () => {
     const derived = deriveSessionContractDraft(input())
-    const plan = planSessionContract({
-      draft: derived,
-      policy: input().policy,
-      existingIds: [],
-    })
+    const plan = planSessionContract({ draft: derived, policy: policy(), existingIds: [] })
 
     assert.equal(plan.status, 'READY_TO_ISSUE', JSON.stringify(plan.unresolved.concat(plan.invalid as never[])))
     assert.equal(plan.issuance.authority, 'delegated')
@@ -136,9 +132,83 @@ describe('P0-C — 조사 결과에서 계약 초안 도출', () => {
 
   it('완료 조건도 저장소 검사도 없으면 사람 결정으로 남는다 — 지어내는 대신 묻는다', () => {
     const derived = deriveSessionContractDraft(input({ workItem: workItem({ body: undefined }) }))
-    const plan = planSessionContract({ draft: derived, policy: input().policy, existingIds: [] })
+    const plan = planSessionContract({ draft: derived, policy: policy(), existingIds: [] })
 
     assert.equal(plan.status, 'NEEDS_DECISION')
     assert.ok(plan.unresolved.some((u) => u.field === 'criteria'))
+  })
+})
+
+describe('P0-1 — roleScopes 는 상한이지 boundary 의 출처가 아니다', () => {
+  it('상한이 ** 여도 boundary 를 ** 로 만들지 않는다', () => {
+    const draft = deriveSessionContractDraft(input({ maxScopes: ['**'] }))
+
+    assert.ok(draft.boundary, 'boundary 가 비었다 — 좁힐 근거가 있었는데 못 찾았다')
+    assert.ok(!draft.boundary!.includes('**'), `상한을 그대로 복사했다: ${draft.boundary}`)
+  })
+
+  it('정책이 아예 없어도 ** 로 떨어지지 않는다 — 정책 부재는 전체 허용이 아니다', () => {
+    const draft = deriveSessionContractDraft(input({ maxScopes: [] }))
+
+    assert.ok(!(draft.boundary ?? []).includes('**'))
+  })
+
+  it('좁힐 근거가 없으면 비워 두고, planSessionContract 가 사람에게 묻는다', () => {
+    const derived = deriveSessionContractDraft(
+      input({
+        workItem: workItem({ body: '완료 조건\n[ ] 무언가', title: '경로가 없는 작업' }),
+        repo: repo({ pathsExist: {} }),
+        maxScopes: ['**'],
+      }),
+    )
+
+    assert.equal(derived.boundary, undefined)
+    const plan = planSessionContract({ draft: derived, policy: policy(), existingIds: [] })
+    assert.equal(plan.status, 'NEEDS_DECISION')
+    assert.ok(plan.unresolved.some((u) => u.field === 'boundary'))
+  })
+
+  it('상한 밖 후보는 버린다 — 넓히는 방향으로는 제안하지 않는다', () => {
+    const draft = deriveSessionContractDraft(
+      input({ maxScopes: ['be/**'], repo: repo({ pathsExist: { 'fe/src/entities/asset': true } }) }),
+    )
+
+    assert.equal(draft.boundary, undefined)
+  })
+
+  it('참고 문서 경로는 쓰기 범위로 승격하지 않는다', () => {
+    const draft = deriveSessionContractDraft(
+      input({
+        workItem: workItem({ body: '참고\n- specs/009-project-exhibition/spec.md 를 보라' }),
+        repo: repo({ pathsExist: { 'specs/009-project-exhibition/spec.md': true } }),
+        maxScopes: ['**'],
+      }),
+    )
+
+    assert.equal(draft.boundary, undefined, `읽기 근거를 쓰기 범위로 올렸다: ${draft.boundary}`)
+  })
+
+  it('분류 이름이 유일하게 맞는 모듈이 있으면 그 모듈로 좁힌다', () => {
+    const draft = deriveSessionContractDraft(
+      input({
+        workItem: workItem({ body: '경로 언급 없음', labels: ['frontend'] }),
+        repo: repo({ pathsExist: { 'festa-frontend': true, 'festa-frontend/src': true, backend: true } }),
+        maxScopes: ['**'],
+      }),
+    )
+
+    assert.deepEqual(draft.boundary, ['festa-frontend/src/**'])
+  })
+
+  it('분류에 맞는 후보가 둘이면 고르지 않는다', () => {
+    const draft = deriveSessionContractDraft(
+      input({
+        workItem: workItem({ body: '경로 언급 없음', labels: ['front'] }),
+        repo: repo({ pathsExist: { 'festa-frontend': true, 'admin-frontend': true } }),
+        maxScopes: ['**'],
+      }),
+    )
+
+    assert.equal(draft.boundary, undefined)
   })
 })

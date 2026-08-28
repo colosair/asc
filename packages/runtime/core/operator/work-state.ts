@@ -102,7 +102,10 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
 
   const onCanonical = Object.entries(repo.pathsOnCanonical ?? {}).filter(([, exists]) => exists)
   const mentioned = repo.mentionedOnCanonical ?? []
-  const merged = repo.mergedIntoCanonical === true || onCanonical.length > 0 || mentioned.length > 0
+  // 언급은 그 자체로 증거가 아니다. 되돌리기만 있는 이력도 이 작업을 "언급"하고, 뒤이어
+  // 걷혀 나간 변경도 그렇다. 살아남은 것이 있어야 정본에 있다고 말할 수 있다.
+  const mentionSurvives = mentioned.length > 0 && repo.mentionedOnlyReverts !== true && repo.mentionedArtifactsPresent === true
+  const merged = repo.mergedIntoCanonical === true || onCanonical.length > 0 || mentionSurvives
   const hasBranch = repo.refs.length > 0
   const artifacts = Object.entries(repo.pathsExist).filter(([, exists]) => exists)
 
@@ -112,6 +115,18 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   if (onCanonical.length > 0) evidence.push(`정본에 산출물이 있다: ${onCanonical.map(([p]) => p).join(', ')}`)
   if (artifacts.length > 0) evidence.push(`작업 트리 산출물: ${artifacts.map(([p]) => p).join(', ')}`)
   if (mentioned.length > 0) evidence.push(`정본 이력이 이 작업을 언급한다: ${mentioned.join(' / ')}`)
+  if (repo.mentionedOnlyReverts === true) {
+    evidence.push('그 언급은 전부 되돌리기다 — 구현이 정본에 남아 있다는 증거가 아니다')
+  }
+  if (repo.mentionedArtifactsPresent === true) {
+    evidence.push('그 변경이 건드린 파일이 정본에 아직 있다 (생존 증거 — 인수 조건 충족의 증명은 아니다)')
+  }
+  if (repo.mentionedArtifactsPresent === false) {
+    evidence.push('그 변경이 건드린 파일이 정본에 하나도 남아 있지 않다')
+  }
+  if (mentioned.length > 0 && repo.mentionedArtifactsPresent === undefined) {
+    limitations.push('언급된 커밋이 무엇을 건드렸는지 읽지 못했다 — 구현이 지금도 남아 있는지 확인하지 못했다')
+  }
 
   const openDependencies = (input.dependencies ?? []).filter((d) => d.open === true)
   if (openDependencies.length > 0) {
@@ -126,8 +141,20 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
 
   // ① 구현은 정본에 있는데 tracker 가 안 따라왔다. 여기서만 tracker 를 본다 — 그것도
   //    "끝났다고 말하지 않는다"는 사실로만. tracker 가 결론을 만드는 자리는 없다.
-  if (merged && input.trackerDone === false) {
+  //    확정하려면 **살아 있는 산출물**이 있어야 한다: 병합 흔적만으로는 부분 병합·스캐폴드·
+  //    되돌리기를 가려낼 수 없다. 확인하지 못했으면 확정하지 않는다.
+  //    가지가 정본의 조상이라는 것은 그 커밋들이 지금 정본 이력에 그대로 있다는 뜻이라
+  //    그 자체가 생존 증거다. 언급(grep)만 있는 경우와 다르다.
+  const artifactSurvives =
+    repo.mergedIntoCanonical === true || onCanonical.length > 0 || repo.mentionedArtifactsPresent === true
+  if (merged && input.trackerDone === false && artifactSurvives && repo.mentionedOnlyReverts !== true) {
+    limitations.push('인수 조건 전체가 지금도 충족되는지는 확인하지 않았다 — 여기서 말하는 것은 구현의 생존까지다')
     return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: false })
+  }
+  if (merged && input.trackerDone === false) {
+    // 병합 흔적은 있는데 생존을 확인하지 못했다 — 새 구현을 시키지도, 끝났다고 하지도 않는다.
+    limitations.push('정본에 병합 흔적은 있으나 구현이 지금도 남아 있는지 확인하지 못했다')
+    return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true })
   }
 
   // ② 구현 증거는 있는데 남은 검증 경로가 막혔다.

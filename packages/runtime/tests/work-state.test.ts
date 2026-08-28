@@ -137,3 +137,97 @@ describe('P0-B — 실제 작업 상태 판정', () => {
     assert.equal(result.state, 'REVIEW_RESPONSE_REQUIRED')
   })
 })
+
+describe('P0-2 — 병합 흔적만으로 stale tracker 를 확정하지 않는다', () => {
+  const mention = ['d2cadb0 Merge branch feat/PROJ-87 into develop']
+
+  it('A. 병합 + 살아 있는 산출물 → IMPLEMENTED_STALE_TRACKER (단, 인수 조건은 미확인으로 남는다)', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({
+        refs: [],
+        mergedIntoCanonical: false,
+        mentionedOnCanonical: mention,
+        mentionedOnlyReverts: false,
+        mentionedArtifactsPresent: true,
+      }),
+    })
+
+    assert.equal(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.ok(result.evidence.some((line) => line.includes('생존 증거')))
+    assert.ok(
+      result.limitations.some((line) => line.includes('인수 조건')),
+      '인수 조건 충족을 확인했다고 말해 버렸다',
+    )
+  })
+
+  it('B. 언급만 있고 무엇을 건드렸는지 못 읽었으면 확정하지 않는다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({ refs: [], mergedIntoCanonical: false, mentionedOnCanonical: mention }),
+    })
+
+    assert.notEqual(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.notEqual(result.leaning, 'IMPLEMENTED_STALE_TRACKER')
+    assert.ok(result.limitations.some((line) => line.includes('확인하지 못했다')))
+  })
+
+  it('C. 언급 커밋이 건드린 파일이 하나도 안 남았으면 확정하지 않는다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({
+        refs: [],
+        mergedIntoCanonical: false,
+        mentionedOnCanonical: mention,
+        mentionedOnlyReverts: false,
+        mentionedArtifactsPresent: false,
+      }),
+    })
+
+    assert.notEqual(result.state, 'IMPLEMENTED_STALE_TRACKER')
+  })
+
+  it('D. 되돌리기만 있는 이력은 구현 증거가 아니다', () => {
+    const result = judge({
+      trackerDone: false,
+      comments: [],
+      change: { reference: 'PROJ-87', changedPaths: [], revisionMarker: 'r1' },
+      repo: repo({
+        refs: [],
+        mergedIntoCanonical: false,
+        mentionedOnCanonical: ['9f1c2ab Revert "feat: PROJ-87 구현"'],
+        mentionedOnlyReverts: true,
+        mentionedArtifactsPresent: false,
+      }),
+    })
+
+    assert.notEqual(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.equal(result.state, 'ACTIONABLE')
+    assert.ok(result.evidence.some((line) => line.includes('되돌리기')))
+  })
+
+  it('E. 병합도 구현도 차단도 없으면 ACTIONABLE 이다', () => {
+    const result = judge({
+      trackerDone: false,
+      comments: [],
+      change: { reference: 'PROJ-195', changedPaths: [], revisionMarker: 'r1' },
+      repo: repo({ refs: [], mergedIntoCanonical: false }),
+      dependencies: [],
+    })
+
+    assert.equal(result.state, 'ACTIONABLE')
+  })
+
+  it('가지가 정본의 조상이면 산출물 확인 없이도 확정한다 — 그 자체가 생존 증거다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({
+        refs: ['feat/PROJ-87'],
+        mergedIntoCanonical: true,
+        pathsOnCanonical: { 'fe/SlotListPage.tsx': true },
+      }),
+    })
+
+    assert.equal(result.state, 'IMPLEMENTED_STALE_TRACKER')
+  })
+})

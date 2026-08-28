@@ -88,15 +88,32 @@ export class LocalRepoAdapter implements LocalRepoPort {
       if (query.refHint) {
         // 가지가 지워졌어도 이력은 남는다 — 커밋 메시지가 이 작업을 언급하는지 본다.
         const log = await this.#git(['log', '--format=%h %s', `--grep=${query.refHint}`, '-n', '5', canonicalRef])
-        observation.mentionedOnCanonical = (log ?? '')
+        const mentions = (log ?? '')
           .split('\n')
           .map((line) => line.trim())
           .filter((line) => line.length > 0)
+        observation.mentionedOnCanonical = mentions
+
+        if (mentions.length > 0) {
+          // 언급만으로는 부족하다. 무엇을 건드린 커밋인지, 그 결과가 지금도 남아 있는지
+          // 본다 — 되돌린 커밋도 이 작업을 "언급"하기 때문이다.
+          const survival = await this.#survivalOf(mentions, canonicalRef)
+          observation.mentionedOnlyReverts = survival.onlyReverts
+          if (survival.artifactsPresent !== undefined) {
+            observation.mentionedArtifactsPresent = survival.artifactsPresent
+          }
+        }
       }
     }
 
     for (const path of query.paths ?? []) {
       observation.pathsExist[path] = await this.#exists(join(this.#cwd, path))
+    }
+
+    if ((query.modulePaths?.length ?? 0) > 0) {
+      const modules: Record<string, boolean> = {}
+      for (const path of query.modulePaths ?? []) modules[path] = await this.#exists(join(this.#cwd, path))
+      observation.modulesPresent = modules
     }
 
     if (canonicalRef && (query.paths?.length ?? 0) > 0) {
@@ -118,6 +135,37 @@ export class LocalRepoAdapter implements LocalRepoPort {
   async #defaultCanonicalRef(): Promise<string | undefined> {
     const head = await this.#git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
     return head?.trim() || undefined
+  }
+
+  /**
+   * 언급 커밋들이 남긴 것이 지금도 있는가. 되돌리기만 있으면 그 사실을 따로 말한다.
+   *
+   * 파일 목록을 하나도 못 읽으면 `artifactsPresent` 는 undefined 다 — "없다"가 아니라
+   * "확인하지 못했다" 이고, 그 둘을 합치면 판정이 거짓을 만든다.
+   */
+  async #survivalOf(
+    mentions: readonly string[],
+    canonicalRef: string,
+  ): Promise<{ onlyReverts: boolean; artifactsPresent?: boolean }> {
+    const commits = mentions.map((line) => {
+      const at = line.indexOf(' ')
+      return { hash: at > 0 ? line.slice(0, at) : line, subject: at > 0 ? line.slice(at + 1) : '' }
+    })
+    const onlyReverts = commits.every((commit) => /^revert\b/i.test(commit.subject.trim()))
+
+    let readAny = false
+    for (const commit of commits) {
+      if (/^revert\b/i.test(commit.subject.trim())) continue
+      const listed = await this.#git(['show', '--name-status', '--format=', commit.hash])
+      if (listed === null) continue
+      readAny = true
+      for (const path of changedPaths(listed).slice(0, 20)) {
+        if ((await this.#git(['cat-file', '-e', `${canonicalRef}:${path}`])) !== null) {
+          return { onlyReverts, artifactsPresent: true }
+        }
+      }
+    }
+    return readAny ? { onlyReverts, artifactsPresent: false } : { onlyReverts }
   }
 
   async #anyMerged(refs: readonly string[], canonicalRef: string): Promise<boolean> {
@@ -145,4 +193,18 @@ function filterRefs(stdout: string | null, hint: string): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter((ref) => ref.length > 0 && ref.toLowerCase().includes(needle))
+}
+
+/** `--name-status` 출력에서 지금도 존재할 수 있는 경로만. 삭제(D)는 세지 않는다. */
+function changedPaths(stdout: string): string[] {
+  const paths: string[] = []
+  for (const line of stdout.split('\n')) {
+    const parts = line.trim().split(/\s+/)
+    const status = parts[0]
+    if (!status || status.startsWith('D')) continue
+    // 이름이 바뀐 경우(R100 old new)는 새 이름이 지금의 경로다.
+    const path = parts[parts.length - 1]
+    if (path && path !== status) paths.push(path)
+  }
+  return paths
 }

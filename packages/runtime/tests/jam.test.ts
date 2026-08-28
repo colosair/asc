@@ -386,13 +386,21 @@ describe('B-35 Gate — Resource Context (§8)', () => {
     return new JamResourceContext({ client, projectKey: 'WORK' })
   }
 
-  it('연결 항목을 모아 준다', async () => {
+  it('연결 항목을 모아 주되, 막는 것을 앞에 싣는다', async () => {
     const snapshot = await contextOn({
-      issues: [{ ...ISSUE, parent: { key: 'WORK-1' }, links: [{ issue: { key: 'WORK-9' } }], subtasks: [{ key: 'WORK-13' }] }],
+      issues: [
+        {
+          ...ISSUE,
+          parent: { key: 'WORK-1' },
+          links: [{ issue: { key: 'WORK-9' } }, { blocksThisIssue: true, issue: { key: 'WORK-4' } }],
+          subtasks: [{ key: 'WORK-13' }],
+        },
+      ],
       meta: { complete: true },
     }).getResource('WORK-12')
     assert.equal(snapshot.title, ISSUE.summary)
-    assert.deepEqual(snapshot.related, ['WORK-1', 'WORK-13', 'WORK-9'])
+    // 상한에 걸려 잘릴 때 blocker 가 부모·하위 작업 뒤로 밀리면 막힌 작업이 착수 가능으로 보인다.
+    assert.deepEqual(snapshot.related, ['WORK-4', 'WORK-9', 'WORK-1', 'WORK-13'])
   })
 
   it('안 돌아온 키는 원인을 지어내지 않는다', async () => {

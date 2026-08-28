@@ -29,6 +29,13 @@ export type ResourceSnapshot = {
   revisionMarker: string
   /** 연결된 다른 리소스. 문법은 adapter 소관이고 Core는 식별자로만 다룬다. */
   related?: readonly string[]
+  /**
+   * 이 일을 **막는다고 선언된** 것들. `related` 의 부분집합이다.
+   *
+   * 따로 두는 이유: 부모·하위 작업도 연결이지만 선행이 아니다. 그것을 선행으로 세면
+   * 거의 모든 작업이 "막혔다"가 되고, 그 판정은 아무 말도 하지 않는 것과 같다.
+   */
+  blockedBy?: readonly string[]
   /** 사라졌거나 접근할 수 없다. 없는 것과 못 읽는 것을 구분해야 판정이 성립한다. */
   missing?: boolean
 }

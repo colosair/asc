@@ -48,6 +48,13 @@ const draft: SessionContractDraft = {
   criteria: ['테스트가 존재한다'],
 }
 
+/** 저장소 전체를 쓰겠다는 초안. 근거가 무엇이냐에 따라 결과가 갈린다. */
+const wideDraft = (over: Partial<SessionContractDraft> = {}): SessionContractDraft => ({
+  ...draft,
+  boundary: ['**'],
+  ...over,
+})
+
 const planWith = (
   status: SessionContractPlan['status'],
   authority: 'delegated' | 'controller',
@@ -78,6 +85,7 @@ function harness(over: Partial<WorkIngress> & { repo?: RepoObservation | null } 
       calls.derive += 1
       return draft
     },
+    usedIds: async () => (await store.list('session')).map((session) => session.id),
     plan: async () => planWith('READY_TO_ISSUE', 'delegated'),
     issue: async (d) => {
       calls.issue += 1
@@ -186,5 +194,71 @@ describe('P0-D — proceed 작업 항목 유입', () => {
     assert.equal(outcome.kind, 'PROPOSE_CONTRACT')
     // plan 이 controller 라고 했으므로 위임 판단을 자체적으로 뒤집지 않는다
     assert.equal(h.calls.issue, 0)
+  })
+})
+
+describe('P0-1 백스톱 — 근거 없는 전역 쓰기 범위는 스스로 발급하지 않는다', () => {
+  it('boundary 가 ** 이고 이번 작업에 대한 근거가 없으면 위임 범위에서도 발급하지 않는다', async () => {
+    const h = harness({ derive: () => wideDraft() })
+
+    const outcome = await h.operator.proceed({ workRef: 'PROJ-187' })
+
+    assert.equal(outcome.kind, 'PROPOSE_CONTRACT')
+    if (outcome.kind !== 'PROPOSE_CONTRACT') return
+    assert.ok(outcome.forController, '사람에게 넘기지 않았다')
+    assert.ok(outcome.plan?.unresolved.some((u) => u.field === 'boundary'))
+    assert.equal(h.calls.issue, 0, '전역 범위를 스스로 발급했다')
+    assert.equal((await h.store.list('session')).length, 0)
+  })
+
+  it('사람이 이번 작업에 대해 전역 범위를 말했으면 그때는 발급한다', async () => {
+    const h = harness({
+      derive: () =>
+        wideDraft({
+          provenance: [{ field: 'boundary', status: 'FACT', source: 'user', reason: '사용자가 전체 범위를 지시했다' }],
+        }),
+    })
+
+    const outcome = await h.operator.proceed({ workRef: 'PROJ-187' })
+
+    assert.equal(outcome.kind, 'STARTED')
+    assert.equal(h.calls.issue, 1)
+  })
+
+  it('상한이 ** 라는 사실만으로는 근거가 되지 않는다 — provenance 가 PROPOSAL 이면 막는다', async () => {
+    const h = harness({
+      derive: () =>
+        wideDraft({
+          provenance: [
+            { field: 'boundary', status: 'PROPOSAL', source: 'profile', reason: 'roleScopes 가 ** 다' },
+          ],
+        }),
+    })
+
+    const outcome = await h.operator.proceed({ workRef: 'PROJ-187' })
+
+    assert.equal(outcome.kind, 'PROPOSE_CONTRACT')
+    assert.equal(h.calls.issue, 0)
+  })
+})
+
+describe('작업 항목을 지목하면 그 작업만 본다', () => {
+  it('다른 작업의 멈춘 세션이 있어도 지목한 작업을 조사한다', async () => {
+    const h = harness({ repo: repoMerged })
+    await h.operator.proceed({ workRef: 'PROJ-187' })
+    // 먼저 다른 작업의 세션을 하나 만들어 둔다 (지목 대상이 아니다).
+    const other = await new SessionRuntime(h.store).issue({
+      id: 'S-20260828-09',
+      role: 'implementer',
+      goal: 'PROJ-999: 다른 작업',
+      doneCriteria: ['x'],
+    })
+    assert.ok(other.ok)
+
+    const outcome = await h.operator.proceed({ workRef: 'PROJ-87' })
+
+    assert.equal(outcome.kind, 'WORK_STATE', '지목을 무시하고 다른 세션을 이어갔다')
+    if (outcome.kind !== 'WORK_STATE') return
+    assert.equal(outcome.workRef, 'PROJ-87')
   })
 })

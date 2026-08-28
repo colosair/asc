@@ -10,7 +10,7 @@
 import { execFile, spawnSync } from 'node:child_process'
 import { parseArgs, promisify } from 'node:util'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { homedir, userInfo } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -70,7 +70,7 @@ import { GitHubAdapter } from '../adapters/github/adapter.ts'
 import { GitLabAdapter } from '../adapters/gitlab/adapter.ts'
 import { JamAdapter } from '../adapters/jam/adapter.ts'
 import type { ChangeSummary } from '../ports/change-context.ts'
-import type { ContextComment } from '../ports/resource-context.ts'
+import type { ContextComment, ResourceSnapshot } from '../ports/resource-context.ts'
 import { statusIndicatesDone } from '../adapters/jam/ports.ts'
 import { ProgressService } from '../core/operator/progress.ts'
 import { composeBindings, defaultAdapters } from '../composition/registry.ts'
@@ -2172,6 +2172,56 @@ async function runProceed(
 }
 
 /**
+ * 이미 쓴 세션 id. **회수돼 보관된 것까지 센다** — 그 번호를 다시 쓰면 앞의 계약 기록
+ * 위에 다른 계약이 앉는다. 실제로 그렇게 기록 하나를 잃었다.
+ */
+async function usedSessionIds(store: MarkdownStateStore, root: string): Promise<string[]> {
+  const active = (await store.list('session')).map((session) => session.id)
+  let archived: string[] = []
+  try {
+    archived = (await readdir(join(root, 'sessions', 'archive')))
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => name.slice(0, -3))
+  } catch {
+    archived = []
+  }
+  return [...new Set([...active, ...archived])]
+}
+
+/**
+ * 저장소의 최상위 자리와 그 아래 `src`. 분류 이름이 어느 모듈에 맞는지 재는 재료다 —
+ * 목록일 뿐이고, 이것이 쓰기 범위가 되지는 않는다 (derive 가 최상위는 범위로 쓰지 않는다).
+ */
+async function topLevelModules(projectRoot: string): Promise<string[]> {
+  try {
+    const entries = await readdir(projectRoot, { withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+      .flatMap((entry) => [entry.name, `${entry.name}/src`])
+  } catch {
+    return []
+  }
+}
+
+/** 선행·의존으로 볼 후보. 링크가 먼저고, 본문이 말한 키가 그다음이다. 상한은 5. */
+const DEPENDENCY_CAP = 5
+
+function dependencyCandidates(workItem: ResourceSnapshot | undefined): string[] {
+  if (!workItem) return []
+  // 본문이 "BLOCKED BY: KEY-1" 처럼 말한 것은 링크가 없어도 의존이다 — 링크가 없다는
+  // 사실이 의존이 없다는 뜻은 아니다.
+  const fromBody = new Set<string>()
+  const project = workItem.reference.split('-')[0]
+  if (project) {
+    const pattern = new RegExp(`(?:blocked\\s*by|선행|의존)[^\\n]*?(${project}-\\d+)`, 'gi')
+    for (const [, key] of `${workItem.body ?? ''}`.matchAll(pattern)) if (key) fromBody.add(key)
+  }
+  // 부모·하위 작업은 포함 관계이지 선행이 아니다 — 그것까지 세면 거의 모든 작업이 막힌다.
+  const ordered = [...(workItem.blockedBy ?? []), ...fromBody].filter((key) => key !== workItem.reference)
+  return [...new Set(ordered)].slice(0, DEPENDENCY_CAP)
+}
+
+/**
  * 작업 항목 하나를 조사해 계약까지 잇는 통로 (P0-D).
  *
  * 여기서 판정하지 않는다. 모으고(gather·observeRepo), 도출하고(derive), **기존 판정기에
@@ -2240,30 +2290,54 @@ async function buildWorkIngress(
             .then((summary) => summary as ChangeSummary | 'UNAVAILABLE')
             .catch(() => 'UNAVAILABLE' as const)
         : ('UNAVAILABLE' as const)
+      // 선행 작업이 열려 있는지는 **조회해야** 안다. 키만 넘기면 판정이 늘 "모른다"가 되고,
+      // 그러면 막힌 작업이 착수 가능으로 보인다. adapter 가 막는 것을 앞에 실어 주므로
+      // 상한에 걸려도 blocker 가 먼저 확인된다.
+      const candidates = dependencyCandidates(workItem)
+      const dependencies = await Promise.all(
+        candidates.map(async (reference) => {
+          const item = await work.getResource(reference).catch(() => undefined)
+          const done = item && !item.missing ? statusIndicatesDone(item.state) : undefined
+          return {
+            reference,
+            ...(item?.state ? { state: item.state } : {}),
+            ...(done === undefined ? {} : { open: !done }),
+          }
+        }),
+      )
+
       return {
         ...(workItem ? { workItem } : {}),
         ...(workItem ? { trackerDone: statusIndicatesDone(workItem.state) } : {}),
         comments,
         change,
-        // 관련 항목의 열림 여부는 tracker 가 알려준 만큼만. 모르면 open 을 비운다.
-        dependencies: (workItem?.related ?? []).map((reference) => ({ reference })),
+        dependencies,
       }
     },
-    observeRepo: (query) =>
-      repo.observe({
+    observeRepo: async (query) => {
+      // 조회할 경로는 **작업 항목이 지목한 것**이 먼저다. 그것을 확인해야 좁은 범위를
+      // 만들 수 있고, 확인하지 않으면 넓은 범위밖에 남지 않는다. 저장소의 최상위 자리도
+      // 함께 확인한다 — 분류 이름이 어느 모듈 하나에만 맞는지 재려면 그 목록이 있어야 한다.
+      const modules = await topLevelModules(projectRoot)
+      const paths = [...new Set([...(query.paths ?? []), ...canonicalPaths])]
+      return repo.observe({
         refHint: query.refHint,
         ...(canonicalRef ? { canonicalRef } : {}),
-        ...(canonicalPaths.length > 0 ? { paths: canonicalPaths } : {}),
-      }),
+        ...(paths.length > 0 ? { paths } : {}),
+        ...(modules.length > 0 ? { modulePaths: modules } : {}),
+      })
+    },
+    usedIds: () => usedSessionIds(store, root),
     derive: (input) =>
       deriveSessionContractDraft({
+        existingIds: input.existingIds,
         intent: { workRef: input.workRef, ...(input.goal ? { goal: input.goal } : {}) },
         workItem: input.workItem,
         workState: input.workState,
         repo: input.repo,
-        ...(resolved?.resolved.policy ? { policy: resolved.resolved.policy } : {}),
+        // 상한이지 출처가 아니다 — 도출한 후보가 이 밖으로 나가지 않는지 재는 데만 쓴다.
+        maxScopes: resolved?.resolved.policy.roleScopes.implementer ?? [],
         ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
-        existingIds: [],
         today: new Date().toISOString().slice(0, 10).replace(/-/g, ''),
       }),
     plan: async (draft) =>
@@ -2271,7 +2345,7 @@ async function buildWorkIngress(
         draft,
         ...(resolved?.resolved.policy ? { policy: resolved.resolved.policy } : {}),
         ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
-        existingIds: (await store.list('session')).map((session) => session.id),
+        existingIds: await usedSessionIds(store, root),
       }),
     issue: async (draft) => {
       // 발급 경로는 하나뿐이다 — `asc session issue` 와 같은 SessionRuntime.issue 를 부른다.

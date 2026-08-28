@@ -167,6 +167,15 @@ export class MarkdownStateStore implements StateStore {
   async create<K extends EntityKind>(kind: K, entity: EntityMap[K]): Promise<CreateResult<EntityMap[K]>> {
     const id = String((entity as Record<string, unknown>)[ENTITY_KEY[kind]])
     const file = entityFile(this.#root, kind, id)
+
+    // 회수돼 보관된 id 도 이미 쓴 id 다. 이것을 막지 않으면 같은 이름의 두 계약이 생기고,
+    // 보관 파일이 덮이면서 앞의 기록이 사라진다 (실제로 그렇게 잃었다).
+    const archived = join(archiveDir(this.#root, kind), `${toFileName(id)}.md`)
+    if (await exists(archived)) {
+      const current = (await this.#read(kind, archived))!
+      return { ok: false, reason: 'ALREADY_EXISTS', current }
+    }
+
     try {
       // 'wx'가 원자적 배타 생성이라 락 없이도 중복이 걸린다
       await writeFile(file, serializeEntity(kind, entity), { encoding: 'utf8', flag: 'wx' })
@@ -208,7 +217,11 @@ export class MarkdownStateStore implements StateStore {
     if (!(await exists(from))) return false
     const dir = archiveDir(this.#root, kind)
     await mkdir(dir, { recursive: true })
-    await rename(from, join(dir, `${toFileName(id)}.md`))
+    const to = join(dir, `${toFileName(id)}.md`)
+    // 보관은 덮어쓰기가 아니다. 같은 이름이 이미 있으면 옮기지 않고 그대로 둔다 —
+    // 기록 하나를 살리자고 다른 기록을 지우지 않는다.
+    if (await exists(to)) return false
+    await rename(from, to)
     return true
   }
 

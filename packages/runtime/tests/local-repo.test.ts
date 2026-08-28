@@ -67,3 +67,89 @@ describe('P0-E — 로컬 저장소 관측', () => {
     assert.equal(seen.canonicalRef, undefined)
   })
 })
+
+describe('P0-2 — 언급 커밋이 남긴 것이 지금도 있는가', () => {
+  const historyGit = (over: Record<string, string | null>): GitRunner => async (args) => {
+    const key = args.join(' ')
+    if (key in over) return over[key]!
+    if (args[0] === 'rev-parse') return 'front\n'
+    if (args[0] === 'remote') return ''
+    if (args[0] === 'for-each-ref') return ''
+    if (args[0] === 'merge-base') return null
+    return null
+  }
+
+  it('추가·수정된 파일이 정본에 남아 있으면 생존으로 읽는다', async () => {
+    const repo = new LocalRepoAdapter({
+      cwd: '/x',
+      git: historyGit({
+        'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'd2cadb0 feat: PROJ-87 구현\n',
+        'show --name-status --format= d2cadb0': 'A\tfe/src/Slot.tsx\nM\tfe/src/index.ts\n',
+        'cat-file -e origin/develop:fe/src/Slot.tsx': '',
+      }),
+    })
+
+    const seen = await repo.observe({ refHint: 'PROJ-87', canonicalRef: 'origin/develop' })
+
+    assert.equal(seen.mentionedArtifactsPresent, true)
+    assert.equal(seen.mentionedOnlyReverts, false)
+  })
+
+  it('건드린 파일이 하나도 안 남았으면 소멸로 읽는다', async () => {
+    const repo = new LocalRepoAdapter({
+      cwd: '/x',
+      git: historyGit({
+        'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'd2cadb0 feat: PROJ-87 구현\n',
+        'show --name-status --format= d2cadb0': 'A\tfe/src/Slot.tsx\n',
+      }),
+    })
+
+    const seen = await repo.observe({ refHint: 'PROJ-87', canonicalRef: 'origin/develop' })
+
+    assert.equal(seen.mentionedArtifactsPresent, false)
+  })
+
+  it('되돌리기만 있으면 그 사실을 말하고, 파일 목록을 읽지 않는다', async () => {
+    const seenCommands: string[] = []
+    const repo = new LocalRepoAdapter({
+      cwd: '/x',
+      git: async (args) => {
+        seenCommands.push(args.join(' '))
+        if (args[0] === 'rev-parse') return 'front\n'
+        if (args[0] === 'log') return '9f1c2ab Revert "feat: PROJ-87 구현"\n'
+        return null
+      },
+    })
+
+    const seen = await repo.observe({ refHint: 'PROJ-87', canonicalRef: 'origin/develop' })
+
+    assert.equal(seen.mentionedOnlyReverts, true)
+    assert.equal(seen.mentionedArtifactsPresent, undefined, '되돌리기만 있는데 생존을 판정했다')
+    assert.ok(!seenCommands.some((c) => c.startsWith('show ')))
+  })
+
+  it('파일 목록을 못 읽으면 없다고 하지 않고 모른다고 한다', async () => {
+    const repo = new LocalRepoAdapter({
+      cwd: '/x',
+      git: historyGit({ 'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'd2cadb0 feat: PROJ-87\n' }),
+    })
+
+    const seen = await repo.observe({ refHint: 'PROJ-87', canonicalRef: 'origin/develop' })
+
+    assert.equal(seen.mentionedArtifactsPresent, undefined)
+  })
+
+  it('삭제만 한 커밋은 생존 증거로 세지 않는다', async () => {
+    const repo = new LocalRepoAdapter({
+      cwd: '/x',
+      git: historyGit({
+        'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'aaa1111 chore: PROJ-87 정리\n',
+        'show --name-status --format= aaa1111': 'D\tfe/src/Old.tsx\n',
+      }),
+    })
+
+    const seen = await repo.observe({ refHint: 'PROJ-87', canonicalRef: 'origin/develop' })
+
+    assert.equal(seen.mentionedArtifactsPresent, false)
+  })
+})

@@ -21,8 +21,16 @@ export type RepoObservation = {
    * `pathsOnCanonical` 이 같은 사실을 다른 각도로 말한다.
    */
   mergedIntoCanonical?: boolean
-  /** 작업 트리에 그 경로가 있는가. */
+  /**
+   * 작업 트리에 그 경로가 있는가. **이 작업의 산출물 후보만** 담는다 — 저장소에 늘 있는
+   * 자리를 여기 섞으면 "구현이 있다"는 증거가 아무 작업에서나 성립해 버린다.
+   */
   pathsExist: Record<string, boolean>
+  /**
+   * 저장소의 자리 목록(최상위 디렉터리 등). 범위를 좁힐 재료일 뿐 **증거가 아니다** —
+   * 판정은 이 값을 보지 않는다.
+   */
+  modulesPresent?: Record<string, boolean>
   /** 정본 가지에 그 경로가 있는가 (squash 병합 대비). */
   pathsOnCanonical?: Record<string, boolean>
   /**
@@ -30,6 +38,18 @@ export type RepoObservation = {
    * 병합 후 브랜치를 지우는 팀에서는 ref 대조만으로는 "구현이 정본에 있다"를 알 수 없다.
    */
   mentionedOnCanonical?: readonly string[]
+  /**
+   * 언급 커밋이 전부 되돌리기인가. 되돌린 이력은 "구현이 정본에 있다"의 증거가 아니다.
+   */
+  mentionedOnlyReverts?: boolean
+  /**
+   * 언급 커밋이 건드린 파일 중 하나라도 정본에 아직 살아 있는가.
+   *
+   * **이것은 생존 증거이지 인수 조건 충족의 증명이 아니다** — "그 변경이 지금 저장소와
+   * 끊어지지 않았다"까지만 말한다. 파일 목록을 읽지 못하면 undefined 로 둔다: 확인하지
+   * 않은 것을 확인했다고 하지 않는다.
+   */
+  mentionedArtifactsPresent?: boolean
   /** git 자체를 쓸 수 없었던 이유. 있으면 이 관측은 비어 있다. */
   unavailable?: string
 }
@@ -39,6 +59,8 @@ export type RepoQuery = {
   refHint?: string
   canonicalRef?: string
   paths?: readonly string[]
+  /** 범위 재료로만 확인할 자리들. 증거 칸에 섞이지 않는다. */
+  modulePaths?: readonly string[]
 }
 
 export interface LocalRepoPort {

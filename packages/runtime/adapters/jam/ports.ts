@@ -41,7 +41,7 @@ type JamIssue = {
   assignee?: string
   priority?: string
   description?: string
-  links?: { issue?: { key?: string } }[]
+  links?: { blocksThisIssue?: boolean; issue?: { key?: string } }[]
   parent?: { key?: string }
   subtasks?: { key?: string }[]
   comments?: { id: string; created: string; updated?: string; body: string; author?: string }[]
@@ -178,10 +178,17 @@ export class JamResourceContext extends JamBase implements ResourceContextPort {
     // 우리도 합쳐진 사실 이상을 지어내지 않는다.
     if (!issue) return missing(reference)
 
+    // 막는 것을 먼저 싣는다. Core 는 이 배열의 **순서만** 알고 종류는 모른다 — 순서가
+    // 곧 "무엇부터 확인해야 하는가" 다. 상한에 걸려 잘릴 때 blocker 가 부모·하위 작업
+    // 뒤에 밀려 사라지는 것을 막는다.
+    const blocking = (issue.links ?? []).filter((link) => link.blocksThisIssue === true)
+    const otherLinks = (issue.links ?? []).filter((link) => link.blocksThisIssue !== true)
+    const blockedBy = blocking.flatMap((link) => (link.issue?.key ? [link.issue.key] : []))
     const related = [
+      ...blockedBy,
+      ...otherLinks.flatMap((link) => (link.issue?.key ? [link.issue.key] : [])),
       ...(issue.parent?.key ? [issue.parent.key] : []),
       ...(issue.subtasks ?? []).flatMap((sub) => (sub.key ? [sub.key] : [])),
-      ...(issue.links ?? []).flatMap((link) => (link.issue?.key ? [link.issue.key] : [])),
     ]
 
     return {
@@ -194,6 +201,7 @@ export class JamResourceContext extends JamBase implements ResourceContextPort {
       updatedAt: issue.updated,
       revisionMarker: issue.updated,
       ...(related.length > 0 ? { related } : {}),
+      ...(blockedBy.length > 0 ? { blockedBy } : {}),
     }
   }
 

@@ -202,4 +202,35 @@ export function describeStateStoreContract(label: string, create: () => Promise<
       assert.equal((await store.get('event', 'comment:531245'))?.eventKey, 'comment:531245')
     })
   })
+
+  describe('회수된 id 는 다시 쓰지 않는다', () => {
+    it('보관된 세션과 같은 id 로는 새 계약을 만들 수 없다', async () => {
+      const store = await create()
+      const first = Session.parse({
+        id: 'S-20260828-02',
+        version: 0,
+        status: 'READY',
+        role: 'verifier',
+        goal: '먼저 있던 계약',
+      })
+      assert.equal((await store.create('session', first)).ok, true)
+      assert.equal(await store.archive('session', 'S-20260828-02'), true)
+
+      const second = await store.create(
+        'session',
+        Session.parse({
+          id: 'S-20260828-02',
+          version: 0,
+          status: 'READY',
+          role: 'implementer',
+          goal: '나중에 온 다른 계약',
+        }),
+      )
+
+      assert.equal(second.ok, false, '보관된 id 를 다시 내줬다 — 앞의 기록이 덮인다')
+      if (second.ok) return
+      assert.equal(second.reason, 'ALREADY_EXISTS')
+      assert.equal(second.current.goal, '먼저 있던 계약')
+    })
+  })
 }

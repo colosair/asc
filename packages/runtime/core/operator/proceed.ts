@@ -14,6 +14,7 @@ import type { ChangeSummary } from '../../ports/change-context.ts'
 import type { ContextComment, ResourceSnapshot } from '../../ports/resource-context.ts'
 import type { SessionContractDraft, SessionContractPlan } from './contract-draft.ts'
 import { judgeWorkState, type WorkStateResult } from './work-state.ts'
+import { extractPathHints } from './derive-draft.ts'
 import type { CanonicalDrift, SessionRuntime, StartOutcome } from '../runtime/session.ts'
 import { proceedGateFacts, type EscalationLedger } from '../runtime/escalation.ts'
 import { deriveExecutionState, type ExecutionVerdict } from '../runtime/execution-state.ts'
@@ -49,14 +50,18 @@ export type WorkIngress = {
     dependencies?: readonly { reference: string; state?: string; open?: boolean }[]
   }>
   /** 저장소 관측. 없으면 'MISSING' 으로 취급되고, 그 상태에서는 어떤 추천도 하지 않는다. */
-  observeRepo?: (query: { refHint: string }) => Promise<RepoObservation>
+  observeRepo?: (query: { refHint: string; paths?: readonly string[] }) => Promise<RepoObservation>
   derive: (input: {
     workRef: string
     goal?: string
     workItem: ResourceSnapshot
     workState: WorkStateResult
     repo: RepoObservation | 'MISSING'
+    /** 이미 쓰인 세션 id — 새 id 가 그 위에 겹치지 않게. */
+    existingIds: readonly string[]
   }) => SessionContractDraft
+  /** 이미 쓴 세션 id — 회수돼 보관된 것까지. 새 id 가 그 위에 겹치지 않게 한다. */
+  usedIds: () => Promise<readonly string[]>
   /** planSessionContract 를 policy·ownership·기존 id 로 감싼 것. */
   plan: (draft: SessionContractDraft) => Promise<SessionContractPlan>
   /** 위임 범위 안에서만 불린다. 발급 경로는 SessionRuntime 하나뿐이다. */
@@ -169,7 +174,13 @@ export class Operator {
     }
 
     // 자동 탐색 — 실행 가능한 것만 후보다. archive는 collect가 이미 치웠다.
-    const candidates = (await this.#store.list('session')).filter((s) => RUNNABLE.has(s.status))
+    const runnable = (await this.#store.list('session')).filter((s) => RUNNABLE.has(s.status))
+
+    // 사람이 작업 항목을 지목했으면 그 작업의 세션만 후보다. 지목을 무시하고 다른 세션을
+    // 이어가면, 물어본 것과 다른 일이 시작된다 (실제로 그렇게 됐다).
+    const candidates = intent.workRef
+      ? runnable.filter((session) => session.goal.includes(intent.workRef!))
+      : runnable
 
     if (candidates.length === 0) {
       if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress)
@@ -205,7 +216,11 @@ export class Operator {
    */
   async #ingest(workRef: string, goal: string | undefined, ingress: WorkIngress): Promise<ProceedOutcome> {
     const gathered = await ingress.gather(workRef)
-    const repo = ingress.observeRepo ? await ingress.observeRepo({ refHint: workRef }) : 'MISSING'
+    // 작업 항목이 지목한 경로를 함께 확인한다 — 그것이 좁은 쓰기 범위의 유일한 근거다.
+    const hints = gathered.workItem ? extractPathHints(gathered.workItem) : []
+    const repo = ingress.observeRepo
+      ? await ingress.observeRepo({ refHint: workRef, ...(hints.length > 0 ? { paths: hints } : {}) })
+      : 'MISSING'
     const workState = judgeWorkState({ ...gathered, repo })
 
     const decided = workState.state === 'DECIDABLE_WITH_LIMITATION' ? workState.leaning : workState.state
@@ -213,7 +228,15 @@ export class Operator {
       return { kind: 'WORK_STATE', workRef, result: workState, nextAction: nextActionFor(workState, workRef) }
     }
 
-    const draft = ingress.derive({ workRef, goal, workItem: gathered.workItem, workState, repo })
+    const draft = ingress.derive({
+      workRef,
+      goal,
+      workItem: gathered.workItem,
+      workState,
+      repo,
+      // 이미 쓴 id 목록은 통로가 안다 — 보관된 것까지 세는 것이 그쪽이다.
+      existingIds: await ingress.usedIds(),
+    })
     const plan = await ingress.plan(draft)
     const handout = {
       kind: 'PROPOSE_CONTRACT' as const,
@@ -232,6 +255,28 @@ export class Operator {
     // 발급 권한은 사람의 것이다. 위임이 없으면 명령만 건네고 멈춘다 (OM §450).
     if (plan.issuance.authority !== 'delegated') {
       return { ...handout, forController: issueCommand(draft) }
+    }
+
+    // 백스톱: 저장소 전체를 쓰겠다는 계약은 위임 범위 안에서 스스로 내지 않는다.
+    // 역할의 상한이 `**` 라는 사실은 **이번 작업이** 전체를 고쳐야 한다는 근거가 아니다 —
+    // 그 근거는 사람이 이 작업에 대해 직접 말했을 때만 성립한다.
+    if (isRepositoryWide(draft) && !declaredRepositoryWide(draft)) {
+      return {
+        ...handout,
+        forController: issueCommand(draft),
+        plan: {
+          ...plan,
+          unresolved: [
+            ...plan.unresolved,
+            {
+              field: 'boundary',
+              reason: 'explicit_rule_requires_approval',
+              detail:
+                '저장소 전체를 쓰는 계약이다 — 이번 작업이 그것을 요구한다는 근거가 없어 위임 범위 안에서 발급하지 않는다.',
+            },
+          ],
+        },
+      }
     }
 
     const issued = await ingress.issue(draft)
@@ -380,4 +425,16 @@ function issueCommand(draft: SessionContractDraft): string[] {
   for (const scope of draft.boundary ?? []) argv.push('--boundary', scope)
   for (const criterion of draft.criteria ?? []) argv.push('--criteria', criterion)
   return argv
+}
+
+/** 사실상 저장소 전체를 쓰는 범위인가. 문법 판정이 아니라 리터럴 확인이다. */
+function isRepositoryWide(draft: SessionContractDraft): boolean {
+  return (draft.boundary ?? []).some((scope) => scope.replace(/\*.*$/, '') === '')
+}
+
+/** 이번 작업에 대해 사람·정본·Profile 이 그 범위를 직접 말했는가. */
+function declaredRepositoryWide(draft: SessionContractDraft): boolean {
+  const entry = draft.provenance?.find((field) => field.field === 'boundary')
+  if (!entry || entry.status !== 'FACT') return false
+  return entry.source === 'user' || entry.source === 'profile' || entry.source === 'canonical'
 }
