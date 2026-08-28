@@ -230,3 +230,33 @@ const missing = (reference: string): ResourceSnapshot => ({
   revisionMarker: '',
   missing: true,
 })
+
+/**
+ * tracker 가 "끝났다"고 말하는가. **판정이 아니라 어휘 번역이다** — Core 는 Jira 상태
+ * 문자열을 알면 안 되고(C-09 §6.1), 그렇다고 상태 문자열을 아무도 안 읽으면 "진행 중인데
+ * 이미 병합됨"을 알아볼 수 없다. 그 번역을 adapter 자리에서 한 줄로 한다.
+ *
+ * 모르는 어휘는 undefined 로 남긴다 — 모르는 것을 "안 끝났다"로 읽으면 없는 stale 을 만든다.
+ *
+ * ponytail: 닫힘 상태 목록은 휴리스틱이다. JAM 이 statusCategory 를 실어 주면 그것으로 바꾼다.
+ */
+const DONE_STATUSES = new Set(['done', 'closed', 'resolved', 'complete', 'completed', '완료', '닫힘', '해결됨'])
+const OPEN_STATUSES = new Set([
+  'to do',
+  'todo',
+  'open',
+  'in progress',
+  'in review',
+  'backlog',
+  '해야 할 일',
+  '진행 중',
+  '검토 중',
+])
+
+export function statusIndicatesDone(status: string | undefined): boolean | undefined {
+  if (!status) return undefined
+  const normalized = status.trim().toLowerCase()
+  if (DONE_STATUSES.has(normalized)) return true
+  if (OPEN_STATUSES.has(normalized)) return false
+  return undefined
+}

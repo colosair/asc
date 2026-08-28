@@ -9,6 +9,11 @@
 
 import type { Session } from '../model/entities.ts'
 import type { StateStore } from '../../ports/state-store.ts'
+import type { RepoObservation } from '../../ports/local-repo.ts'
+import type { ChangeSummary } from '../../ports/change-context.ts'
+import type { ContextComment, ResourceSnapshot } from '../../ports/resource-context.ts'
+import type { SessionContractDraft, SessionContractPlan } from './contract-draft.ts'
+import { judgeWorkState, type WorkStateResult } from './work-state.ts'
 import type { CanonicalDrift, SessionRuntime, StartOutcome } from '../runtime/session.ts'
 import { proceedGateFacts, type EscalationLedger } from '../runtime/escalation.ts'
 import { deriveExecutionState, type ExecutionVerdict } from '../runtime/execution-state.ts'
@@ -21,6 +26,41 @@ export type ProceedIntent = {
   sessionId?: string
   /** 후보가 없을 때 초안에 실어 줄 목표 힌트. 확정이 아니다. */
   goal?: string
+  /**
+   * 사람이 지목한 작업 항목 (예: 이슈 키). 있으면 후보가 없을 때 **조사부터** 한다 —
+   * 빈 초안을 돌려주는 대신, 실제로 할 일이 있는지를 먼저 판정한다.
+   */
+  workRef?: string
+}
+
+/**
+ * 작업 항목 하나를 실제로 조사해 계약까지 잇는 통로 (P0-D).
+ *
+ * 전부 주입이다. Operator 는 adapter 도 policy 도 모르고, 여기 담긴 함수들이 하는 판정을
+ * 다시 계산하지 않는다 — 범위·책임·발급 권한은 `plan` 이 돌려주는 것을 **읽기만** 한다.
+ */
+export type WorkIngress = {
+  /** 작업 항목과 그 둘레를 모은다. 못 모은 것은 'UNAVAILABLE' 로 말한다. */
+  gather: (workRef: string) => Promise<{
+    workItem?: ResourceSnapshot
+    trackerDone?: boolean
+    comments?: readonly ContextComment[] | 'UNAVAILABLE'
+    change?: ChangeSummary | 'UNAVAILABLE'
+    dependencies?: readonly { reference: string; state?: string; open?: boolean }[]
+  }>
+  /** 저장소 관측. 없으면 'MISSING' 으로 취급되고, 그 상태에서는 어떤 추천도 하지 않는다. */
+  observeRepo?: (query: { refHint: string }) => Promise<RepoObservation>
+  derive: (input: {
+    workRef: string
+    goal?: string
+    workItem: ResourceSnapshot
+    workState: WorkStateResult
+    repo: RepoObservation | 'MISSING'
+  }) => SessionContractDraft
+  /** planSessionContract 를 policy·ownership·기존 id 로 감싼 것. */
+  plan: (draft: SessionContractDraft) => Promise<SessionContractPlan>
+  /** 위임 범위 안에서만 불린다. 발급 경로는 SessionRuntime 하나뿐이다. */
+  issue: (draft: SessionContractDraft) => Promise<{ ok: true; sessionId: string } | { ok: false; detail: string }>
 }
 
 /** 후보 나열용 요약 — 사람이 고를 근거까지 함께 준다. */
@@ -53,7 +93,20 @@ export type ProceedOutcome =
       kind: 'PROPOSE_CONTRACT'
       /** 초안일 뿐이다 — issue는 Controller 승인 후 별도 행위 (C-03 §1.3). */
       draft: { role: Session['role']; goal: string; doneCriteria: string[] }
+      /** 조사에서 도출한 초안 전문. 조사 없이 온 경우엔 없다. */
+      full?: SessionContractDraft
+      /** planSessionContract 판정 원본. 여기 있는 것을 다시 계산하지 않는다. */
+      plan?: SessionContractPlan
+      /** 발급이 Controller 것일 때 사람이 그대로 실행할 명령. */
+      forController?: string[]
     }
+  /**
+   * 조사해 보니 **세션을 낼 일이 아니다** (P0-B). 이미 구현돼 tracker 만 뒤처졌거나,
+   * 선행 작업·외부 검증에 막혔거나, 결론 요건이 모자란 경우다.
+   *
+   * 아무것도 쓰지 않는다. 파생 뷰이며 저장되지 않는다 — 상태 enum(OM §11.2)을 건드리지 않는다.
+   */
+  | { kind: 'WORK_STATE'; workRef: string; result: WorkStateResult; nextAction: string }
   /**
    * 미해소 상신이 실행 가능한 node를 전부 덮었다 (C-13 §6).
    *
@@ -74,6 +127,11 @@ export type OperatorDeps = {
    */
   escalations?: EscalationLedger
   /**
+   * 작업 항목 통로 (P0-D). 없으면 후보가 없을 때 예전처럼 빈 초안을 제안한다 —
+   * 기존 호출자 무손상.
+   */
+  ingress?: WorkIngress
+  /**
    * 필수다. 모든 진입이 bootstrap/profile.lock 검증을 지난다 — Surface가 어디든.
    * 실 조립은 factory(cli의 createOperator)가 bootstrapGuard로 고정한다.
    */
@@ -86,12 +144,14 @@ export class Operator {
   #store: StateStore
   #sessions: SessionRuntime
   #escalations: EscalationLedger | undefined
+  #ingress: WorkIngress | undefined
   #guard: () => Promise<ConfigCheck>
 
   constructor(deps: OperatorDeps) {
     this.#store = deps.store
     this.#sessions = deps.sessions
     this.#escalations = deps.escalations
+    this.#ingress = deps.ingress
     this.#guard = deps.guard
   }
 
@@ -112,6 +172,7 @@ export class Operator {
     const candidates = (await this.#store.list('session')).filter((s) => RUNNABLE.has(s.status))
 
     if (candidates.length === 0) {
+      if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress)
       // 자동 issue 금지. 초안을 제안할 수는 있으나 발급은 Controller 승인 후 별도 행위다.
       return {
         kind: 'PROPOSE_CONTRACT',
@@ -134,6 +195,53 @@ export class Operator {
     }
 
     return this.#advance(candidates[0]!)
+  }
+
+  /**
+   * 돌릴 세션은 없고 사람이 작업 항목을 지목했다 (P0-D).
+   *
+   * 순서에 뜻이 있다: **조사 → 실제 상태 판정 → (필요하면) 계약**. 계약부터 만들면 이미
+   * 끝난 일에 세션을 내게 되고, 그것이 이 경로를 고치게 된 사고였다.
+   */
+  async #ingest(workRef: string, goal: string | undefined, ingress: WorkIngress): Promise<ProceedOutcome> {
+    const gathered = await ingress.gather(workRef)
+    const repo = ingress.observeRepo ? await ingress.observeRepo({ refHint: workRef }) : 'MISSING'
+    const workState = judgeWorkState({ ...gathered, repo })
+
+    const decided = workState.state === 'DECIDABLE_WITH_LIMITATION' ? workState.leaning : workState.state
+    if (decided !== 'ACTIONABLE' || !gathered.workItem) {
+      return { kind: 'WORK_STATE', workRef, result: workState, nextAction: nextActionFor(workState, workRef) }
+    }
+
+    const draft = ingress.derive({ workRef, goal, workItem: gathered.workItem, workState, repo })
+    const plan = await ingress.plan(draft)
+    const handout = {
+      kind: 'PROPOSE_CONTRACT' as const,
+      draft: {
+        role: (draft.role ?? 'implementer') as Session['role'],
+        goal: draft.goal ?? '',
+        doneCriteria: [...(draft.criteria ?? [])],
+      },
+      full: draft,
+      plan,
+    }
+
+    // 계약이 성립하지 않으면 발급하지 않는다. 무엇이 남았는지는 plan 이 이미 말한다.
+    if (plan.status !== 'READY_TO_ISSUE') return handout
+
+    // 발급 권한은 사람의 것이다. 위임이 없으면 명령만 건네고 멈춘다 (OM §450).
+    if (plan.issuance.authority !== 'delegated') {
+      return { ...handout, forController: issueCommand(draft) }
+    }
+
+    const issued = await ingress.issue(draft)
+    if (!issued.ok) return { kind: 'FAILED', reason: 'TRANSITION', detail: issued.detail }
+
+    const session = await this.#store.get('session', issued.sessionId)
+    if (!session) {
+      return { kind: 'FAILED', reason: 'NOT_FOUND', detail: `발급한 세션 '${issued.sessionId}' 을 찾지 못했다` }
+    }
+    return this.#advance(session)
   }
 
   /** 상태별로 한 걸음. 전이는 전부 SessionRuntime을 지난다 — 우회 경로 없음. */
@@ -247,4 +355,29 @@ function handout(session: Session): Handout {
     doneCriteria: session.doneCriteria,
     ...(session.checkpoint ? { checkpoint: session.checkpoint } : {}),
   }
+}
+
+/** 세션을 내지 않을 때, 대신 무엇을 하면 되는가. 실행하지 않고 말만 한다. */
+function nextActionFor(result: WorkStateResult, workRef: string): string {
+  switch (result.state === 'DECIDABLE_WITH_LIMITATION' ? (result.leaning ?? 'UNDECIDABLE') : result.state) {
+    case 'IMPLEMENTED_STALE_TRACKER':
+      return `구현은 정본에 있다 — 할 일은 구현이 아니라 ${workRef} 상태 정리다. 추적 시스템 반영은 외부 쓰기이므로 승인 경로(Grant)를 지난다`
+    case 'IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION':
+      return '구현은 끝났고 검증이 막혀 있다 — 막힌 것을 먼저 풀어라. 새 구현 세션은 필요 없다'
+    case 'BLOCKED_DEPENDENCY':
+      return '선행 작업이 열려 있다 — 그것이 닫히기 전에는 이 작업만으로 끝나지 않는다'
+    case 'REVIEW_RESPONSE_REQUIRED':
+      return '검토가 답을 기다린다 — 다음 행동은 새 구현이 아니라 응답이다'
+    default:
+      return `결론 요건이 모자라다: ${result.missing.join(', ') || '확인하지 못한 것이 있다'} — 그것을 먼저 확인하라`
+  }
+}
+
+/** Controller 가 그대로 실행할 발급 명령. 조립만 하고 실행하지 않는다. */
+function issueCommand(draft: SessionContractDraft): string[] {
+  const argv = ['asc', 'session', 'issue', draft.id ?? '<S-ID>', '--role', draft.role ?? 'implementer']
+  if (draft.goal) argv.push('--goal', draft.goal)
+  for (const scope of draft.boundary ?? []) argv.push('--boundary', scope)
+  for (const criterion of draft.criteria ?? []) argv.push('--criteria', criterion)
+  return argv
 }

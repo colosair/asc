@@ -61,7 +61,12 @@ import {
 import { MonitorEngine } from '../core/monitor/engine.ts'
 import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
 import { evaluateHealth, healthAlertLines } from '../core/monitor/health-alerts.ts'
-import { Operator } from '../core/operator/proceed.ts'
+import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
+import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
+import { LocalRepoAdapter } from '../adapters/local/repo.ts'
+import type { ChangeSummary } from '../ports/change-context.ts'
+import type { ContextComment } from '../ports/resource-context.ts'
+import { statusIndicatesDone } from '../adapters/jam/ports.ts'
 import { ProgressService } from '../core/operator/progress.ts'
 import { composeBindings, defaultAdapters } from '../composition/registry.ts'
 import { buildRuntimePorts, rolesFor } from '../composition/runtime.ts'
@@ -128,7 +133,7 @@ import { loadIdentityMap } from './identity-config.ts'
 
 const USAGE = `asc — Agent Session Control
 
-  asc proceed [--session <id>] [--goal <text>] [--json]
+  asc proceed [--session <id>] [--work <WORK-ID>] [--goal <text>] [--json]
 
   asc inbox list   [--all] [--priority P0|P1|P2] [--json]
   asc inbox show   <REQUEST_ID> [--json]
@@ -244,6 +249,7 @@ Options
   --write         actually write the artefacts (default: preview)
   --role          planner|researcher|implementer|verifier
   --goal          the single goal of this session
+  --work          work item to investigate before proposing a contract (asc proceed)
   --boundary      write scope (must be narrower than the Profile's)
   --exception     SOFT DENY item allowed for this session only
   --criteria      a verifiable done-criterion (repeatable)
@@ -543,6 +549,7 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
       body: { type: 'string' },
       to: { type: 'string' },
       session: { type: 'string' },
+      work: { type: 'string' },
       position: { type: 'string' },
       next: { type: 'string' },
       done: { type: 'string', multiple: true },
@@ -1907,11 +1914,19 @@ async function runProceed(
     canonicalSources: (resolved?.canonicalSources ?? []).map((sourceId) => ({ sourceId })),
     ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
   })
+  const workRef = (values.work as string | undefined) ?? undefined
+  const ingress = workRef ? await buildWorkIngress(store, root, sessions, resolved) : undefined
+  if (workRef && !ingress) {
+    console.error(`작업 항목 '${workRef}' 을 읽을 통로가 없다 — Profile bindings 에 작업 항목 provider 를 선언하라.`)
+    return 2
+  }
+
   const operator = new Operator({
     store,
     sessions,
     // 막힌 node만 보고 판단한다 — checkpoint를 발행했다는 이유로 멈추지 않는다 (C-13 §3.1)
     escalations: escalationLedger(store),
+    ...(ingress ? { ingress } : {}),
     // main()의 checkBootstrap과 같은 원천(bootstrapGuard)이다 — 중복 판단이 아니라 같은 문
     guard: async () => {
       const outcome = await checkBootstrap(root)
@@ -1922,6 +1937,7 @@ async function runProceed(
   const outcome = await operator.proceed({
     ...(values.session ? { sessionId: values.session as string } : {}),
     ...(values.goal ? { goal: values.goal as string } : {}),
+    ...(workRef ? { workRef } : {}),
   })
 
   if (values.json) {
@@ -1979,7 +1995,34 @@ async function runProceed(
         console.log(`  ${c.id}  ${c.status.padEnd(7)}  ${c.wouldDo.padEnd(8)}  ${c.goal}`)
       }
       return 1
+    case 'WORK_STATE': {
+      const shown = outcome.result.leaning
+        ? `${outcome.result.state} (${outcome.result.leaning})`
+        : outcome.result.state
+      console.log(`${outcome.workRef}: ${shown}`)
+      for (const line of outcome.result.evidence) console.log(`  근거      ${line}`)
+      for (const line of outcome.result.limitations) console.log(`  한계      ${line}`)
+      for (const line of outcome.result.missing) console.log(`  미확인    ${line}`)
+      console.log(`\n다음 행동: ${outcome.nextAction}`)
+      return outcome.result.state === 'UNDECIDABLE' ? 1 : 0
+    }
     case 'PROPOSE_CONTRACT':
+      if (outcome.plan) {
+        console.log(`${outcome.plan.status}${outcome.full?.id ? ` — ${outcome.full.id}` : ''}`)
+        for (const fact of outcome.plan.facts) console.log(`  fact      ${fact.field} (${fact.source})`)
+        for (const proposal of outcome.plan.proposals) {
+          console.log(`  proposal  ${proposal.field} — ${proposal.reason ?? proposal.source}`)
+        }
+        for (const item of outcome.plan.invalid) console.log(`  invalid   ${item.field}: ${item.detail}`)
+        for (const item of outcome.plan.unresolved) {
+          console.log(`  decide    ${item.field} [${item.reason}]: ${item.detail}`)
+        }
+        if (outcome.forController) {
+          console.log(`\n계약은 성립한다. 발급은 Controller 의 것이다 — ${outcome.plan.issuance.detail}:`)
+          console.log(`  ${shorthandCommand(outcome.forController.slice(1))}`)
+        }
+        return outcome.plan.status === 'READY_TO_ISSUE' ? 0 : 1
+      }
       console.log('No runnable session. If a new contract is needed, the Controller issues it:')
       console.log(
         `  asc session issue S-<date>-<n> --role ${outcome.draft.role} --goal "${outcome.draft.goal || '<goal>'}"`,
@@ -2003,6 +2046,121 @@ async function runProceed(
     case 'FAILED':
       console.error(`Cannot proceed (${outcome.reason}): ${outcome.detail}`)
       return 1
+  }
+}
+
+/**
+ * 작업 항목 하나를 조사해 계약까지 잇는 통로 (P0-D).
+ *
+ * 여기서 판정하지 않는다. 모으고(gather·observeRepo), 도출하고(derive), **기존 판정기에
+ * 넘긴다**(plan = planSessionContract, issue = SessionRuntime). 범위·책임·발급 권한은
+ * 그것들이 답하는 것을 그대로 쓴다.
+ *
+ * buildMonitorEngine 을 거치지 않는 이유: 그 함수는 GitHub 토큰이 없으면 멈춘다. 감시에는
+ * 맞는 문이지만, GitLab·JAM 프로젝트에서 저장소 조사까지 막아 버린다 — 그것이 "원격이
+ * 막혔으니 저장소도 못 본다"는 잘못된 결론을 만든 구조다.
+ */
+async function buildWorkIngress(
+  store: MarkdownStateStore,
+  root: string,
+  runtime: SessionRuntime,
+  resolved?: ResolvedRuntime,
+): Promise<WorkIngress | undefined> {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const adapters = defaultAdapters()
+  const declared = resolved?.layers.profile.bindings ?? []
+  const plan = await composeBindings({
+    context: { projectRoot, env: process.env },
+    adapters,
+    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+  })
+  const ports = await buildRuntimePorts({
+    plan,
+    roles: rolesFor(plan, declared),
+    perPage: 30,
+    jam: { command: 'npx', args: ['--yes', '@jam-mcp/launcher', 'serve'], cwd: projectRoot },
+    endpointFor: (binding) => endpointOf(adapters, binding),
+  })
+
+  const work = ports.resourceContext
+  if (!work) return undefined
+
+  // 저장소는 원격 provider 와 무관하게 본다. 이 한 줄이 P0-E 의 요점이다.
+  const repo = new LocalRepoAdapter({ cwd: projectRoot })
+  const canonicalRef = resolved?.layers.profile.canonical.sources[0]?.ref
+  const canonicalPaths = resolved?.layers.profile.canonical.sources.flatMap((source) => source.paths) ?? []
+  const changeContext = ports.changeContext
+
+  return {
+    gather: async (workRef) => {
+      const workItem = await work.getResource(workRef).catch(() => undefined)
+      const comments = await work
+        .getComments(workRef, { limit: 20 })
+        .then((list) => list as readonly ContextComment[] | 'UNAVAILABLE')
+        .catch(() => 'UNAVAILABLE' as const)
+      const change = changeContext
+        ? await changeContext
+            .getChange(workRef)
+            .then((summary) => summary as ChangeSummary | 'UNAVAILABLE')
+            .catch(() => 'UNAVAILABLE' as const)
+        : ('UNAVAILABLE' as const)
+      return {
+        ...(workItem ? { workItem } : {}),
+        ...(workItem ? { trackerDone: statusIndicatesDone(workItem.state) } : {}),
+        comments,
+        change,
+        // 관련 항목의 열림 여부는 tracker 가 알려준 만큼만. 모르면 open 을 비운다.
+        dependencies: (workItem?.related ?? []).map((reference) => ({ reference })),
+      }
+    },
+    observeRepo: (query) =>
+      repo.observe({
+        refHint: query.refHint,
+        ...(canonicalRef ? { canonicalRef } : {}),
+        ...(canonicalPaths.length > 0 ? { paths: canonicalPaths } : {}),
+      }),
+    derive: (input) =>
+      deriveSessionContractDraft({
+        intent: { workRef: input.workRef, ...(input.goal ? { goal: input.goal } : {}) },
+        workItem: input.workItem,
+        workState: input.workState,
+        repo: input.repo,
+        ...(resolved?.resolved.policy ? { policy: resolved.resolved.policy } : {}),
+        ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
+        existingIds: [],
+        today: new Date().toISOString().slice(0, 10).replace(/-/g, ''),
+      }),
+    plan: async (draft) =>
+      planSessionContract({
+        draft,
+        ...(resolved?.resolved.policy ? { policy: resolved.resolved.policy } : {}),
+        ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
+        existingIds: (await store.list('session')).map((session) => session.id),
+      }),
+    issue: async (draft) => {
+      // 발급 경로는 하나뿐이다 — `asc session issue` 와 같은 SessionRuntime.issue 를 부른다.
+      const issued = await runtime.issue({
+        id: draft.id!,
+        role: SessionRole.parse(draft.role ?? 'implementer'),
+        goal: draft.goal ?? '',
+        ...(draft.criteria ? { doneCriteria: [...draft.criteria] } : {}),
+        ...(draft.boundary ? { writeBoundary: [...draft.boundary] } : {}),
+        ...(draft.owner ? { owner: draft.owner } : {}),
+      })
+      if (!issued.ok) {
+        return { ok: false, detail: issued.failures.map((f) => `${f.kind}: ${f.detail}`).join('; ') }
+      }
+      await auditLedger(store).delegate({
+        childSessionId: issued.session.id,
+        role: issued.session.role,
+        goal: issued.session.goal,
+        scope: issued.session.writeBoundary,
+        doneCriteria: issued.session.doneCriteria,
+        issuedBy: issued.session.owner ?? '(위임 범위 내 자동 발급)',
+        issuedAt: new Date().toISOString(),
+      })
+      return { ok: true, sessionId: issued.session.id }
+    },
   }
 }
 
