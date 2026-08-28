@@ -12,7 +12,7 @@ import { parseArgs, promisify } from 'node:util'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   MINIMUM_NODE_MAJOR,
@@ -27,6 +27,7 @@ import { GitHubEventSource } from '../adapters/github/event-source.ts'
 import { GitHubScm } from '../adapters/github/scm.ts'
 import { MarkdownStateStore } from '../adapters/markdown/state-store.ts'
 import { LocalIdentityBinding } from '../adapters/local/identity.ts'
+import { IDENTITY_FILE } from './identity-config.ts'
 import { TextRenderer } from '../adapters/text/renderer.ts'
 import { ApprovalService } from '../core/approval/service.ts'
 import { Executor } from '../core/execution/executor.ts'
@@ -39,6 +40,7 @@ import { adoptionLine, judgeAdoption, migrate } from '../core/workspace/migrate.
 import { newWorkspaceId, normalizeRemote, recoverCandidates, recoverLines } from '../core/workspace/identity.ts'
 import { resolveWorkspace, resolutionLine, type Resolution } from '../core/workspace/resolve.ts'
 import { assessSetup, renderSetup, type AttachmentState, type SetupStatus } from '../core/attach/setup.ts'
+import { withIdentity } from '../core/attach/init.ts'
 import {
   applySetupPlan,
   computeSetupPlan,
@@ -181,6 +183,8 @@ const USAGE = `asc — Agent Session Control
                         # without --profile: report what was detected, then stop
 
   asc setup status [--json]
+  asc setup identity [--role controller|monitor|both] [--actor <channel:actor>]
+                        # 지금 이 사람을 승인 권한자로 세우고 재고정까지 한다
   asc setup plan   [--profile <id>] [--scope local|project] [--json]
                         # says what it would change — changes nothing
   asc setup apply  [--profile <id>] [--scope local|project] [--json]
@@ -253,6 +257,7 @@ Options
   --role          planner|researcher|implementer|verifier
   --goal          the single goal of this session
   --work          work item to investigate before proposing a contract (asc proceed)
+  --actor         who you are, as <channel>:<actor> (asc setup identity)
   --boundary      write scope (must be narrower than the Profile's)
   --exception     SOFT DENY item allowed for this session only
   --criteria      a verifiable done-criterion (repeatable)
@@ -553,6 +558,7 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
       to: { type: 'string' },
       session: { type: 'string' },
       work: { type: 'string' },
+      actor: { type: 'string' },
       position: { type: 'string' },
       next: { type: 'string' },
       done: { type: 'string', multiple: true },
@@ -1241,6 +1247,7 @@ async function runSetup(
 ): Promise<number> {
   // plan/apply는 같은 판단을 나눠 쓴다 (C-14 §6). `--agent` 는 apply의 비대화 형태다.
   if (command === 'plan' || command === 'apply') return runSetupLifecycle(command, values, entry)
+  if (command === 'identity') return runSetupIdentity(values)
   if (values.agent) return runSetupLifecycle('apply', values, entry)
   if (command !== undefined && command !== 'status') {
     console.error(`Unknown setup command: ${command}\n\n${USAGE}`)
@@ -1340,6 +1347,114 @@ const nodeProcessRunner: ProcessRunner = async (command, args) => {
  * 사람이 보는 줄과 agent가 파싱하는 JSON은 **같은 plan**에서 나온다 (C-14 불변식 ①).
  * agent 경로의 stdout은 JSON 문서 하나뿐이고, 그 밖의 말은 stderr로 간다 (§7).
  */
+/**
+ * `asc setup identity` — 지금 이 사람을 이 workspace 의 승인 권한자로 세운다 (P1-F).
+ *
+ * 결정은 사람이 하고(이 명령을 실행하는 것이 그 결정이다), **파일 편집은 ASC 가 한다.**
+ * 그 전까지는 identities.json 과 override.json 을 손으로 고치는 것이 유일한 길이었고,
+ * 그 둘은 서로 다른 형식이라 한쪽만 채워 놓고 왜 안 열리는지 모르는 상태가 흔했다.
+ *
+ * 비밀은 읽지도 쓰지도 않는다. 여기서 다루는 것은 이름과 채널뿐이다.
+ */
+async function runSetupIdentity(values: Record<string, unknown>): Promise<number> {
+  const resolution = await resolveRoot(process.cwd(), values.root as string | undefined)
+  if (resolution.kind === 'UNRESOLVED') {
+    console.error('Not attached yet — run `asc init --profile <id>` first.')
+    return 2
+  }
+  const root = resolution.root
+
+  const explicit = values.actor as string | undefined
+  const candidate = explicit ?? (await detectSelf())
+  if (!candidate) {
+    console.error('Could not tell who you are here. Pass one: --actor local:<name>')
+    return 2
+  }
+  const actor = candidate.includes(':') ? candidate : `local:${candidate}`
+  const name = actor.slice(actor.indexOf(':') + 1)
+  const roles = (values.role as string | undefined) ?? 'both'
+  if (!['controller', 'monitor', 'both'].includes(roles)) {
+    console.error("--role is controller|monitor|both")
+    return 2
+  }
+  const asController = roles !== 'monitor'
+  const asMonitor = roles !== 'controller'
+
+  // 어느 Profile 로 재고정할지는 lock 파일에서 읽는다. attachment 판정을 쓰면 안 되는 이유는
+  // 이 명령 자신이 drift 를 만들기 때문이다 — 한 번 실패하면 그 다음부터는 자기가 닫아야 할
+  // drift 때문에 profile 을 못 읽어 영영 못 닫는다.
+  const attachedProfile = (values.profile as string | undefined) ?? (await lockedProfileId(root))
+  if (!attachedProfile) {
+    console.error('붙어 있는 Profile 을 알 수 없다 — `asc setup status` 를 보고, 필요하면 --profile 로 지목하라.')
+    return 1
+  }
+
+  const identitiesPath = join(root, IDENTITY_FILE)
+  const overridePath = join(root, 'override.json')
+  const merged = withIdentity(await readJson(identitiesPath), await readJson(overridePath), {
+    name,
+    actor,
+    controller: asController,
+    monitor: asMonitor,
+  })
+  await writeJson(identitiesPath, merged.identities)
+  await writeJson(overridePath, merged.override)
+
+  console.log(`${name} — ${actor}`)
+  console.log(`  identities.json  ${asController ? 'approver 등록' : '건드리지 않음'}`)
+  console.log(`  override.json    ${asController ? 'controller.identities' : ''}${asController && asMonitor ? ' · ' : ''}${asMonitor ? 'monitorIdentities' : ''}`)
+
+  // override 는 lock digest 에 들어간다 — 고친 뒤 재고정하지 않으면 다음 명령이 멈춘다.
+  // 어느 Profile 로 재고정할지는 지금 붙어 있는 것이 답이다 — 사람에게 다시 묻지 않는다.
+  const relocked = await runProfile('resolve', { ...values, profile: attachedProfile, write: true }, root)
+  if (relocked !== 0) return relocked
+
+  console.log('')
+  console.log(renderSetup(await inspectSetup(root)))
+  return 0
+}
+
+/** 지금 붙어 있는 Profile id. lock 이 어긋나 있어도 읽힌다 — 파일에 그대로 남아 있다. */
+async function lockedProfileId(root: string): Promise<string | undefined> {
+  try {
+    const lock = JSON.parse(await readFile(join(root, 'profile.lock'), 'utf8')) as {
+      profile?: { id?: string }
+    }
+    return lock.profile?.id
+  } catch {
+    return undefined
+  }
+}
+
+/** git·계정에서 "지금 이 사람"의 이름만 읽는다. 자격 값은 읽지 않는다. */
+async function detectSelf(): Promise<string | null> {
+  const fromGit = await execText('git', ['config', 'user.name'])
+  if (fromGit) return fromGit
+  const user = userInfo().username
+  return user || null
+}
+
+async function execText(command: string, args: string[]): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(command, args)
+    return stdout.trim() || null
+  } catch {
+    return null
+  }
+}
+
+async function readJson(path: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+const writeJson = (path: string, value: unknown): Promise<void> =>
+  writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+
 async function runSetupLifecycle(
   command: 'plan' | 'apply',
   values: Record<string, unknown>,
