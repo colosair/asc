@@ -16,6 +16,7 @@ import {
   type ResolvedBinding,
 } from '../core/binding/types.ts'
 import { composeBindings, describeAll } from '../composition/registry.ts'
+import { proposeBindings } from '../composition/propose.ts'
 import { GitHubAdapter, parseRemote } from '../adapters/github/adapter.ts'
 import { buildRuntimePorts } from '../composition/runtime.ts'
 import type { Adapter } from '../ports/adapter.ts'
@@ -286,5 +287,36 @@ describe('B-29 Gate — External-System Independence (C-09 §6.1)', () => {
       assert.match(capability, /^[a-z]+\.[a-z]+$/, `${capability} 형식`)
       assert.doesNotMatch(capability, /github|gitlab|jira|jam|mattermost|slack/)
     }
+  })
+})
+
+describe('P1-G — 발견되는 사실은 제안하고, 갈리면 고르지 않는다', () => {
+  it('후보가 유일하면 그 capability 를 제안한다', () => {
+    const proposal = proposeBindings(planOf(binding({ adapterId: 'gitlab', resource: 'group/project' })))
+
+    assert.equal(proposal.roles['observe.delta'], 'gitlab')
+    assert.equal(proposal.roles['context.change'], 'gitlab')
+    assert.deepEqual(proposal.conflicts, [])
+    assert.ok(proposal.reasons.every((line) => line.includes('저장하지 않는다')))
+  })
+
+  it('후보가 둘이면 제안하지 않고 갈렸다고 말한다 — 틀린 연결은 없는 연결보다 나쁘다', () => {
+    const proposal = proposeBindings(
+      planOf(
+        binding({ adapterId: 'gitlab', resource: 'group/one' }),
+        binding({ adapterId: 'github', resource: 'org/two' }),
+      ),
+    )
+
+    assert.equal(proposal.roles['observe.delta'], undefined)
+    assert.equal(proposal.conflicts.length, 2)
+    assert.ok(proposal.conflicts[0]!.includes('사람이 정한다'))
+  })
+
+  it('쓸 수 없는 후보는 제안 대상이 아니다', () => {
+    const proposal = proposeBindings(planOf(binding({ state: 'UNCONFIGURED' })))
+
+    assert.deepEqual(proposal.roles, {})
+    assert.deepEqual(proposal.conflicts, [])
   })
 })

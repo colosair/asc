@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 
 import type { AdapterDescriptor, BindingCandidate, Capability } from '../../core/binding/types.ts'
 import type { Adapter, DiscoveryContext, ProbeResult } from '../../ports/adapter.ts'
-import { GitLabClient, discoverToken, encodeProject } from './client.ts'
+import { GitLabClient, discoverToken, encodeProject, glabAvailable, type ProcessRunner } from './client.ts'
 
 const run = promisify(execFile)
 
@@ -37,6 +37,14 @@ export type GitLabAdapterDeps = {
    * 자체 호스팅 주소를 코드나 문서에 박지 않기 위해서다 (지시 §12).
    */
   host?: string
+  /** 프로세스 실행 통로. 테스트가 실제 `glab` 을 부르지 않기 위한 주입점. */
+  run?: ProcessRunner
+}
+
+/** 기본 실행 통로. 실패는 예외로 올린다 — 호출측이 "없다"와 "터졌다"를 구분한다. */
+const defaultRun: ProcessRunner = async (command, args) => {
+  const { stdout } = await run(command, [...args])
+  return stdout
 }
 
 export class GitLabAdapter implements Adapter {
@@ -52,8 +60,10 @@ export class GitLabAdapter implements Adapter {
    * 그렇지 않은 호출자는 `ASC_GITLAB_URL` 로 명시하면 된다.
    */
   #endpoints = new Map<string, string>()
+  #run: ProcessRunner
 
   constructor(deps: GitLabAdapterDeps = {}) {
+    this.#run = deps.run ?? defaultRun
     this.#listRemotes = deps.listRemotes ?? defaultListRemotes
     this.#findToken = deps.findToken ?? discoverToken
     this.#reach = deps.reach
@@ -65,7 +75,7 @@ export class GitLabAdapter implements Adapter {
       id: 'gitlab',
       version: '1',
       provides: PROVIDES,
-      requiresCredential: ['ASC_GITLAB_TOKEN | GITLAB_TOKEN'],
+      requiresCredential: ['ASC_GITLAB_TOKEN | GITLAB_TOKEN, 또는 로그인된 glab (읽기 전용)'],
       prerequisites: ['git remote 가 이 host를 가리켜야 한다'],
     }
   }
@@ -102,7 +112,19 @@ export class GitLabAdapter implements Adapter {
   async probe(candidate: BindingCandidate, context: DiscoveryContext): Promise<ProbeResult> {
     const token = this.#findToken(context.env)
     if (!token) {
-      return { state: 'UNCONFIGURED', detail: '토큰이 없다 — ASC_GITLAB_TOKEN 또는 GITLAB_TOKEN 을 두어라' }
+      // 토큰이 없다고 통로가 없는 것은 아니다 — 사람이 이미 `glab` 에 로그인해 뒀다면
+      // 그 도구에게 요청을 대신 보내 달라고 할 수 있다. 토큰을 꺼내 오지는 않는다.
+      if (await glabAvailable(this.#run)) {
+        return {
+          state: 'DEGRADED',
+          provides: candidate.provides,
+          detail: '토큰은 없지만 로그인된 glab 를 통로로 쓴다 (읽기 전용)',
+        }
+      }
+      return {
+        state: 'UNCONFIGURED',
+        detail: '토큰이 없다 — ASC_GITLAB_TOKEN 또는 GITLAB_TOKEN 을 두거나, `glab auth login` 을 해 두어라',
+      }
     }
     const baseUrl = context.env?.ASC_GITLAB_URL ?? this.#endpoints.get(candidate.resource)
     const reach = this.#reach ?? ((project: string, secret: string) => defaultReach(project, secret, baseUrl))

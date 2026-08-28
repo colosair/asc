@@ -75,6 +75,7 @@ import { statusIndicatesDone } from '../adapters/jam/ports.ts'
 import { ProgressService } from '../core/operator/progress.ts'
 import { composeBindings, defaultAdapters } from '../composition/registry.ts'
 import { buildRuntimePorts, closeToolClients, rolesFor } from '../composition/runtime.ts'
+import { proposeBindings } from '../composition/propose.ts'
 import { buildEventObservation } from '../composition/observe.ts'
 import { availableProfiles, planBootstrap, renderPlan, type PolicyId } from '../core/attach/bootstrap.ts'
 import {
@@ -2201,8 +2202,16 @@ async function buildWorkIngress(
     adapters,
     roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
   })
+  // 선언이 없으면 발견된 사실로 제안한다 (P1-G). 저장하지 않고, 갈리면 고르지 않는다.
+  const proposed = declared.length === 0 ? proposeBindings(plan) : undefined
+  if (proposed) {
+    for (const reason of proposed.reasons) console.error(`  제안  ${reason}`)
+    for (const conflict of proposed.conflicts) console.error(`  보류  ${conflict}`)
+  }
   const ports = await buildRuntimePorts({
     plan,
+    // 제안은 **말하는 것**이지 정하는 것이 아니다. 역할을 박아 넣으면 선언과 구분되지 않고,
+    // capability 해석은 후보가 유일할 때 이미 스스로 풀린다.
     roles: rolesFor(plan, declared),
     perPage: 30,
     jam: { command: jamCommand?.command ?? 'jam', args: [...(jamCommand?.args ?? []), 'serve'], cwd: projectRoot },
