@@ -111,6 +111,13 @@ and it carries out nothing that was not in it. `stdout` is a single JSON documen
 everything else goes to `stderr`. It changes nothing and exits `1` when something is
 genuinely left to decide — including the case in step 2.
 
+If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
+failure, no ASC JSON on stdout — that is not an ASC failure, and there is no `code` to
+branch on. Do not retry the same shape. Fall back to the persistent entry:
+`npm install -g @asc-agent/runtime@0.2.1`, then re-run the same subcommand as `asc …`.
+This is distinct from `HOST_EXECUTION_PERMISSION_REQUIRED`, where the host refused a
+command ASC asked to run — that one is ASC speaking, and its JSON says what to do.
+
 **2 — a profile for this project.** If the plan comes back with
 `code: "ASC_PROFILE_SELECTION_REQUIRED"`, the packaged profiles are examples and none of
 them describes this project. Run the `adopt_profile` action's `portable` command:

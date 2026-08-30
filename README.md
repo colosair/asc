@@ -117,6 +117,22 @@ Runtime package was installed, but `asc` is not visible in this process.
 Open a new terminal and run `asc setup status`.
 ```
 
+### Three ways to run ASC
+
+Every command exists in all three tiers; only the entry differs.
+
+| Tier | Entry | When |
+|---|---|---|
+| Zero-install | `npx --yes @asc-agent/bootstrap@0.2.1 <command> --json` | nothing is installed yet |
+| Persistent | `npm install -g @asc-agent/runtime@0.2.1`, then `asc <command>` | the stable local command — and the fallback when `npx` itself cannot start |
+| Development | `asc runtime use development <checkout>` | run a built checkout instead of the package |
+
+If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
+failure, not anything ASC printed — that is not an ASC failure, and there is no ASC error
+code to branch on. Install the persistent tier and re-run the same subcommand as `asc …`.
+This is different from `HOST_EXECUTION_PERMISSION_REQUIRED`, where the host refused a
+command ASC asked to run: that one is ASC speaking, and its JSON says what to do next.
+
 ### Everyday use
 
 ```bash
