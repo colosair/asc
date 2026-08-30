@@ -164,9 +164,13 @@ export class LocalRepoAdapter implements LocalRepoPort {
   }
 
   /**
-   * 조상은 아니지만 내용이 전부 정본에 있는가 (rebase·squash·cherry-pick 등가).
+   * 조상은 아니지만 내용이 전부 정본에 있는가 (단일 커밋 squash·rebase·cherry-pick 등가).
    * `git cherry` 는 patch-id 로 대조한다 — `-` 만 나오면 전부 반영, `+` 가 있으면 남은
    * 커밋이 있다. 빈 출력은 가지가 정본과 같다는 뜻이라 반영으로 친다.
+   *
+   * 한계(검증자 실측): **여러 커밋을 하나로 합친 squash 는 못 잡는다** — 합쳐진 patch-id
+   * 는 개별 커밋 어느 것과도 일치하지 않는다. 그 경우 커밋 메시지의 키 언급(grep)이
+   * 남은 통로이고, 그것마저 없으면 이 관측은 반영 사실을 모른다.
    */
   async #contentEquivalent(refs: readonly string[], canonicalRef: string): Promise<boolean | undefined> {
     let measured = false

@@ -166,6 +166,12 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
     repo.mergedIntoCanonical === true || onCanonical.length > 0 || repo.mentionedArtifactsPresent === true
   if (merged && input.trackerDone === false && artifactSurvives && repo.mentionedOnlyReverts !== true) {
     limitations.push('인수 조건 전체가 지금도 충족되는지는 확인하지 않았다 — 여기서 말하는 것은 구현의 생존까지다')
+    // 측정된 반증은 언급-생존보다 무겁다: cherry 가 "가지에 정본 미반영 커밋이 남아
+    // 있다"고 말했으면, 언급 grep 만으로 "할 일은 상태 정리"를 확정하지 않는다.
+    if (repo.contentEquivalent === false) {
+      limitations.push('작업 가지에 정본에 반영되지 않은 커밋이 남아 있다 (patch 대조) — 상태 정리만 남았다고 확정하지 않는다')
+      return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: true, grade: evidenceGrade })
+    }
     return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: false, grade: evidenceGrade })
   }
   if (merged && input.trackerDone === false) {

@@ -325,3 +325,22 @@ describe('A3 — 내용 등가는 direct 증거다', () => {
     assert.ok(result.evidence.some((e) => e.includes('내용이 전부 정본에 반영')))
   })
 })
+
+describe('A2 보강 — 측정된 반증은 언급-생존 확정을 내린다 (F2)', () => {
+  it('mention 생존 + contentEquivalent=false → IMPLEMENTED_STALE_TRACKER 를 확정하지 않는다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({
+        refs: ['feat/PROJ-87'],
+        mergedIntoCanonical: false,
+        contentEquivalent: false,
+        mentionedOnCanonical: ['abc PROJ-87 절반만'],
+        mentionedArtifactsPresent: true,
+      }),
+    })
+
+    assert.equal(result.state, 'DECIDABLE_WITH_LIMITATION')
+    assert.equal(result.leaning, 'IMPLEMENTED_STALE_TRACKER')
+    assert.ok(result.limitations.some((l) => l.includes('반영되지 않은 커밋')))
+  })
+})
