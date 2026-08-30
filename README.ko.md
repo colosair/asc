@@ -62,6 +62,20 @@ asc ...      이후로는 이것이 안정적인 명령이다
 ASC는 shell 설정도 PATH도 고치지 않는다. 설치는 됐는데 지금 프로세스에서 `asc` 가 안
 보이면 성공으로 뭉개지 않고 그렇게 말한다 — 새 터미널을 열라고 안내한다.
 
+### ASC를 도는 세 가지 방식
+
+명령은 세 방식 모두에서 같다 — 진입만 다르다.
+
+| 방식 | 진입 | 언제 |
+|---|---|---|
+| Zero-install | `npx --yes @asc-agent/bootstrap@0.2.1 <command> --json` | 아직 아무것도 설치 전 |
+| Persistent | `npm install -g @asc-agent/runtime@0.2.1` 후 `asc <command>` | 안정적인 로컬 명령 — 그리고 `npx` 자체가 서지 못하는 기계의 fallback |
+| Development | `asc runtime use development <checkout>` | 패키지 대신 빌드된 checkout으로 |
+
+ASC 프로세스가 뜨기도 전에 `npx`/`npm exec` 가 죽으면 — package runner나 PATH의 문제 —
+그것은 ASC의 실패가 아니고, 분기할 ASC 오류 코드도 없다. persistent 방식을 설치하고 같은
+subcommand를 `asc …` 로 다시 돌리면 된다.
+
 ## 프로젝트에 붙이기
 
 ```bash

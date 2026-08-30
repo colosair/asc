@@ -213,7 +213,8 @@ try {
    *
    * npm 자신의 cache는 뺀다. ASC가 전역 설치 상태를 조회하려고 npm을 부르면 npm이 거기에
    * 자기 기록을 남긴다 — 그것은 ASC가 남긴 상태가 아니고, 격리 환경이 일부러 그리로
-   * 돌려놓은 자리다.
+   * 돌려놓은 자리다. `gh` 도 같은 이유다 — token 조회로 gh를 부르면 gh가 자기
+   * device-id를 HOME 아래에 남긴다.
    */
   const treeOf = async (dir) => {
     const found = []
@@ -227,6 +228,7 @@ try {
       for (const entry of entries) {
         const rel = prefix ? `${prefix}/${entry.name}` : entry.name
         if (rel === '.npm-cache' || rel.startsWith('.npm-cache/')) continue
+        if (rel === '.local/state/gh' || rel.startsWith('.local/state/gh/')) continue
         if (entry.isDirectory()) await walk(join(current, entry.name), rel)
         else found.push(rel)
       }
@@ -332,6 +334,63 @@ try {
 
   const zeroFiles = (await readdir(zeroWork)).filter((f) => f !== '.git')
   check('the repository is still untouched', zeroFiles.length === 1 && zeroFiles[0] === 'README.md', zeroFiles.join(', '))
+
+  // ── 전역 설치 — persistent path를 실제 전역 prefix에서 돌린다 ──────────────
+  //
+  // 문서가 canonical destination으로 적는 `npm install -g @asc-agent/runtime@<pin>` 의
+  // 실물 검증이다. 위 검사는 전부 로컬 `node_modules/.bin` 경유였고, npm이 전역 prefix에
+  // 놓는 실행물은 한 번도 돌려 본 적이 없다 — 격리된 npm_config_prefix가 그 자리다.
+  console.log('\nGlobal install: the persistent path, from the isolated prefix')
+
+  const globalHome = join(base, 'home3')
+  const globalWork = join(base, 'work3')
+  for (const dir of [globalHome, globalWork]) await mkdir(dir, { recursive: true })
+  execFileSync('git', ['init', '-q', globalWork])
+  await writeFile(join(globalWork, 'README.md'), '# global fixture\n', 'utf8')
+
+  // runtime만 심는다 — 문서의 persistent 명령이 시키는 것이 정확히 그것이다.
+  const runtimeTarball = tarballs.find((t) => t.includes('runtime'))
+  check('the runtime tarball is among the packs', runtimeTarball !== undefined, tarballs.join(', '))
+  runNpm(['install', '-g', '--no-audit', '--no-fund', runtimeTarball], {
+    cwd: globalWork,
+    env: isolated(globalHome),
+    stdio: 'pipe',
+  })
+
+  // npm이 전역 실행물을 놓는 자리 — POSIX는 `<prefix>/bin`, Windows는 prefix 바로 아래다.
+  const globalBin =
+    process.platform === 'win32' ? join(globalHome, '.npm-global') : join(globalHome, '.npm-global', 'bin')
+  const globalRun = (args) => {
+    try {
+      return {
+        code: 0,
+        stdout: execFileSync(join(globalBin, binName('asc')), args, {
+          cwd: globalWork,
+          env: isolated(globalHome),
+          encoding: 'utf8',
+          stdio: 'pipe',
+          shell: process.platform === 'win32',
+        }),
+      }
+    } catch (error) {
+      return { code: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }
+    }
+  }
+
+  // 설치가 남긴 상태까지 포함한 스냅샷 — 이후의 실행이 여기서 한 발짝도 더 쓰면 안 된다.
+  const beforeGlobalRepo = await treeOf(globalWork)
+  const beforeGlobalHome = await treeOf(globalHome)
+
+  const globalHelp = globalRun(['--help'])
+  check('the global asc answers --help', globalHelp.code === 0 && globalHelp.stdout.includes('asc proceed'))
+
+  // 진단이지 실패가 아니다 — exit code가 아니라 인쇄된 판정을 본다 (AGENTS.md §4).
+  const globalStatus = globalRun(['setup', 'status'])
+  check('setup status names the unattached state', /Not attached/.test(globalStatus.stdout), globalStatus.stdout.trim().split('\n').pop())
+  check('and stays a diagnostic (exit 0)', globalStatus.code === 0)
+
+  check('the global runs leave the repository untouched', (await treeOf(globalWork)) === beforeGlobalRepo)
+  check('and write nothing more into HOME', (await treeOf(globalHome)) === beforeGlobalHome)
 
   // ── 배포본에 무엇이 실렸는가 ────────────────────────────────────────────────
   //

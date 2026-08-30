@@ -97,6 +97,19 @@ for (const path of [...docs, ...emitters]) {
   check(!source.includes(`${SCOPE}/runtime@latest`), `no @latest in ${path}`)
 }
 
+// ── the persistent path is pinned exactly ──────────────────────────────────
+// `npm install -g @asc-agent/runtime@<pin>` 은 npx가 서기도 전에 죽는 기계의 fallback으로
+// 문서가 직접 시키는 명령이다 — 핀이 뒤처지면 사용자가 옛 버전을 전역에 심는다.
+// `<exact>` 류 placeholder는 명령이 아니라 형태 설명이므로 통과시킨다.
+const persistentSpec = new RegExp(`npm install -g ${RUNTIME}@([^\\s\\\`]+)`, 'g')
+for (const path of docs) {
+  const source = await text(path)
+  const stalePins = [...source.matchAll(persistentSpec)]
+    .map((m) => m[1])
+    .filter((pin) => pin !== version && !pin.startsWith('<'))
+  check(stalePins.length === 0, `npm install -g pin matches ${version} in ${path}`, stalePins.join(', '))
+}
+
 // ── the agent-facing surface names one canonical form ──────────────────────
 // `--agent` 는 계속 동작하지만(호환) 문서·산출물에서는 사라졌다. `--json` 이 같은 것을
 // 더 단순하게 말하고, 진입 표면이 둘이면 agent가 무엇이 정본인지 고르게 된다.
@@ -107,6 +120,7 @@ for (const path of [...docs, ...emitters]) {
 
 // ── retired scope is gone from current surfaces ────────────────────────────
 const offenders = []
+const floaters = []
 const walk = async (dir) => {
   for (const entry of await readdir(join(root, dir), { withFileTypes: true })) {
     const rel = `${dir}/${entry.name}`
@@ -117,11 +131,15 @@ const walk = async (dir) => {
     }
     if (!/\.(ts|mjs|json|md)$/.test(entry.name)) continue
     if (EXEMPT.some((prefix) => rel.slice(2).startsWith(prefix))) continue
-    if ((await text(rel)).includes(RETIRED_SCOPE)) offenders.push(rel.slice(2))
+    const source = await text(rel)
+    if (source.includes(RETIRED_SCOPE)) offenders.push(rel.slice(2))
+    // floating spec은 문서 어디에 있어도 안 된다 — 사용자가 그 줄을 그대로 실행한다.
+    if (source.includes(`${RUNTIME}@latest`) || source.includes(`${BOOTSTRAP}@latest`)) floaters.push(rel.slice(2))
   }
 }
 await walk('.')
 check(offenders.length === 0, 'retired scope absent from current surfaces', offenders.join(', '))
+check(floaters.length === 0, 'no @latest anywhere in current surfaces', floaters.join(', '))
 
 // ── publish metadata ───────────────────────────────────────────────────────
 // 이 아래는 **게시 직전에 틀리면 되돌리기 어려운 것들**이다. 실제 tarball 내용은
