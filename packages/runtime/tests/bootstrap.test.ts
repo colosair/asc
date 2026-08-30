@@ -195,7 +195,7 @@ describe('B-27 Gate — 배포 (C-06 §4)', () => {
   it('package.json이 전역 진입과 Node 하한을 선언하고, Profile을 패키지에 담는다', async () => {
     const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
     // 배포본은 compiled JS다 — `.ts` 를 그대로 실으면 node_modules 아래에서 죽는다 (C-14 §1.1)
-    assert.equal(pkg.bin?.asc, './dist/cli/asc.js')
+    assert.equal(pkg.bin?.asc, 'dist/cli/asc.js')
     assert.match(pkg.engines?.node ?? '', />=24/)
     assert.ok(pkg.scripts?.build, 'build 없이 dist를 실을 수 없다')
     assert.ok(pkg.scripts?.prepack, 'pack 직전에 build가 돌지 않으면 낡은 dist가 실린다')

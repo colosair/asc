@@ -1,7 +1,7 @@
 {
   "name": "@asc-agent/bootstrap",
   "version": "0.3.0",
-  "description": "Zero-install entry point for ASC (Agent Session Control) \u2014 first run for humans and coding agents",
+  "description": "Zero-install entry point for ASC (Agent Session Control) — first run for humans and coding agents",
   "keywords": [
     "agent",
     "control-plane",
@@ -21,7 +21,7 @@
   "author": "colosair (https://github.com/colosair)",
   "type": "module",
   "bin": {
-    "asc-bootstrap": "./dist/cli.js"
+    "asc-bootstrap": "dist/cli.js"
   },
   "main": "./dist/cli.js",
   "files": [

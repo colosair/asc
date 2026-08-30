@@ -71,7 +71,7 @@ describe('패키지 경계 — 배포본만으로 선다', () => {
   it('tarball에는 배포본만 담고, bin은 그 안을 가리킨다', async () => {
     const pkg = await json('package.json')
     assert.deepEqual(pkg.files, ['dist', 'README.md'])
-    assert.equal((pkg.bin as Record<string, string>).asc, './dist/cli/asc.js')
+    assert.equal((pkg.bin as Record<string, string>).asc, 'dist/cli/asc.js')
     // .ts 를 그대로 실어 node_modules 아래에서 죽던 형태로 돌아가지 않는다 (C-14 §1.1)
     assert.doesNotMatch(JSON.stringify(pkg.bin), /\.ts"/)
   })

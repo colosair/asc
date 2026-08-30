@@ -1,7 +1,7 @@
 {
   "name": "@asc-agent/runtime",
   "version": "0.3.0",
-  "description": "ASC (Agent Session Control) \u2014 local-first human-in-the-loop agent control plane: core, CLI, and adapters",
+  "description": "ASC (Agent Session Control) — local-first human-in-the-loop agent control plane: core, CLI, and adapters",
   "keywords": [
     "agent",
     "control-plane",
@@ -22,7 +22,7 @@
   "author": "colosair (https://github.com/colosair)",
   "type": "module",
   "bin": {
-    "asc": "./dist/cli/asc.js"
+    "asc": "dist/cli/asc.js"
   },
   "main": "./dist/cli/asc.js",
   "types": "./dist/cli/asc.d.ts",
