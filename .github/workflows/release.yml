@@ -81,6 +81,7 @@ jobs:
 
       - name: published smoke
         run: |
+          set -o pipefail
           TAG="${GITHUB_REF_NAME#v}"
           PREFIX=$(mktemp -d)
           npm install -g --prefix "$PREFIX" "@asc-agent/runtime@$TAG"
