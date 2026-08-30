@@ -110,3 +110,55 @@ export async function checkNodeRuntime(deps: NodeRuntimeDeps): Promise<NodeRunti
     candidates,
   }
 }
+
+/**
+ * 재실행 감시자. 이 변수가 있으면 이미 후보 Node 로 한 번 건너뛴 프로세스다 —
+ * 거기서도 하한 미달이면 후보 자체가 낡은 것이고, 또 건너뛰면 무한 루프다.
+ */
+export const REEXEC_SENTINEL = 'ASC_NODE_REEXEC'
+
+export type ReexecSpawn = (
+  path: string,
+  args: string[],
+  env: Record<string, string | undefined>,
+) => { status: number | null; signal?: string | null; error?: Error }
+
+export type ReexecDeps = {
+  env: Record<string, string | undefined>
+  spawn: ReexecSpawn
+  /** 지금 이 CLI 의 entry 파일 — 같은 명령을 그대로 다시 돌린다. */
+  entry: string
+}
+
+/**
+ * 호환 Node 를 이미 찾았으면 그 Node 로 **이 명령을 그대로 다시 돌린다** (A6).
+ *
+ * 진단(NODE_RUNTIME_REQUIRED)은 정상 동작이었지만, 후보를 찾아 놓고도 매 호출
+ * PATH prefix 를 처방하는 것은 persistent 사용성 결함이다 — 처방 대신 실행한다.
+ * PATH·shell profile 은 여전히 건드리지 않는다(불변식 ⑰): 프로세스 안의 재실행일 뿐이다.
+ *
+ * null 은 "재실행하지 않았다" — 후보 없음, 이미 재실행된 프로세스(sentinel), 또는
+ * spawn 실패. 그때는 기존 안내가 그대로 나간다.
+ */
+export function reexecWithCandidate(
+  check: Extract<NodeRuntimeCheck, { ok: false }>,
+  argv: readonly string[],
+  deps: ReexecDeps,
+): number | null {
+  if (deps.env[REEXEC_SENTINEL]) return null
+  const candidate = check.candidates.find((c) => {
+    const major = majorOf(c.version)
+    return major !== null && major >= MINIMUM_NODE_MAJOR
+  })
+  if (!candidate) return null
+
+  const child = deps.spawn(candidate.path, [deps.entry, ...argv], {
+    ...deps.env,
+    [REEXEC_SENTINEL]: '1',
+  })
+  if (child.error) return null
+  if (child.signal) return 128 + (REEXEC_SIGNALS[child.signal] ?? 15)
+  return child.status ?? 0
+}
+
+const REEXEC_SIGNALS: Record<string, number> = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }

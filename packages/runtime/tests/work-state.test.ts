@@ -24,6 +24,8 @@ const repo = (over: Partial<RepoObservation> = {}): RepoObservation => ({
   remotes: [{ name: 'origin', url: 'https://lab.ssafy.com/g/p.git' }],
   refs: [],
   canonicalRef: 'origin/develop',
+  // 기본 픽스처는 신선한 관측이다 — 신선도 자체를 다루는 케이스가 이 값을 덮는다.
+  freshness: { state: 'FRESH' },
   pathsExist: {},
   ...over,
 })
@@ -79,7 +81,11 @@ describe('P0-B — 실제 작업 상태 판정', () => {
     })
 
     assert.equal(result.state, 'ACTIONABLE')
-    assert.deepEqual(result.limitations, [])
+    // 키 기준 관측의 구조적 한계는 항상 표기된다 — 판정을 되돌리지는 않는다.
+    assert.deepEqual(result.limitations, [
+      '다른 키·경로로 이미 충족됐을 가능성은 대조하지 않았다 — 키 기준 관측의 구조적 한계',
+    ])
+    assert.equal(result.evidenceGrade, 'none')
   })
 
   it('E. 저장소를 조사하지 않았으면 추천하지 않는다 — UNDECIDABLE', () => {
@@ -229,5 +235,93 @@ describe('P0-2 — 병합 흔적만으로 stale tracker 를 확정하지 않는�
     })
 
     assert.equal(result.state, 'IMPLEMENTED_STALE_TRACKER')
+  })
+})
+
+// ── A1/A2/A3 회귀 (0.3.1) — stale 관측·증거 등급·내용 등가 ───────────────────
+
+describe('A1 — 신선하지 않은 관측 위에서 "없음"을 확정하지 않는다', () => {
+  it('remote ahead + local behind(FETCH_FAILED): 증거 없음이어도 ACTIONABLE 금지', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({ freshness: { state: 'FETCH_FAILED', detail: 'git fetch origin develop 실패' } }),
+    })
+
+    assert.equal(result.state, 'UNDECIDABLE')
+    assert.deepEqual(result.missing, ['canonical-freshness'])
+    // fetch 실패를 repository 부재로 오해하지 않는다 — 어휘가 다르다.
+    assert.ok(!result.missing.includes('repository'))
+    assert.ok(result.limitations.some((l) => l.includes('FETCH_FAILED')))
+  })
+
+  it('freshness 미기록(구 관측)도 신선 취급하지 않는다 — UNKNOWN 과 동일', () => {
+    const stale = repo()
+    delete (stale as Partial<RepoObservation>).freshness
+    const result = judge({ trackerDone: false, repo: stale })
+
+    assert.equal(result.state, 'UNDECIDABLE')
+    assert.deepEqual(result.missing, ['canonical-freshness'])
+  })
+
+  it('FRESH 면 기존대로 ACTIONABLE 확정이 성립한다', () => {
+    const result = judge({ trackerDone: false, repo: repo() })
+    assert.equal(result.state, 'ACTIONABLE')
+  })
+
+  it('구현 증거가 있으면 신선도와 무관하게 존재를 인정한다 — 있던 것은 stale 에서도 있다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({
+        freshness: { state: 'FETCH_FAILED' },
+        refs: ['feat/PROJ-87'],
+        mergedIntoCanonical: true,
+        pathsOnCanonical: { 'fe/a.ts': true },
+      }),
+    })
+    assert.equal(
+      result.state === 'IMPLEMENTED_STALE_TRACKER' || result.leaning === 'IMPLEMENTED_STALE_TRACKER',
+      true,
+    )
+  })
+})
+
+describe('A2 — 증거 등급과 표현', () => {
+  it('키 직접 증거 없음 ≠ 구현 없음 — 문구가 관측 한계를 말한다', () => {
+    const result = judge({ trackerDone: false, repo: repo() })
+
+    assert.ok(result.evidence.some((e) => e.includes('이 작업 키를 직접 가리키는 증거를 확인하지 못했다')))
+    assert.ok(!result.evidence.some((e) => e.includes('어디에도 구현 증거가 없다')))
+    assert.ok(result.limitations.some((l) => l.includes('다른 키·경로로 이미 충족됐을 가능성')))
+    assert.equal(result.evidenceGrade, 'none')
+  })
+
+  it('정본 자체가 말하는 증거는 direct 다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({ refs: ['feat/PROJ-87'], mergedIntoCanonical: true, pathsOnCanonical: { 'fe/a.ts': true } }),
+    })
+    assert.equal(result.evidenceGrade, 'direct')
+  })
+
+  it('언급·작업 트리 잔재는 proxy 다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({ pathsExist: { 'fe/a.ts': true } }),
+    })
+    assert.equal(result.evidenceGrade, 'proxy')
+  })
+})
+
+describe('A3 — 내용 등가는 direct 증거다', () => {
+  it('-317 스타일: 조상이 아니어도 contentEquivalent 면 구현 존재로 판정한다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({ refs: ['feat/PROJ-317-other'], mergedIntoCanonical: false, contentEquivalent: true }),
+    })
+
+    assert.notEqual(result.state, 'ACTIONABLE')
+    assert.notEqual(result.leaning, 'ACTIONABLE')
+    assert.equal(result.evidenceGrade, 'direct')
+    assert.ok(result.evidence.some((e) => e.includes('내용이 전부 정본에 반영')))
   })
 })

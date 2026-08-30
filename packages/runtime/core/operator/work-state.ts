@@ -57,6 +57,12 @@ export type WorkStateInput = {
 export type WorkStateResult = {
   state: WorkState
   leaning?: DecidedState
+  /**
+   * 구현 존재 증거의 등급. direct 는 정본 자체가 말하는 것(조상·정본 경로·내용 등가),
+   * proxy 는 키를 경유한 추정(언급 grep·작업 트리 잔재), none 은 아무것도 없다.
+   * "이 키 기준으로 못 찾았다"와 "구현이 없다"를 가르는 것이 이 칸이다.
+   */
+  evidenceGrade: 'direct' | 'proxy' | 'none'
   /** 판정의 근거. 사람이 그대로 읽는다. */
   evidence: string[]
   /** 보려 했으나 못 본 것. 판정을 뒤집지는 않지만 숨기지도 않는다. */
@@ -88,6 +94,7 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
       evidence,
       limitations,
       missing,
+      evidenceGrade: 'none',
     }
   }
 
@@ -105,13 +112,18 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   // 언급은 그 자체로 증거가 아니다. 되돌리기만 있는 이력도 이 작업을 "언급"하고, 뒤이어
   // 걷혀 나간 변경도 그렇다. 살아남은 것이 있어야 정본에 있다고 말할 수 있다.
   const mentionSurvives = mentioned.length > 0 && repo.mentionedOnlyReverts !== true && repo.mentionedArtifactsPresent === true
-  const merged = repo.mergedIntoCanonical === true || onCanonical.length > 0 || mentionSurvives
+  const directEvidence =
+    repo.mergedIntoCanonical === true || onCanonical.length > 0 || repo.contentEquivalent === true
+  const merged = directEvidence || mentionSurvives
   const hasBranch = repo.refs.length > 0
   const artifacts = Object.entries(repo.pathsExist).filter(([, exists]) => exists)
 
   if (repo.canonicalRef) evidence.push(`정본 대조 기준: ${repo.canonicalRef}`)
   if (hasBranch) evidence.push(`작업 가지: ${repo.refs.join(', ')}`)
   if (repo.mergedIntoCanonical === true) evidence.push('작업 가지가 정본에 병합돼 있다')
+  if (repo.contentEquivalent === true) {
+    evidence.push('작업 가지의 내용이 전부 정본에 반영돼 있다 (조상은 아니다 — rebase·squash 등가)')
+  }
   if (onCanonical.length > 0) evidence.push(`정본에 산출물이 있다: ${onCanonical.map(([p]) => p).join(', ')}`)
   if (artifacts.length > 0) evidence.push(`작업 트리 산출물: ${artifacts.map(([p]) => p).join(', ')}`)
   if (mentioned.length > 0) evidence.push(`정본 이력이 이 작업을 언급한다: ${mentioned.join(' / ')}`)
@@ -138,6 +150,11 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   }
 
   const implemented = merged || artifacts.length > 0
+  const evidenceGrade: WorkStateResult['evidenceGrade'] = directEvidence
+    ? 'direct'
+    : mentionSurvives || artifacts.length > 0
+      ? 'proxy'
+      : 'none'
 
   // ① 구현은 정본에 있는데 tracker 가 안 따라왔다. 여기서만 tracker 를 본다 — 그것도
   //    "끝났다고 말하지 않는다"는 사실로만. tracker 가 결론을 만드는 자리는 없다.
@@ -149,40 +166,55 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
     repo.mergedIntoCanonical === true || onCanonical.length > 0 || repo.mentionedArtifactsPresent === true
   if (merged && input.trackerDone === false && artifactSurvives && repo.mentionedOnlyReverts !== true) {
     limitations.push('인수 조건 전체가 지금도 충족되는지는 확인하지 않았다 — 여기서 말하는 것은 구현의 생존까지다')
-    return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: false })
+    return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: false, grade: evidenceGrade })
   }
   if (merged && input.trackerDone === false) {
     // 병합 흔적은 있는데 생존을 확인하지 못했다 — 새 구현을 시키지도, 끝났다고 하지도 않는다.
     limitations.push('정본에 병합 흔적은 있으나 구현이 지금도 남아 있는지 확인하지 못했다')
-    return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true })
+    return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true, grade: evidenceGrade })
   }
 
   // ② 구현 증거는 있는데 남은 검증 경로가 막혔다.
   if (implemented && input.change === 'UNAVAILABLE' && !merged) {
-    return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true })
+    return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true, grade: evidenceGrade })
   }
 
   // ③ 가지는 있는데 병합 전이고 선행 작업이 열려 있다.
   if (hasBranch && !merged && openDependencies.length > 0) {
-    return decided('BLOCKED_DEPENDENCY', evidence, limitations, { demote: false })
+    return decided('BLOCKED_DEPENDENCY', evidence, limitations, { demote: false, grade: evidenceGrade })
   }
   if (!implemented && openDependencies.length > 0) {
-    return decided('BLOCKED_DEPENDENCY', evidence, limitations, { demote: false })
+    return decided('BLOCKED_DEPENDENCY', evidence, limitations, { demote: false, grade: evidenceGrade })
   }
 
   // ④ 검토가 답을 기다린다.
   if (typeof input.change === 'object' && requestsResponse(input.change, input.comments)) {
-    return decided('REVIEW_RESPONSE_REQUIRED', evidence, limitations, { demote: true })
+    return decided('REVIEW_RESPONSE_REQUIRED', evidence, limitations, { demote: true, grade: evidenceGrade })
   }
 
   // ⑤ 구현 증거도 없고 막힌 것도 없다.
+  //
+  //    "없다"는 신선한 정본에서만 성립한다. 당겨 오지 못한 관측 위의 "없음"은 원격이
+  //    이미 품고 있는 구현을 못 본 것일 수 있다 — 그때는 착수를 추천하지 않는다.
+  //    fetch 실패는 저장소 부재가 아니다: missing 은 freshness 를 따로 가리킨다.
   if (!implemented) {
-    evidence.push('정본·작업 트리 어디에도 구현 증거가 없다')
-    return decided('ACTIONABLE', evidence, limitations, { demote: true })
+    if (repo.freshness?.state !== 'FRESH') {
+      limitations.push(
+        `정본을 원격에서 당겨 오지 못한 관측이다 (${repo.freshness?.state ?? 'UNKNOWN'}${repo.freshness?.detail ? ` — ${repo.freshness.detail}` : ''}) — 이 위에서 "구현이 없다"를 확정하지 않는다`,
+      )
+      return { state: 'UNDECIDABLE', evidence, limitations, missing: ['canonical-freshness'], evidenceGrade }
+    }
+    evidence.push('이 작업 키를 직접 가리키는 증거를 확인하지 못했다')
+    const result = decided('ACTIONABLE', evidence, limitations, { demote: true, grade: evidenceGrade })
+    // 구조적 한계 — 키 대조는 proxy 다. 다른 키의 커밋이 이 작업의 인수 조건을 이미
+    // 충족했을 가능성은 여기서 대조하지 않았다. 표기는 하되 이 한 줄로 판정을 되돌리지는
+    // 않는다 (모든 관측에 항상 붙는 한계라, demote 재료로 쓰면 ACTIONABLE 이 사라진다).
+    result.limitations.push('다른 키·경로로 이미 충족됐을 가능성은 대조하지 않았다 — 키 기준 관측의 구조적 한계')
+    return result
   }
 
   // 구현 증거는 있는데 위 어디에도 안 걸린다 — 남은 것은 검증이고, 무엇이 막혔는지는 모른다.
-  return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true })
+  return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true, grade: evidenceGrade })
 }
 
 /** 검토가 응답을 요구하는가. provider 어휘를 해석하지 않고 두 가지 표시만 본다. */
@@ -204,10 +236,17 @@ function decided(
   state: DecidedState,
   evidence: string[],
   limitations: string[],
-  options: { demote: boolean },
+  options: { demote: boolean; grade: WorkStateResult['evidenceGrade'] },
 ): WorkStateResult {
   if (options.demote && limitations.length > 0) {
-    return { state: 'DECIDABLE_WITH_LIMITATION', leaning: state, evidence, limitations, missing: [] }
+    return {
+      state: 'DECIDABLE_WITH_LIMITATION',
+      leaning: state,
+      evidence,
+      limitations,
+      missing: [],
+      evidenceGrade: options.grade,
+    }
   }
-  return { state, evidence, limitations, missing: [] }
+  return { state, evidence, limitations, missing: [], evidenceGrade: options.grade }
 }

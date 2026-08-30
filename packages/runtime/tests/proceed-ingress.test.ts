@@ -25,6 +25,7 @@ const workItem: ResourceSnapshot = {
 const repoMerged: RepoObservation = {
   branch: 'front',
   remotes: [],
+  freshness: { state: 'FRESH' },
   refs: ['feat/PROJ-87-x'],
   canonicalRef: 'origin/develop',
   mergedIntoCanonical: true,
@@ -34,6 +35,7 @@ const repoMerged: RepoObservation = {
 const repoEmpty: RepoObservation = {
   branch: 'front',
   remotes: [],
+  freshness: { state: 'FRESH' },
   refs: [],
   canonicalRef: 'origin/develop',
   mergedIntoCanonical: false,

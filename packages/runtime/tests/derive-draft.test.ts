@@ -46,7 +46,7 @@ const repo = (over: Partial<RepoObservation> = {}): RepoObservation => ({
   ...over,
 })
 
-const actionable: WorkStateResult = { state: 'ACTIONABLE', evidence: [], limitations: [], missing: [] }
+const actionable: WorkStateResult = { state: 'ACTIONABLE', evidence: [], limitations: [], missing: [], evidenceGrade: 'none' }
 
 // planSessionContract 에 넘길 정책. 판정에 쓰이는 두 칸만 채운다.
 const policy = () =>
