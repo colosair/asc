@@ -108,3 +108,81 @@ describe('P0 — 지원 하한을 먼저 답한다', () => {
     assert.equal(majorOf('nightly'), null)
   })
 })
+
+// ── A6 회귀 (0.3.1) — 후보를 찾았으면 처방 대신 실행한다 ─────────────────────
+
+import { REEXEC_SENTINEL, reexecWithCandidate, type ReexecSpawn } from '../core/distribution/node-runtime.ts'
+
+const failed = (candidates: { path: string; version: string }[]) =>
+  ({
+    ok: false as const,
+    code: 'NODE_RUNTIME_REQUIRED' as const,
+    version: 'v22.23.2',
+    detail: 'x',
+    candidates,
+  })
+
+const spawnRecorder = (result: { status: number | null; signal?: string | null; error?: Error }) => {
+  const calls: { path: string; args: string[]; env: Record<string, string | undefined> }[] = []
+  const spawn: ReexecSpawn = (path, args, env) => {
+    calls.push({ path, args, env })
+    return result
+  }
+  return { spawn, calls }
+}
+
+describe('A6 — Node self re-exec', () => {
+  it('Node22 + Node24 후보: 같은 argv 로 1회 재실행하고 그 종료 코드를 낸다', () => {
+    const { spawn, calls } = spawnRecorder({ status: 0 })
+    const code = reexecWithCandidate(failed([{ path: '/brew/node', version: 'v26.7.0' }]), ['proceed', '--work', 'K-1'], {
+      env: {},
+      spawn,
+      entry: '/lib/asc.js',
+    })
+
+    assert.equal(code, 0)
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0]!.args, ['/lib/asc.js', 'proceed', '--work', 'K-1'])
+    assert.equal(calls[0]!.env[REEXEC_SENTINEL], '1')
+  })
+
+  it('후보가 없으면 재실행하지 않는다 — 기존 NODE_RUNTIME_REQUIRED 안내로', () => {
+    const { spawn, calls } = spawnRecorder({ status: 0 })
+    assert.equal(reexecWithCandidate(failed([]), [], { env: {}, spawn, entry: '/e' }), null)
+    assert.equal(calls.length, 0)
+  })
+
+  it('이미 재실행된 프로세스는 다시 뛰지 않는다 — 무한 루프 방지', () => {
+    const { spawn, calls } = spawnRecorder({ status: 0 })
+    const code = reexecWithCandidate(failed([{ path: '/brew/node', version: 'v26.7.0' }]), [], {
+      env: { [REEXEC_SENTINEL]: '1' },
+      spawn,
+      entry: '/e',
+    })
+    assert.equal(code, null)
+    assert.equal(calls.length, 0)
+  })
+
+  it('하한 미달 후보는 건너뛴다 — incompatible 후보로는 뛰지 않는다', () => {
+    const { spawn, calls } = spawnRecorder({ status: 0 })
+    const code = reexecWithCandidate(failed([{ path: '/old/node', version: 'v20.1.0' }]), [], {
+      env: {},
+      spawn,
+      entry: '/e',
+    })
+    assert.equal(code, null)
+    assert.equal(calls.length, 0)
+  })
+
+  it('신호로 죽은 재실행을 성공으로 보고하지 않는다', () => {
+    const { spawn } = spawnRecorder({ status: null, signal: 'SIGTERM' })
+    const code = reexecWithCandidate(failed([{ path: '/n', version: 'v26.0.0' }]), [], { env: {}, spawn, entry: '/e' })
+    assert.equal(code, 143)
+  })
+
+  it('spawn 자체가 실패하면 안내로 폴백한다', () => {
+    const { spawn } = spawnRecorder({ status: null, error: new Error('ENOENT') })
+    const code = reexecWithCandidate(failed([{ path: '/n', version: 'v26.0.0' }]), [], { env: {}, spawn, entry: '/e' })
+    assert.equal(code, null)
+  })
+})

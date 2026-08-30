@@ -81,10 +81,18 @@ export class LocalRepoAdapter implements LocalRepoPort {
       )
     }
 
-    const canonicalRef = query.canonicalRef ?? (await this.#defaultCanonicalRef())
+    // 신선도가 먼저다. 로컬 브랜치를 정본처럼 읽으면 원격이 전진한 사실을 모른 채
+    // "구현 증거가 없다"가 나온다 — 그것이 이 어댑터가 실전에서 낸 사고였다.
+    const canonical = await this.#freshCanonical(query)
+    const canonicalRef = canonical.ref
+    observation.freshness = canonical.freshness
     if (canonicalRef) {
       observation.canonicalRef = canonicalRef
       observation.mergedIntoCanonical = await this.#anyMerged(observation.refs, canonicalRef)
+      if (observation.mergedIntoCanonical !== true && observation.refs.length > 0) {
+        const equivalent = await this.#contentEquivalent(observation.refs, canonicalRef)
+        if (equivalent !== undefined) observation.contentEquivalent = equivalent
+      }
       if (query.refHint) {
         // 가지가 지워졌어도 이력은 남는다 — 커밋 메시지가 이 작업을 언급하는지 본다.
         const log = await this.#git(['log', '--format=%h %s', `--grep=${query.refHint}`, '-n', '5', canonicalRef])
@@ -126,6 +134,57 @@ export class LocalRepoAdapter implements LocalRepoPort {
     }
 
     return observation
+  }
+
+  /**
+   * 정본 대조 기준과 그 신선도. Profile 이 remote 를 선언했으면 당겨 온 뒤 원격 추적
+   * ref 를 기준으로 삼는다 — fetch 는 읽기다(원격 write 가 아니다). 실패는 흡수하되
+   * FETCH_FAILED 로 남긴다: "당기지 못했다"와 "저장소가 없다"는 다른 사실이다.
+   */
+  async #freshCanonical(
+    query: RepoQuery,
+  ): Promise<{ ref?: string; freshness: NonNullable<RepoObservation['freshness']> }> {
+    const declared = query.canonicalRef
+    if (query.remote && declared) {
+      const branch = declared.startsWith(`${query.remote}/`)
+        ? declared.slice(query.remote.length + 1)
+        : declared
+      const fetched = await this.#git(['fetch', query.remote, branch])
+      const tracking = `${query.remote}/${branch}`
+      if (fetched !== null) return { ref: tracking, freshness: { state: 'FRESH' } }
+      // 당기지 못했어도 원격 추적 ref 가 있으면 그쪽이 로컬 브랜치보다 정본에 가깝다.
+      const trackingExists = (await this.#git(['rev-parse', '--verify', '--quiet', tracking])) !== null
+      return {
+        ref: trackingExists ? tracking : declared,
+        freshness: { state: 'FETCH_FAILED', detail: `git fetch ${query.remote} ${branch} 실패` },
+      }
+    }
+    const ref = declared ?? (await this.#defaultCanonicalRef())
+    return { ref, freshness: { state: 'UNKNOWN', detail: '당겨 올 원격이 선언되지 않았다' } }
+  }
+
+  /**
+   * 조상은 아니지만 내용이 전부 정본에 있는가 (단일 커밋 squash·rebase·cherry-pick 등가).
+   * `git cherry` 는 patch-id 로 대조한다 — `-` 만 나오면 전부 반영, `+` 가 있으면 남은
+   * 커밋이 있다. 빈 출력은 가지가 정본과 같다는 뜻이라 반영으로 친다.
+   *
+   * 한계(검증자 실측): **여러 커밋을 하나로 합친 squash 는 못 잡는다** — 합쳐진 patch-id
+   * 는 개별 커밋 어느 것과도 일치하지 않는다. 그 경우 커밋 메시지의 키 언급(grep)이
+   * 남은 통로이고, 그것마저 없으면 이 관측은 반영 사실을 모른다.
+   */
+  async #contentEquivalent(refs: readonly string[], canonicalRef: string): Promise<boolean | undefined> {
+    let measured = false
+    for (const ref of refs) {
+      const out = await this.#git(['cherry', canonicalRef, ref])
+      if (out === null) continue
+      measured = true
+      const lines = out
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+      if (lines.every((line) => line.startsWith('-'))) return true
+    }
+    return measured ? false : undefined
   }
 
   /**

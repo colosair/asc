@@ -19,7 +19,9 @@ import {
   checkNodeRuntime,
   type NodeRuntimeCheck,
   type NodeRuntimeDeps,
+  reexecWithCandidate,
 } from '../core/distribution/node-runtime.ts'
+import { RELEASE_VERSION } from '../core/distribution/release.ts'
 
 import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
@@ -604,6 +606,16 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
   // 두면 그쪽에 정책이 생기고(C-14 불변식 ⑦), 그러면 두 진입의 답이 갈릴 수 있다.
   const runnable = await checkNodeRuntime(nodeRuntimeDeps())
   if (!runnable.ok) {
+    // 후보를 이미 찾았으면 처방 대신 실행한다 — 같은 명령, 같은 argv, 호환 Node (A6).
+    const reexec = reexecWithCandidate(runnable, argv, {
+      env: process.env,
+      entry: fileURLToPath(import.meta.url),
+      spawn: (path, args, env) => {
+        const child = spawnSync(path, args, { stdio: 'inherit', env: env as NodeJS.ProcessEnv })
+        return { status: child.status, signal: child.signal, ...(child.error ? { error: child.error } : {}) }
+      },
+    })
+    if (reexec !== null) return reexec
     reportNodeRuntime(runnable, Boolean(values.json) || Boolean(values.agent))
     return 1
   }
@@ -1137,7 +1149,9 @@ function declaredPolicies(resolved?: ResolvedRuntime): PolicyId[] {
   return declared
 }
 
-const ASC_VERSION = '0.2.1'
+// RELEASE_VERSION 이 정본이다 — 여기 문자열을 따로 두면 릴리스마다 낡는다 (0.3.0 에서
+// 0.2.1 로 남아 lock 의 ascVersion 표기가 실제와 어긋났다).
+const ASC_VERSION = RELEASE_VERSION
 const CAPABILITIES = ['scm.github', 'state.markdown', 'approval.local']
 const ADAPTER_VERSIONS = { 'scm.github': ASC_VERSION, 'state.markdown': ASC_VERSION }
 
@@ -1701,9 +1715,22 @@ async function runProfile(command: string | undefined, values: Record<string, un
     overridePath: join(root, 'override.json'),
   })
 
-  // 무엇이 실제로 제공되는지는 붙어 있는 Adapter가 정한다
-  const capabilities = ['scm.github', 'state.markdown', 'approval.local']
-  const result = resolveRuntime(layers, capabilities, ASC_VERSION)
+  // 무엇이 실제로 제공되는지는 붙어 있는 Adapter가 정한다 — 상수가 아니라 실측이다 (A5).
+  // discover→probe 를 실제로 돌린다: glab 로그인 같은 상태 변화가 resolve 재실행으로
+  // 반영된다 (re-probe 수단이 따로 필요 없다). 실측 실패는 그 갈래가 빠질 뿐이다.
+  const composed = await composeBindings({ context: { projectRoot: root, env: process.env } }).catch(
+    () => ({ bindings: [] as const }),
+  )
+  for (const binding of composed.bindings) {
+    console.log(
+      `Binding: ${binding.adapterId}/${binding.resource} — ${binding.state}${binding.detail ? ` (${binding.detail})` : ''}`,
+    )
+  }
+  // lock 의 capability 표기는 아직 상수다 — 실측을 digest 재료로 쓰면 glab 로그인 여부에
+  // 따라 lock 이 흔들린다. 실측을 lock 체계에 관통시키는 것은 P1 로 넘기고(재설계 영역),
+  // 여기서는 probe 실측을 사람에게 보이는 것까지 한다. 실사용 read 경로(proceed)는
+  // buildWorkIngress 가 이미 composeBindings 실측으로 조립한다.
+  const result = resolveRuntime(layers, CAPABILITIES, ASC_VERSION)
   if (!result.ok) {
     console.error('resolve failed:')
     for (const failure of result.failures) {
@@ -1717,7 +1744,7 @@ async function runProfile(command: string | undefined, values: Record<string, un
   const lock = buildLock({
     runtime,
     ascVersion: ASC_VERSION,
-    adapters: { 'scm.github': ASC_VERSION, 'state.markdown': ASC_VERSION },
+    adapters: ADAPTER_VERSIONS,
     generatedAt,
   })
 
@@ -2273,7 +2300,10 @@ async function buildWorkIngress(
 
   // 저장소는 원격 provider 와 무관하게 본다. 이 한 줄이 P0-E 의 요점이다.
   const repo = new LocalRepoAdapter({ cwd: projectRoot })
-  const canonicalRef = resolved?.layers.profile.canonical.sources[0]?.ref
+  const canonicalSource = resolved?.layers.profile.canonical.sources[0]
+  const canonicalRef = canonicalSource?.ref
+  // remote 를 버리면 로컬 브랜치를 정본처럼 읽는다 — 실전 오판의 경로였다.
+  const canonicalRemote = canonicalSource?.remote
   const canonicalPaths = resolved?.layers.profile.canonical.sources.flatMap((source) => source.paths) ?? []
   const changeContext = ports.changeContext
 
@@ -2323,6 +2353,7 @@ async function buildWorkIngress(
       return repo.observe({
         refHint: query.refHint,
         ...(canonicalRef ? { canonicalRef } : {}),
+        ...(canonicalRemote ? { remote: canonicalRemote } : {}),
         ...(paths.length > 0 ? { paths } : {}),
         ...(modules.length > 0 ? { modulePaths: modules } : {}),
       })

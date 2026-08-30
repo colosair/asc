@@ -50,6 +50,21 @@ export type RepoObservation = {
    * 않은 것을 확인했다고 하지 않는다.
    */
   mentionedArtifactsPresent?: boolean
+  /**
+   * refs 중 정본의 조상은 아니지만 **내용이 전부 정본에 반영된**(rebase·cherry-pick 등가)
+   * 가지가 있는가. SHA·이슈 키가 사라져도 내용이 살아 있으면 "미구현"이 아니다.
+   * 로컬에 가지가 남아 있을 때만 잴 수 있다 — 못 쟀으면 undefined.
+   */
+  contentEquivalent?: boolean
+  /**
+   * 정본 대조가 얼마나 신선한가. **관측했다 ≠ 신선하다** — 로컬만 읽은 관측은 원격이
+   * 전진한 사실을 모르고, 그 위에서 "구현 증거가 없다"는 결론은 성립하지 않는다.
+   *
+   *   FRESH         원격을 당겨 온 뒤의 원격 추적 ref 를 봤다
+   *   FETCH_FAILED  당기려 했으나 실패했다 — 관측은 낡았을 수 있다
+   *   UNKNOWN       당길 대상을 몰랐다 (remote 미선언 등)
+   */
+  freshness?: { state: 'FRESH' | 'FETCH_FAILED' | 'UNKNOWN'; detail?: string }
   /** git 자체를 쓸 수 없었던 이유. 있으면 이 관측은 비어 있다. */
   unavailable?: string
 }
@@ -58,6 +73,11 @@ export type RepoQuery = {
   /** ref 이름에서 찾을 조각. 보통 작업 항목 키. */
   refHint?: string
   canonicalRef?: string
+  /**
+   * canonicalRef 를 당겨 올 원격 이름 (Profile 의 canonical source 가 선언한 것).
+   * 있으면 observe 가 fetch 를 시도하고 원격 추적 ref 를 대조 기준으로 삼는다.
+   */
+  remote?: string
   paths?: readonly string[]
   /** 범위 재료로만 확인할 자리들. 증거 칸에 섞이지 않는다. */
   modulePaths?: readonly string[]

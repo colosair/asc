@@ -35,6 +35,10 @@ description: >-
   Safely start, resume or continue a Logical Session in a project that has ASC attached.
   Triggers — "proceed with ASC", "continue the ASC session", "asc proceed", "start work
   with ASC", "ASC로 진행해", "ASC 세션 이어서", "ASC로 작업 시작", or the explicit /asc.
+  Also triggers on work-status questions in an ASC-attached project — "is this
+  implemented?", "what's left to do?", "what should I do now?", "현황 파악",
+  "이거 구현됐나", "남은 작업", "지금 뭐 해야 하나" — because answering those by
+  exploring the host directly skips ASC's freshness and evidence gates.
   Do not use it in a project where ASC is not attached.
 ---
 
@@ -42,6 +46,16 @@ description: >-
 
 This skill is a consumer of the ASC Generic Operator. The judgement belongs to the asc
 CLI — here you call it, act on the typed outcome, and keep the contract.
+
+## Work-status questions go through ASC first
+
+"Is X implemented?", "what's the status of this work?", "what remains?" — in an
+ASC-attached project, do NOT settle these by direct host exploration (git log, tracker
+reads). Run \`asc proceed --work <KEY>\` first and read its WORK_STATE: it fetches the
+canonical remote, grades the evidence, and refuses to conclude on a stale or key-only
+observation — none of which ad-hoc exploration does. Direct exploration may supplement
+the answer, never replace the judgement. This is mitigation at the model layer; the
+freshness and evidence gates in the CLI remain the final safeguard.
 
 ## Entry — "proceed with ASC"
 
