@@ -81,11 +81,14 @@ jobs:
 
       - name: published smoke
         run: |
-          set -o pipefail
           TAG="${GITHUB_REF_NAME#v}"
           PREFIX=$(mktemp -d)
           npm install -g --prefix "$PREFIX" "@asc-agent/runtime@$TAG"
-          "$PREFIX/bin/asc" 2>&1 | grep -q "Agent Session Control"
+          # Capture, then grep: `cmd | grep -q` kills the pipe on first match
+          # and the resulting EPIPE fails the step under pipefail (seen on the
+          # jam v1.4.1 run). Exit codes stay visible without a pipe.
+          "$PREFIX/bin/asc" > usage.out 2>&1
+          grep -q "Agent Session Control" usage.out
 
       - name: GitHub Release
         env:
