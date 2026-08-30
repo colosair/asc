@@ -11,7 +11,12 @@ import { describe, it } from 'node:test'
 import { FixtureEventSource } from '../adapters/memory/mocks.ts'
 import { MemoryStateStore } from '../adapters/memory/state-store.ts'
 import { MonitorEngine } from '../core/monitor/engine.ts'
-import { investigate, type InvestigationPorts, type StepResult } from '../core/monitor/investigation.ts'
+import {
+  investigate,
+  stepReason,
+  type InvestigationPorts,
+  type StepResult,
+} from '../core/monitor/investigation.ts'
 import type { EntityKind, EntityMap, CreateResult } from '../ports/state-store.ts'
 import type { Relevance } from '../core/monitor/relevance.ts'
 import type { ChangeContextPort, ChangeSummary } from '../ports/change-context.ts'
@@ -366,5 +371,42 @@ describe('B-32 Gate — 재시도 후 조사 결과 보존', () => {
     const steps = event.replay?.steps ?? []
     assert.ok(steps.length > 0, '조사 단계가 남지 않았다')
     assert.ok(steps.some((s) => s.id === 'resource' && s.kind === 'DONE'))
+  })
+})
+
+describe('P0-A — 안 본 것과 볼 수 없던 것을 가른다', () => {
+  it('통로가 없으면 MISSING 이다 — 조사 누락은 접근 불가가 아니다', async () => {
+    const result = await investigate({ reference: 'o/r#19', relevance: relevant }, { resource: new FakeResource() })
+    const change = result.steps.find((s) => s.id === 'change')!
+    assert.equal(change.kind, 'UNDECIDABLE')
+    assert.equal(stepReason(change), 'MISSING')
+
+    const canonical = result.steps.find((s) => s.id === 'canonical')!
+    assert.equal(stepReason(canonical), 'MISSING')
+  })
+
+  it('통로가 있는데 조회가 실패하면 UNAVAILABLE 이다', async () => {
+    const broken: ResourceContextPort = {
+      id: 'broken',
+      async getResource() {
+        throw new Error('403')
+      },
+      async getComments() {
+        throw new Error('403')
+      },
+    }
+    const result = await investigate({ reference: 'o/r#19', relevance: relevant }, allPorts({ resource: broken }))
+    const resource = result.steps.find((s) => s.id === 'resource')!
+    assert.equal(resource.kind, 'UNDECIDABLE')
+    assert.equal(stepReason(resource), 'UNAVAILABLE')
+  })
+
+  it('해당 없는 단계는 NOT_APPLICABLE 이고, 옛 결과(reason 없음)는 MISSING 으로 읽는다', async () => {
+    const result = await investigate({ reference: 'o/r#19', relevance: relevant }, allPorts())
+    const work = result.steps.find((s) => s.id === 'work')!
+    assert.equal(stepReason(work), 'NOT_APPLICABLE')
+
+    const legacy: StepResult = { id: 'canonical', kind: 'UNDECIDABLE', detail: '옛 판이 남긴 결과' }
+    assert.equal(stepReason(legacy), 'MISSING')
   })
 })

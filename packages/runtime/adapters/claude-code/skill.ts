@@ -76,13 +76,19 @@ and the remedy.
 ## Procedure
 
 1. Run \`asc proceed --json\` (add \`--session <S-ID>\` to name a session).
+   **When the person named work to do — an issue key, a ticket — pass it: \`asc proceed --work <KEY> --json\`.**
+   ASC then investigates before proposing anything: it reads the work item, observes this
+   repository (branch, refs, whether the work is already on the canonical branch), and judges
+   what state the work is actually in. A tracker saying "in progress" is not that judgement.
 2. Act on outcome.kind:
 
 | kind | what to do |
 |---|---|
 | STARTED / RESUMED / CONTINUE_ACTIVE | read contract, checkpoint and doneCriteria, then start. If there is a checkpoint, continue from that point |
 | NEEDS_SELECTION | show the candidates to the person as they are and let them choose. **Do not pick one yourself** |
-| PROPOSE_CONTRACT | fill in what the request, the work item and the profile actually support, then check it with \`asc session plan --json\` — it answers READY_TO_ISSUE, NEEDS_DECISION or INVALID and writes nothing. Mark each value with \`--provenance <field>=FACT\|PROPOSAL:<source>\`. On NEEDS_DECISION ask about the one field it names, with its options and recommendation. **Never invent a goal, a boundary or acceptance to fill a gap**, and never create a session just to show that setup worked. **Never issue automatically on a READY_TO_ISSUE alone** — issuance is the Controller's, meaning a person's, unless \`issuance.authority\` says \`delegated\` for this role; when it says \`controller\`, hand them the command in \`forController\` and stop |
+| WORK_STATE | there is nothing to build here. Read \`result.state\`: IMPLEMENTED_STALE_TRACKER means it is already on the canonical branch and the tracker lags — the remaining act is a status correction, which is an external write and goes through the existing approval path, never straight from you. BLOCKED_* means something outside this work has to move first. UNDECIDABLE means the evidence required for a recommendation is missing — \`result.missing\` names it. **Do not issue a session to work around any of these**, and report \`evidence\` and \`limitations\` as they are |
+| PROPOSE_CONTRACT (with \`plan\`) | ASC already derived the contract and measured it. Read \`plan\`: on NEEDS_DECISION ask about the one field it names — but **never ask for a goal, a boundary or criteria that the work item or this repository already answers**; if one of those shows up as a decision, the derivation is wrong and that is what to fix. When \`forController\` is present the contract holds and issuing it is the person's — hand them that command and stop |
+| PROPOSE_CONTRACT (no \`plan\` — no work reference was given) | fill in what the request, the work item and the profile actually support, then check it with \`asc session plan --json\` — it answers READY_TO_ISSUE, NEEDS_DECISION or INVALID and writes nothing. Mark each value with \`--provenance <field>=FACT\|PROPOSAL:<source>\`. On NEEDS_DECISION ask about the one field it names, with its options and recommendation. **Never invent a goal, a boundary or acceptance to fill a gap**, and never create a session just to show that setup worked. **Never issue automatically on a READY_TO_ISSUE alone** — issuance is the Controller's, meaning a person's, unless \`issuance.authority\` says \`delegated\` for this role; when it says \`controller\`, hand them the command in \`forController\` and stop |
 | BLOCKED_CONFIG / BLOCKED_CANONICAL | show the printed reason and stop. Do not re-resolve or re-lock on their behalf |
 | FAILED | show reason and detail to the person |
 

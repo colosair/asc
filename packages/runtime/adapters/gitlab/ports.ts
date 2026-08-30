@@ -18,7 +18,7 @@ import type {
   ResourceContextPort,
   ResourceSnapshot,
 } from '../../ports/resource-context.ts'
-import { encodeProject, parseRef, type GitLabClient } from './client.ts'
+import { encodeProject, parseRef, type GitLabReader } from './client.ts'
 
 type TodoPayload = {
   id: number
@@ -61,7 +61,7 @@ const marker = (parts: readonly (string | number | undefined)[]): string =>
   parts.map((p) => (p === undefined ? '' : String(p))).join('|')
 
 export type GitLabDeps = {
-  client: GitLabClient
+  client: GitLabReader
   /** `group/sub/project`. */
   project: string
   perPage?: number
@@ -70,7 +70,7 @@ export type GitLabDeps = {
 abstract class GitLabBase {
   // 하위 클래스가 좁혀 쓴다 — EventSource만 `gitlab-todo` 로 자기 통로를 밝힌다.
   readonly id: string = 'gitlab'
-  protected client: GitLabClient
+  protected client: GitLabReader
   protected project: string
   protected perPage: number
 

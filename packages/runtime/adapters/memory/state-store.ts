@@ -57,6 +57,9 @@ export class MemoryStateStore implements StateStore {
     const id = keyOf(kind, entity)
     const existing = table.get(id)
     if (existing) return { ok: false, reason: 'ALREADY_EXISTS', current: clone(existing) }
+    // 회수된 것도 쓴 id 다. 다시 쓰면 그 기록 위에 다른 계약이 앉는다.
+    const archived = this.#archived.get(kind)?.get(id)
+    if (archived) return { ok: false, reason: 'ALREADY_EXISTS', current: clone(archived) as EntityMap[K] }
     table.set(id, clone(entity))
     return { ok: true, entity: clone(entity) }
   }

@@ -41,7 +41,7 @@ type JamIssue = {
   assignee?: string
   priority?: string
   description?: string
-  links?: { issue?: { key?: string } }[]
+  links?: { blocksThisIssue?: boolean; issue?: { key?: string } }[]
   parent?: { key?: string }
   subtasks?: { key?: string }[]
   comments?: { id: string; created: string; updated?: string; body: string; author?: string }[]
@@ -161,8 +161,16 @@ export class JamInventory extends JamBase implements InventoryPort {
 }
 
 export class JamResourceContext extends JamBase implements ResourceContextPort {
+  /**
+   * `jira_context` 가 아니라 `jira_full` 을 부른다.
+   *
+   * context 단계는 본문(description)을 싣지 않는다. 그런데 ResourceSnapshot 의 `body` 는
+   * 조사와 계약 초안이 완료 조건을 읽는 유일한 자리다 — 그것을 비운 채 넘기면 "작업 항목에
+   * 완료 조건이 없다"는 **거짓 사실**이 만들어지고, 없는 조건을 사람에게 되묻게 된다.
+   * provider 자신의 지침도 계약·합의 판정에는 full 을 쓰라고 말한다.
+   */
   async getResource(reference: string): Promise<ResourceSnapshot> {
-    const response = await this.client.callTool<JamPayload>('jira_context', { issueKeys: [reference] })
+    const response = await this.client.callTool<JamPayload>('jira_full', { issueKeys: [reference] })
     if (!response.ok) return missing(reference)
 
     const issue = response.value.issues?.[0]
@@ -170,10 +178,17 @@ export class JamResourceContext extends JamBase implements ResourceContextPort {
     // 우리도 합쳐진 사실 이상을 지어내지 않는다.
     if (!issue) return missing(reference)
 
+    // 막는 것을 먼저 싣는다. Core 는 이 배열의 **순서만** 알고 종류는 모른다 — 순서가
+    // 곧 "무엇부터 확인해야 하는가" 다. 상한에 걸려 잘릴 때 blocker 가 부모·하위 작업
+    // 뒤에 밀려 사라지는 것을 막는다.
+    const blocking = (issue.links ?? []).filter((link) => link.blocksThisIssue === true)
+    const otherLinks = (issue.links ?? []).filter((link) => link.blocksThisIssue !== true)
+    const blockedBy = blocking.flatMap((link) => (link.issue?.key ? [link.issue.key] : []))
     const related = [
+      ...blockedBy,
+      ...otherLinks.flatMap((link) => (link.issue?.key ? [link.issue.key] : [])),
       ...(issue.parent?.key ? [issue.parent.key] : []),
       ...(issue.subtasks ?? []).flatMap((sub) => (sub.key ? [sub.key] : [])),
-      ...(issue.links ?? []).flatMap((link) => (link.issue?.key ? [link.issue.key] : [])),
     ]
 
     return {
@@ -186,6 +201,7 @@ export class JamResourceContext extends JamBase implements ResourceContextPort {
       updatedAt: issue.updated,
       revisionMarker: issue.updated,
       ...(related.length > 0 ? { related } : {}),
+      ...(blockedBy.length > 0 ? { blockedBy } : {}),
     }
   }
 
@@ -230,3 +246,33 @@ const missing = (reference: string): ResourceSnapshot => ({
   revisionMarker: '',
   missing: true,
 })
+
+/**
+ * tracker 가 "끝났다"고 말하는가. **판정이 아니라 어휘 번역이다** — Core 는 Jira 상태
+ * 문자열을 알면 안 되고(C-09 §6.1), 그렇다고 상태 문자열을 아무도 안 읽으면 "진행 중인데
+ * 이미 병합됨"을 알아볼 수 없다. 그 번역을 adapter 자리에서 한 줄로 한다.
+ *
+ * 모르는 어휘는 undefined 로 남긴다 — 모르는 것을 "안 끝났다"로 읽으면 없는 stale 을 만든다.
+ *
+ * ponytail: 닫힘 상태 목록은 휴리스틱이다. JAM 이 statusCategory 를 실어 주면 그것으로 바꾼다.
+ */
+const DONE_STATUSES = new Set(['done', 'closed', 'resolved', 'complete', 'completed', '완료', '닫힘', '해결됨'])
+const OPEN_STATUSES = new Set([
+  'to do',
+  'todo',
+  'open',
+  'in progress',
+  'in review',
+  'backlog',
+  '해야 할 일',
+  '진행 중',
+  '검토 중',
+])
+
+export function statusIndicatesDone(status: string | undefined): boolean | undefined {
+  if (!status) return undefined
+  const normalized = status.trim().toLowerCase()
+  if (DONE_STATUSES.has(normalized)) return true
+  if (OPEN_STATUSES.has(normalized)) return false
+  return undefined
+}

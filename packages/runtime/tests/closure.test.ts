@@ -347,3 +347,48 @@ describe('B-20 Gate — 경계', () => {
     assert.deepEqual(lines, ['S-20260823-01: 마무리 미확인 — b'])
   })
 })
+
+describe('P1-I — 산출물이 있는 세션의 로컬 마무리는 외부 권한과 무관하다', () => {
+  it('파일을 바꾼 세션이 회수·확인까지 도는 동안 grant 는 한 번도 필요하지 않다', async () => {
+    const store = new MemoryStateStore()
+    const created = await store.create(
+      'session',
+      Session.parse({
+        id: 'S-20260828-09',
+        version: 0,
+        status: 'DONE',
+        role: 'implementer',
+        goal: '산출물이 있는 작업',
+        canonicalSources: [],
+        writeBoundary: ['fe/**'],
+        handoff: Handoff.parse({
+          done: ['회귀 테스트 작성'],
+          changed: ['fe/src/asset.test.ts'],
+          verified: 'self-check: 기존 스위트 통과',
+          next: '없음',
+          recordedAt: NOW,
+        }),
+      }),
+    )
+    assert.equal(created.ok, true)
+
+    const ledger = ledgerOn(store)
+    const outcome = await collectSessions(store, NOW, {
+      closureChecklist: CHECKLIST,
+      closureLedger: ledger,
+    })
+    assert.deepEqual(outcome.collected, ['S-20260828-09'])
+
+    const record = await ledger.get('S-20260828-09')
+    assert.ok(record, '산출물이 있는데 마무리 항목이 열리지 않았다')
+
+    for (const item of CHECKLIST) {
+      const confirmed = await ledger.confirm('S-20260828-09', [item])
+      assert.equal(confirmed.ok, true, JSON.stringify(confirmed))
+    }
+    assert.deepEqual(await ledger.pending(), [], '확인이 끝났는데 미확인으로 남아 있다')
+
+    // 외부 반영 권한(Grant)은 이 경로 어디에도 없다 — 로컬 마무리는 그것을 기다리지 않는다.
+    assert.deepEqual(await store.list('grant'), [])
+  })
+})

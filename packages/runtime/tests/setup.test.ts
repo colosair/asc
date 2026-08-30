@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 
-import { identitiesTemplate, overrideTemplate } from '../core/attach/init.ts'
+import { identitiesTemplate, overrideTemplate, withIdentity } from '../core/attach/init.ts'
 import { assessSetup, renderSetup, type SetupInput } from '../core/attach/setup.ts'
 import { loadIdentityMap } from '../cli/identity-config.ts'
 import { LocalIdentityBinding } from '../adapters/local/identity.ts'
@@ -171,5 +171,65 @@ describe('B-21 Gate — 되는 것은 되는 것으로', () => {
     const snapshot = JSON.stringify(input)
     assessSetup(input)
     assert.equal(JSON.stringify(input), snapshot)
+  })
+})
+
+describe('P1-F — 신원 등록은 두 파일을 한 번에 맞춘다', () => {
+  it('서식 그대로였던 파일이 승인자 하나를 갖고, 두 자리가 서로 어긋나지 않는다', async () => {
+    const dir = await tempDir()
+    await writeFile(join(dir, 'identities.json'), identitiesTemplate(), 'utf8')
+
+    const merged = withIdentity(JSON.parse(identitiesTemplate()), JSON.parse(overrideTemplate()), {
+      name: 'colosair',
+      actor: 'local:colosair',
+      controller: true,
+      monitor: true,
+    })
+
+    await writeFile(join(dir, 'identities.json'), JSON.stringify(merged.identities), 'utf8')
+    assert.deepEqual(await loadIdentityMap(dir), { colosair: ['local:colosair'] })
+
+    const controller = (merged.override.controller as { identities: Record<string, string[]> }).identities
+    assert.deepEqual(controller, { colosair: ['local:colosair'] })
+    assert.deepEqual(merged.override.monitorIdentities, ['colosair'])
+
+    // 세 게이트가 이 한 번으로 전부 열린다 — 한쪽만 채워 두는 상태를 만들지 않는다.
+    const opened = assessSetup({
+      attachment: 'READY',
+      hasApprovers: Object.keys(merged.identities).some((k) => !k.startsWith('$')),
+      hasControllerIdentities: Object.keys(controller).length > 0,
+      hasMonitorIdentities: (merged.override.monitorIdentities as string[]).length > 0,
+      hasScmToken: true,
+    })
+    assert.deepEqual(
+      opened.gates.filter((gate) => gate.state !== 'OPEN'),
+      [],
+    )
+  })
+
+  it('감시만 세우면 승인자는 건드리지 않는다 — 권한을 덤으로 주지 않는다', () => {
+    const merged = withIdentity({}, {}, {
+      name: 'colosair',
+      actor: 'local:colosair',
+      controller: false,
+      monitor: true,
+    })
+
+    assert.deepEqual(merged.identities, {})
+    assert.equal(merged.override.controller, undefined)
+    assert.deepEqual(merged.override.monitorIdentities, ['colosair'])
+  })
+
+  it('두 번 세워도 같은 값이 쌓이지 않는다', () => {
+    const once = withIdentity({}, {}, { name: 'a', actor: 'local:a', controller: true, monitor: true })
+    const twice = withIdentity(once.identities, once.override, {
+      name: 'a',
+      actor: 'local:a',
+      controller: true,
+      monitor: true,
+    })
+
+    assert.deepEqual(twice.override.monitorIdentities, ['a'])
+    assert.deepEqual(twice.identities, { a: ['local:a'] })
   })
 })

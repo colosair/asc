@@ -6,6 +6,9 @@
 //
 // **Core는 이 파일을 import하지 않는다.** 방향은 언제나 Composition → Core다.
 
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
 import type { Capability, BindingPlan, ResolvedBinding } from '../core/binding/types.ts'
 import { resolveCapability } from '../core/binding/types.ts'
 import type { ChangeContextPort } from '../ports/change-context.ts'
@@ -17,7 +20,13 @@ import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
 import { GitHubEventSource } from '../adapters/github/event-source.ts'
 import { GitHubScm } from '../adapters/github/scm.ts'
-import { GitLabClient, discoverToken as discoverGitLabToken } from '../adapters/gitlab/client.ts'
+import {
+  GitLabClient,
+  GlabApiClient,
+  discoverToken as discoverGitLabToken,
+  glabAvailable,
+  type ProcessRunner,
+} from '../adapters/gitlab/client.ts'
 import {
   GitLabChangeContext,
   GitLabEventSource,
@@ -73,7 +82,9 @@ const FACTORIES: Record<string, Factory> = {
   gitlab(binding, input, token) {
     // 자체 호스팅이 흔하다. 어디를 가리키는지는 발견 단계가 이미 알아냈으므로 같은 값을 쓴다.
     const baseUrl = input.endpointFor?.(binding)
-    const client = new GitLabClient({ token, ...(baseUrl ? { baseUrl } : {}) })
+    // 토큰이 빈 문자열이면 자격이 도구 안에 있다는 뜻이다 (P1-H). 값을 꺼내 오지 않고
+    // 그 도구에게 요청을 대신 보내 달라고 한다 — 읽기 전용이다.
+    const client = token === '' ? new GlabApiClient(defaultGlabRun) : new GitLabClient({ token, ...(baseUrl ? { baseUrl } : {}) })
     const project = binding.resource
     return {
       eventSource: new GitLabEventSource({ client, project, perPage: input.perPage ?? 30 }),
@@ -97,11 +108,13 @@ const FACTORIES: Record<string, Factory> = {
   jam(binding, input) {
     // JAM은 토큰을 받지 않는다 — 자격은 도구가 자기 안에서 관리하고 ASC는 상태만 읽는다.
     if (!input.jam) return {}
-    const client = new JamMcpClient({
+    const client = registerToolClient(
+      new JamMcpClient({
       command: input.jam.command,
       ...(input.jam.args ? { args: input.jam.args } : {}),
-      ...(input.jam.cwd ? { cwd: input.jam.cwd } : {}),
-    })
+        ...(input.jam.cwd ? { cwd: input.jam.cwd } : {}),
+      }),
+    )
     const projectKey = binding.resource
     const timezone = input.jam.timezone
     const inventory = new JamInventory({ client, projectKey, ...(timezone ? { timezone } : {}) })
@@ -118,8 +131,45 @@ const FACTORIES: Record<string, Factory> = {
   },
 }
 
+const execFileAsync = promisify(execFile)
+
+/** glab 실행 통로. 실패는 예외로 올라가고, 호출측이 "없다"로 접는다. */
+const defaultGlabRun: ProcessRunner = async (command, args) => {
+  const { stdout } = await execFileAsync(command, [...args])
+  return stdout
+}
+
+/**
+ * gitlab 자격 찾기. env 토큰이 먼저고, 없으면 로그인된 `glab` 을 통로로 인정해 빈 문자열을
+ * 돌려준다 — **값이 아니라 "통로가 있다"는 사실이다.** 둘 다 없으면 null 이고, 그때만
+ * 조립하지 않는다.
+ */
+const discoverGitLabAccess = async (): Promise<string | null> => {
+  const token = discoverGitLabToken()
+  if (token) return token
+  return (await glabAvailable(defaultGlabRun)) ? '' : null
+}
+
 /** 이 adapter는 토큰 없이 조립된다. 자격은 도구가 자기 안에서 진다. */
 const TOKENLESS = new Set(['jam'])
+
+/**
+ * 자식 프로세스를 띄우는 도구 클라이언트들. 명령이 끝나면 닫아야 한다 — 안 닫으면
+ * CLI 가 할 일을 다 하고도 종료하지 못하고 서버 프로세스가 남는다(실제로 그렇게 됐다).
+ */
+const toolClients = new Set<{ stop(): Promise<void> }>()
+
+function registerToolClient<T extends { stop(): Promise<void> }>(client: T): T {
+  toolClients.add(client)
+  return client
+}
+
+/** 이 프로세스가 띄운 도구 자식들을 정리한다. 여러 번 불러도 안전하다. */
+export async function closeToolClients(): Promise<void> {
+  const clients = [...toolClients]
+  toolClients.clear()
+  await Promise.all(clients.map((client) => client.stop().catch(() => undefined)))
+}
 
 /**
  * capability와 Port의 대응. **이 표가 없으면 조립이 덮어쓰기가 된다** —
@@ -172,7 +222,7 @@ export async function buildRuntimePorts(input: BuildInput): Promise<RuntimePorts
   const findToken =
     input.findToken ??
     (async (adapterId: string) =>
-      adapterId === 'gitlab' ? discoverGitLabToken() : await discoverToken())
+      adapterId === 'gitlab' ? await discoverGitLabAccess() : await discoverToken())
 
   // capability마다 따로 푼다. 한 binding이 여럿을 제공해도, 서로 다른 binding이 나눠
   // 맡아도 같은 경로로 조립된다 — 어느 갈래가 어디서 왔는지가 Port마다 정확해야 한다.

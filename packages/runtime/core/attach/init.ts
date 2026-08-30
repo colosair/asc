@@ -111,3 +111,39 @@ export async function writeIfAbsent(path: string, content: string): Promise<bool
     throw error
   }
 }
+
+/**
+ * 지금 이 사람을 승인 권한자·감시 대상으로 세운 두 파일의 내용 (P1-F).
+ *
+ * 순수 함수인 이유: 이 결정은 두 파일에 서로 다른 형식으로 적히고, 한쪽만 채워 두면
+ * 게이트가 왜 안 열리는지 알 수 없는 상태가 된다. 그 짝을 코드 한 곳에서 만든다.
+ *
+ * **비밀은 다루지 않는다** — 이름과 채널만 적힌다.
+ */
+export function withIdentity(
+  identities: Record<string, unknown>,
+  override: Record<string, unknown>,
+  input: { name: string; actor: string; controller: boolean; monitor: boolean },
+): { identities: Record<string, unknown>; override: Record<string, unknown> } {
+  const nextIdentities = { ...identities }
+  const nextOverride = { ...override }
+
+  if (input.controller) {
+    nextIdentities[input.name] = [input.actor]
+    const controller = { ...((nextOverride.controller as Record<string, unknown> | undefined) ?? {}) }
+    controller.identities = {
+      ...((controller.identities as Record<string, unknown> | undefined) ?? {}),
+      [input.name]: [input.actor],
+    }
+    nextOverride.controller = controller
+  }
+
+  if (input.monitor) {
+    const existing = Array.isArray(nextOverride.monitorIdentities)
+      ? (nextOverride.monitorIdentities as unknown[]).filter((v): v is string => typeof v === 'string')
+      : []
+    nextOverride.monitorIdentities = [...new Set([...existing, input.name])]
+  }
+
+  return { identities: nextIdentities, override: nextOverride }
+}

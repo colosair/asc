@@ -29,12 +29,32 @@ export const STEPS = [
 ] as const
 export type StepId = (typeof STEPS)[number]
 
+/**
+ * 확인하지 못한 이유. "안 봤다"와 "볼 수 없다"가 같은 결과로 뭉개지면, 조사 누락이
+ * 접근 불가처럼 보이고 그 상태로 추천이 나간다.
+ *
+ * - `MISSING`        — 통로 자체가 없어 **보지 않았다** (Port 미배선)
+ * - `UNAVAILABLE`    — 보려 했으나 실패했다 (조회 오류·접근 거부·사라짐)
+ * - `NOT_APPLICABLE` — 이 사건에 해당하지 않는다
+ *
+ * 이전 판의 결과가 `done` 으로 되돌아오면 이 필드가 없다. 그때는 MISSING 으로 읽는다 —
+ * 모르는 쪽을 "확인했다"로 읽는 것보다 "안 봤다"로 읽는 편이 안전하다.
+ */
+export type StepReason = 'MISSING' | 'UNAVAILABLE' | 'NOT_APPLICABLE'
+
 export type StepResult =
   | { id: StepId; kind: 'DONE'; findings: string[] }
   /** 필요한 Port가 없거나 조회가 실패했다. **통과가 아니다.** */
-  | { id: StepId; kind: 'UNDECIDABLE'; detail: string }
+  | { id: StepId; kind: 'UNDECIDABLE'; detail: string; reason?: Extract<StepReason, 'MISSING' | 'UNAVAILABLE'> }
   /** 이 사건에는 해당하지 않는다 (변경이 없는 사건의 change 단계 등). */
-  | { id: StepId; kind: 'SKIPPED'; detail: string }
+  | { id: StepId; kind: 'SKIPPED'; detail: string; reason?: Extract<StepReason, 'NOT_APPLICABLE'> }
+
+/** 단계 결과를 세 상태로 읽는다. reason 이 없는 옛 결과는 보수적으로 읽는다. */
+export function stepReason(step: StepResult): 'DONE' | StepReason {
+  if (step.kind === 'DONE') return 'DONE'
+  if (step.kind === 'SKIPPED') return step.reason ?? 'NOT_APPLICABLE'
+  return step.reason ?? 'MISSING'
+}
 
 export type Investigation = {
   steps: StepResult[]
@@ -90,6 +110,7 @@ const missingPort = (id: StepId, what: string): StepResult => ({
   id,
   kind: 'UNDECIDABLE',
   detail: `${what} 를 제공하는 binding이 없다 — 이 단계는 확인하지 못했다`,
+  reason: 'MISSING',
 })
 
 /**
@@ -114,7 +135,7 @@ export async function investigate(
   const resource = ports.resource ? await ports.resource.getResource(input.reference).catch(() => null) : null
   if (!ports.resource) put(missingPort('resource', '리소스 조회'))
   else if (!resource || resource.missing) {
-    put({ id: 'resource', kind: 'UNDECIDABLE', detail: '리소스를 읽지 못했다 (사라졌거나 접근 불가)' })
+    put({ id: 'resource', kind: 'UNDECIDABLE', detail: '리소스를 읽지 못했다 (사라졌거나 접근 불가)', reason: 'UNAVAILABLE' })
   } else {
     put({
       id: 'resource',
@@ -129,7 +150,7 @@ export async function investigate(
 
   // ② Delta — 현재 모습만 보면 무엇이 새로운지 알 수 없다.
   if (!input.previous) {
-    put({ id: 'delta', kind: 'SKIPPED', detail: '지난 관측이 없다 — 처음 보는 사건이다' })
+    put({ id: 'delta', kind: 'SKIPPED', detail: '지난 관측이 없다 — 처음 보는 사건이다', reason: 'NOT_APPLICABLE' })
   } else if (!resource) {
     put(missingPort('delta', '리소스 조회'))
   } else {
@@ -157,14 +178,14 @@ export async function investigate(
   put(
     responsibility.length > 0
       ? { id: 'responsibility', kind: 'DONE', findings: responsibility }
-      : { id: 'responsibility', kind: 'SKIPPED', detail: 'owner·결정 영역이 선언되지 않았다' },
+      : { id: 'responsibility', kind: 'SKIPPED', detail: 'owner·결정 영역이 선언되지 않았다', reason: 'NOT_APPLICABLE' },
   )
 
   // ④ 지금 돌고 있는 것과의 관계.
   put(
     input.activeSessions?.length
       ? { id: 'work', kind: 'DONE', findings: [`활성 세션: ${input.activeSessions.join(', ')}`] }
-      : { id: 'work', kind: 'SKIPPED', detail: '지금 돌고 있는 세션이 없다' },
+      : { id: 'work', kind: 'SKIPPED', detail: '지금 돌고 있는 세션이 없다', reason: 'NOT_APPLICABLE' },
   )
 
   // ⑤ Thread — 전부 읽지 않는다. 판단에 필요한 만큼만 (C-05 §3).
@@ -175,7 +196,7 @@ export async function investigate(
       .catch(() => null)
     put(
       comments === null
-        ? { id: 'thread', kind: 'UNDECIDABLE', detail: '논의를 읽지 못했다' }
+        ? { id: 'thread', kind: 'UNDECIDABLE', detail: '논의를 읽지 못했다', reason: 'UNAVAILABLE' }
         : {
             id: 'thread',
             kind: 'DONE',
@@ -203,13 +224,13 @@ export async function investigate(
 
   // ⑦ Work Context — 작업 항목의 상태·연결. 코드 쪽과 다른 Binding일 수 있다.
   if (!input.workReference) {
-    put({ id: 'work-context', kind: 'SKIPPED', detail: '연결된 작업 항목이 선언되지 않았다' })
+    put({ id: 'work-context', kind: 'SKIPPED', detail: '연결된 작업 항목이 선언되지 않았다', reason: 'NOT_APPLICABLE' })
   } else if (!ports.work) {
     put(missingPort('work-context', '작업 항목 조회'))
   } else {
     const item = await ports.work.getResource(input.workReference).catch(() => null)
     if (!item || item.missing) {
-      put({ id: 'work-context', kind: 'UNDECIDABLE', detail: '작업 항목을 읽지 못했다' })
+      put({ id: 'work-context', kind: 'UNDECIDABLE', detail: '작업 항목을 읽지 못했다', reason: 'UNAVAILABLE' })
     } else {
       // 경위는 있으면 더한다. 없다고 이 단계 전체가 무너지지는 않는다 —
       // 이력을 모르는 도구가 흔하고, 그것과 "못 읽었다"는 다르다.
@@ -234,7 +255,7 @@ export async function investigate(
   if (!ports.baselines) put(missingPort('canonical', '정본 조회'))
   else {
     const snapshots = await ports.baselines().catch(() => null)
-    if (!snapshots) put({ id: 'canonical', kind: 'UNDECIDABLE', detail: '정본을 읽지 못했다' })
+    if (!snapshots) put({ id: 'canonical', kind: 'UNDECIDABLE', detail: '정본을 읽지 못했다', reason: 'UNAVAILABLE' })
     else {
       const touched = (change?.changedPaths ?? []).filter(
         (path) => input.canonicalPaths?.length && isWithinScopes(path, input.canonicalPaths),
@@ -259,7 +280,7 @@ export async function investigate(
           kind: 'DONE',
           findings: input.relevance.evidence.map((e) => `${e.supports ? '+' : '-'} ${e.detail}`),
         }
-      : { id: 'relevance', kind: 'SKIPPED', detail: '관련성 판정을 받지 못했다' },
+      : { id: 'relevance', kind: 'SKIPPED', detail: '관련성 판정을 받지 못했다', reason: 'NOT_APPLICABLE' },
   )
 
   const undecidable = steps
