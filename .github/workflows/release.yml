@@ -1,0 +1,95 @@
+# The release path. A `v*` tag on a main commit is the trigger; everything after
+# that — gate, publish, registry check, GitHub Release — happens here, with npm
+# Trusted Publishing (OIDC) instead of a local login. Local `npm publish` is an
+# emergency fallback only (docs/release/).
+#
+# Requirements this workflow encodes (npm trusted-publishers contract, 2026):
+#   - GitHub-hosted runner, npm CLI >= 11.5.1, Node >= 22.14
+#   - `permissions.id-token: write` — no long-lived npm token anywhere
+#   - each package is connected to this repo + this filename on npmjs.com
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # GitHub Release
+  id-token: write # npm Trusted Publishing
+
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  NO_COLOR: '1'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # The runner's bundled npm can trail the trusted-publishing floor.
+      - run: npm install -g npm@^11.5.1 && npm --version
+
+      - name: tag ↔ manifest ↔ main consistency
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          for p in runtime bootstrap; do
+            V=$(node -p "require('./packages/$p/package.json').version")
+            [ "$V" = "$TAG" ] || { echo "::error::packages/$p is $V, tag says $TAG"; exit 1; }
+          done
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::tag commit is not on main"; exit 1; }
+
+      - run: npm ci
+
+      # The full CI gate, re-run on the exact commit being released.
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm run release:check
+      - run: npm run pack:all
+      - run: npm run smoke
+
+      # Order matters: bootstrap pins runtime exactly, so runtime must exist
+      # on the registry before anyone can install bootstrap.
+      - name: publish (runtime → bootstrap)
+        run: |
+          (cd packages/runtime && npm publish)
+          (cd packages/bootstrap && npm publish)
+
+      - name: registry verification
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          for p in runtime bootstrap; do
+            ok=""
+            for i in $(seq 1 30); do
+              [ "$(npm view "@asc-agent/$p@$TAG" version 2>/dev/null)" = "$TAG" ] && { ok=1; break; }
+              sleep 10
+            done
+            [ -n "$ok" ] || { echo "::error::@asc-agent/$p@$TAG never appeared on the registry"; exit 1; }
+          done
+
+      - name: published smoke
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PREFIX=$(mktemp -d)
+          npm install -g --prefix "$PREFIX" "@asc-agent/runtime@$TAG"
+          "$PREFIX/bin/asc" 2>&1 | grep -q "Agent Session Control"
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "ASC $GITHUB_REF_NAME" \
+            --generate-notes
