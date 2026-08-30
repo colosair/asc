@@ -1,7 +1,7 @@
 {
   "name": "@asc-agent/bootstrap",
-  "version": "0.2.1",
-  "description": "Zero-install entry point for ASC (Agent Session Control) — first run for humans and coding agents",
+  "version": "0.3.0",
+  "description": "Zero-install entry point for ASC (Agent Session Control) \u2014 first run for humans and coding agents",
   "keywords": [
     "agent",
     "control-plane",
@@ -36,7 +36,7 @@
     "prepack": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@asc-agent/runtime": "0.2.1"
+    "@asc-agent/runtime": "0.3.0"
   },
   "license": "ISC",
   "publishConfig": {
