@@ -1,0 +1,17 @@
+{
+  "$comment": "Expected GitHub repository presentation. Checked by `npm run presentation:check` (read-only, maintenance-time). Deliberately NOT part of the release gate: a registry release must never fail on GitHub API weather.",
+  "description": "Local-first control plane for coding agents — session contracts, real boundaries, human-in-the-loop execution, and an audit trail.",
+  "homepage": "https://github.com/colosair/asc#readme",
+  "topics": [
+    "ai-agents",
+    "agent-orchestration",
+    "claude-code",
+    "control-plane",
+    "human-in-the-loop",
+    "local-first",
+    "typescript"
+  ],
+  "license": "ISC",
+  "securityPolicy": "SECURITY.md",
+  "privateVulnerabilityReporting": true
+}
