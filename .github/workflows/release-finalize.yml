@@ -52,18 +52,24 @@ jobs:
       - name: registry already serves this version
         run: |
           V="${{ inputs.version }}"
+          SOFT=""
+          if ${{ inputs.dry_run }}; then SOFT=1; fi
           for p in runtime bootstrap; do
             curl -fs -m 20 -H 'Cache-Control: no-cache' -o /dev/null \
               "https://registry.npmjs.org/@asc-agent%2f$p/$V" \
-              || { echo "::error::@asc-agent/$p@$V is not on the registry — run release.yml first"; exit 1; }
+              || { if [ -n "$SOFT" ]; then echo "dry run: @asc-agent/$p@$V is not on the registry (a real finalize would stop here)"; else echo "::error::@asc-agent/$p@$V is not on the registry — run release.yml first"; exit 1; fi; }
           done
 
       - name: tag does not exist yet
         run: |
           V="${{ inputs.version }}"
           if git ls-remote --tags origin "refs/tags/v$V" | grep -q .; then
-            echo "::error::v$V already exists — finalize ran already, or the tag was made by hand"
-            exit 1
+            if ${{ inputs.dry_run }}; then
+              echo "dry run: v$V already exists (a real finalize would stop here)"
+            else
+              echo "::error::v$V already exists — finalize ran already, or the tag was made by hand"
+              exit 1
+            fi
           fi
 
       - name: release note exists and is structured
