@@ -120,7 +120,9 @@ export class ProgressService {
       return {
         ok: false,
         reason: 'NOT_OWNER',
-        detail: `${logicalSessionId} 에 Runtime이 붙어 있지 않다 — 먼저 소유권을 주장하라`,
+        // "주장하라"만으로는 다음 명령을 모른다 — 복구 명령까지가 오류 메시지다 (실측 ASC-4).
+        // Core는 host 이름을 모른다(B-17) — 자리만 비워 두면 Surface가 채운다.
+        detail: `${logicalSessionId} 에 Runtime이 붙어 있지 않다 — 먼저 소유권을 주장하라: asc host <host> bind ${logicalSessionId} --physical <id>`,
       }
     }
     if (binding.physicalSessionId !== physicalSessionId) {

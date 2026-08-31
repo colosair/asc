@@ -186,3 +186,20 @@ describe('Derived View', () => {
     assert.match(await readFile(viewFile, 'utf8'), /REQ-0042/)
   })
 })
+
+describe('ASC-8 — capability evidence는 한글 그대로 왕복한다 (UTF-8)', () => {
+  it('scoped set/get과 파일 바이트 모두 유효한 UTF-8이다', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'asc-utf8-'))
+    const store = new MarkdownStateStore(root)
+    const detail = 'claude CLI가 없으면 guard 등록을 확인할 수 없다'
+    await store.scope('claude-code').set('capabilities', JSON.stringify({ detail }))
+
+    const path = join(root, 'adapters', 'claude-code', 'capabilities.json')
+    const bytes = await readFile(path)
+    // 유효하지 않은 UTF-8이 섞이면 replacement character로 드러난다.
+    assert.equal(bytes.toString('utf8').includes('�'), false)
+    const stored = JSON.parse(bytes.toString('utf8')) as { value: string }
+    assert.equal((JSON.parse(stored.value) as { detail: string }).detail, detail)
+    await rm(root, { recursive: true, force: true })
+  })
+})

@@ -113,7 +113,7 @@ import {
   executionLines,
   reclaimLine,
   validationLines,
-  type DecisionClass,
+  DecisionClass,
 } from '../core/runtime/audit.ts'
 import { ClosureLedger } from '../core/runtime/closure.ts'
 import { Orchestrator, renderTick } from '../core/runtime/orchestrator.ts'
@@ -213,7 +213,7 @@ const USAGE = `asc — Agent Session Control
   asc session pause  <ID> --position <text> --next <text> [--done <task>...]
   asc session resume <ID>
   asc session done   <ID> --verified <text> --next <text> [--done <task>...]
-                        [--changed <path>...] [--unresolved <text>...]
+                        [--changed <path>...] [--unresolved <text>...] [--physical <id>]
   asc session list
 
   asc controller collect
@@ -488,10 +488,33 @@ function reportNodeRuntime(check: Extract<NodeRuntimeCheck, { ok: false }>, asJs
 }
 
 export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime'): Promise<number> {
-  const { values, positionals } = parseArgs({
+  let parsed: ReturnType<typeof parseArgsOrThrow>
+  try {
+    parsed = parseArgsOrThrow(argv)
+  } catch (error) {
+    // 모르는 옵션은 사용자 입력 오류다 — Node 스택을 던지면 그때부터 도구를 의심하게 된다.
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`Could not read the arguments: ${message.split('\n')[0]}`)
+    console.error('Run `asc --help` for the commands and flags this build understands.')
+    return 2
+  }
+  const { values, positionals } = parsed
+
+  // 실행 중인 버전을 묻는 유일한 공식 통로. 설치 안내가 버전을 핀으로 고정하는데
+  // 정작 지금 도는 것이 무엇인지 물을 방법이 없었다 (SSAFESTA Windows 실측 ASC-1).
+  if (values.version || positionals[0] === 'version') {
+    console.log(RELEASE_VERSION)
+    return 0
+  }
+  return runParsedCommand(values, positionals, entry, argv)
+}
+
+function parseArgsOrThrow(argv: string[]) {
+  return parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
+      version: { type: 'boolean', default: false },
       root: { type: 'string' },
   parent: { type: 'string' },
   'issued-by': { type: 'string' },
@@ -591,7 +614,14 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
       help: { type: 'boolean', short: 'h', default: false },
     },
   })
+}
 
+async function runParsedCommand(
+  values: Record<string, unknown>,
+  positionals: string[],
+  entry: AscEntry,
+  argv: string[],
+): Promise<number> {
   const [group, command, target, extra] = positionals
   if (values.help || group === undefined) {
     console.log(USAGE)
@@ -691,7 +721,7 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
 
   switch (command) {
     case 'list': {
-      const items = await operator.list({ all: values.all, ...(priority ? { priority } : {}) })
+      const items = await operator.list({ all: Boolean(values.all), ...(priority ? { priority } : {}) })
       console.log(values.json ? JSON.stringify(items, null, 2) : renderer.renderList(items).text)
       return 0
     }
@@ -803,9 +833,9 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
         requestId: target,
         expectedVersion,
         kind: kind.data,
-        actor: values.as,
+        actor: values.as as string,
         channel: 'local',
-        ...(values.revision !== undefined ? { revision: values.revision } : {}),
+        ...(values.revision !== undefined ? { revision: values.revision as string } : {}),
         decidedAt: new Date().toISOString(),
       })
 
@@ -1302,6 +1332,9 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
   const { root: projectRoot, git } = await discoverProjectRoot(process.cwd())
   const resolution = await resolveRoot(process.cwd(), values.root as string | undefined)
   const ascRoot = resolution.kind === 'UNRESOLVED' ? undefined : resolution.root
+  // 디렉터리가 있다고 붙은 것이 아니다 — profile.lock까지 서야 붙은 것이다. 빈 skeleton을
+  // "붙어 있음"으로 넘기면 plan이 applied를 답하며 실패할 proceed를 준다 (실측 ASC-2).
+  const attachmentBroken = ascRoot ? (await inspectSetup(ascRoot)).attachment === 'BROKEN' : false
   const scope = values.scope === 'project' ? 'project' : 'local'
   const hostReport = await verifyInstall(defaultPaths())
   return {
@@ -1309,6 +1342,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     projectRoot,
     git,
     ...(ascRoot ? { ascRoot } : {}),
+    ...(attachmentBroken ? { attachmentBroken } : {}),
     ...(values.profile ? { requestedProfile: values.profile as string } : {}),
     profileCandidates: await availableProfiles(installRoot(), externalProfileRoot()),
     scope,
@@ -2587,9 +2621,16 @@ async function runSession(
 
   switch (command) {
     case 'issue': {
+      // 누락과 오값은 다른 실수다 — "필수"라고 답하면 이미 준 사람은 자기가 무엇을
+      // 틀렸는지 모른다 (SSAFESTA Windows 실측 ASC-3).
+      const roleChoices = SessionRole.options.join('|')
+      if (values.role === undefined || !values.goal) {
+        console.error(`--role and --goal are required (role: ${roleChoices})`)
+        return 2
+      }
       const role = SessionRole.safeParse(values.role)
-      if (!role.success || !values.goal) {
-        console.error('--role and --goal are required (role: planner|researcher|implementer|verifier)')
+      if (!role.success) {
+        console.error(`'${String(values.role)}' is not a role this build knows — choose one of: ${roleChoices}`)
         return 2
       }
       const authority = parseAuthority(values.authority as string[] | undefined)
@@ -2650,12 +2691,21 @@ async function runSession(
         console.error('At least one --evidence and one --why are required (C-13 §4).')
         return 2
       }
+      // 오값을 Core까지 흘리면 ZodError 원문이 사람에게 떨어진다 (실측 ASC-5).
+      // 사용자 입력 검증은 Surface의 몫이다 — 여기서 고를 수 있는 값을 그대로 준다.
+      const parsedClass = DecisionClass.safeParse(decisionClass)
+      if (!parsedClass.success) {
+        console.error(
+          `'${decisionClass}' is not a decision class — choose one of: ${DecisionClass.options.join(', ')}`,
+        )
+        return 2
+      }
       const audit = auditLedger(store)
       const recorded = await audit.decide({
         sessionId: target,
         actor: (values.as as string) ?? (values.principal as string) ?? '(미상)',
         ownership: (values.ownership as string[]) ?? [],
-        class: decisionClass as DecisionClass,
+        class: parsedClass.data,
         evidenceRefs: [evidence[0]!, ...evidence.slice(1)],
         selectedOption: selected,
         alternatives: (values.alternative as string[]) ?? [],

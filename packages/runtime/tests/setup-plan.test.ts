@@ -223,3 +223,33 @@ describe('B-69 Gate — agent 표면 (C-14 §7, 불변식 ⑫)', () => {
     }
   })
 })
+
+describe('ASC-2 — 붙이다 만 상태는 붙일 것이 남은 상태다 (SSAFESTA Windows 실측)', () => {
+  it('BROKEN attachment는 repair(attach-workspace)를 계획에 싣는다', () => {
+    const plan = computeSetupPlan(
+      state({ ascRoot: '/w', attachmentBroken: true, requestedProfile: 'pilot-local' }),
+    )
+    assert.equal(plan.status, 'ready_to_apply')
+    assert.deepEqual(
+      plan.changes.filter((c) => c.target === 'attach-workspace'),
+      [{ target: 'attach-workspace', scope: 'local', profile: 'pilot-local' }],
+    )
+    assert.match(plan.evidence.join(' '), /BROKEN/)
+  })
+
+  it('BROKEN인데 고를 profile이 없으면 applied가 아니라 선택 요구로 멈춘다', () => {
+    const plan = computeSetupPlan(
+      state({ ascRoot: '/w', attachmentBroken: true, profileCandidates: [] }),
+    )
+    assert.equal(plan.code, 'ASC_PROFILE_SELECTION_REQUIRED')
+    assert.equal(plan.requiresUserAction, true)
+    // 실패할 proceed를 다음 행동으로 주지 않는다 — 그것이 ASC-2의 사고 형태였다.
+    assert.equal(plan.actions.some((a) => a.type === 'proceed'), false)
+  })
+
+  it('BROKEN + 단일 후보면 그 후보로 다시 붙인다', () => {
+    const plan = computeSetupPlan(state({ ascRoot: '/w', attachmentBroken: true }))
+    assert.equal(plan.status, 'ready_to_apply')
+    assert.equal(plan.changes.find((c) => c.target === 'attach-workspace')?.profile, 'pilot-local')
+  })
+})

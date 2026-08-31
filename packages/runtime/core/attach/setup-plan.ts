@@ -25,6 +25,14 @@ export type SetupState = {
   git: boolean
   /** 이미 붙어 있으면 그 runtime 뿌리. 없으면 안 붙은 것이다. */
   ascRoot?: string
+  /**
+   * runtime 디렉터리는 있는데 profile.lock을 읽지 못하는 상태 — 붙이다 만 것이다.
+   *
+   * 이것을 "붙어 있음"으로 읽으면 plan은 `applied`를 답하면서 실패할 `asc proceed`를
+   * 다음 행동으로 준다 (SSAFESTA Windows 실측 ASC-2: 파일 잠금이 빈 skeleton만 남긴
+   * 경우). 붙이다 만 상태는 붙일 것이 남은 상태다 — repair가 plan에 드러나야 한다.
+   */
+  attachmentBroken?: boolean
   /** 붙어 있다면 무엇으로 붙었는가. */
   attachedProfile?: string
   /** 사람이 `--profile` 로 지정한 것. */
@@ -110,7 +118,9 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
   const evidence: string[] = [
     `project=${state.projectRoot}`,
     state.git ? 'git=yes' : 'git=no',
-    state.ascRoot ? `attached=${state.ascRoot}` : 'attached=no',
+    state.ascRoot
+      ? `attached=${state.ascRoot}${state.attachmentBroken ? ' (BROKEN — profile.lock unreadable)' : ''}`
+      : 'attached=no',
     `scope=${state.scope}`,
   ]
 
@@ -175,7 +185,7 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
     }
   }
 
-  if (state.ascRoot) {
+  if (state.ascRoot && !state.attachmentBroken) {
     // 붙어 있어도 **무엇을 고를 수 있었는지**는 사실이다. 사용자 소유 Profile을 새로 놓고
     // 계획을 물었을 때 그것이 어디에도 안 보이면, 놓은 사람은 경로를 의심하게 된다.
     if (state.profileCandidates.length > 0) {
@@ -184,7 +194,8 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
     return finish(changes, evidence, state, mode, command)
   }
 
-  // 아직 안 붙었다. 무엇으로 붙을지는 사람이 정한다.
+  // 아직 안 붙었거나, 붙이다 말았다(BROKEN). 무엇으로 붙을지는 사람이 정한다 —
+  // BROKEN이면 같은 선택으로 다시 붙이는 것이 repair다.
   const profile = state.requestedProfile ?? soleCandidate(state.profileCandidates)
   if (!profile) {
     evidence.push(`profile candidates=${state.profileCandidates.join(', ') || '(none)'}`)
