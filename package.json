@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "pack:all": "node scripts/pack-all.mjs",
     "smoke": "node scripts/tarball-smoke.mjs",
-    "release:check": "node scripts/release-check.mjs"
+    "release:check": "node scripts/release-check.mjs",
+    "presentation:check": "node scripts/presentation-check.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

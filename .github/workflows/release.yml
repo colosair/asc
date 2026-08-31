@@ -146,6 +146,13 @@ jobs:
           "$PREFIX/bin/asc" --version > version.out 2>&1
           grep -qx "$V" version.out
 
+      - name: record the release-candidate identity
+        run: |
+          echo "### Release candidate" >> "$GITHUB_STEP_SUMMARY"
+          echo "- version: ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "The durable record is npm provenance; finalize resolves the commit from the registry, not from this run."
+
       - name: what happens next
         run: |
           if ${{ inputs.dry_run }}; then

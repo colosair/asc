@@ -9,13 +9,14 @@ Reports are welcome, including ones that turn out to be nothing.
 
 ## Supported versions
 
-| Version | Supported |
+| Line | Supported |
 |---|---|
-| 0.1.x | Yes — the current line |
-| < 0.1 | No — nothing was released before this |
+| The latest published release | Yes |
+| Older releases | No — not maintained unless a security advisory says otherwise |
 
-ASC is pre-1.0. Fixes land on the current minor line; there is no long-term support
-branch yet.
+ASC is pre-1.0 and the packages ship in lockstep. Fixes land as the next release on
+the current line; there is no long-term support branch. Check what is latest with
+`npm view @asc-agent/runtime version`, and what you are running with `asc --version`.
 
 ## Reporting a vulnerability
 
@@ -42,7 +43,7 @@ to reproduce it without one.
 
 ### Please do include
 
-- ASC version (`asc --help` prints the CLI; the package version is in `package.json`)
+- ASC version (`asc --version`)
 - Operating system and Node version (`node --version`)
 - Which package: `@asc-agent/runtime` or `@asc-agent/bootstrap`
 - Reproduction steps with sanitised data — a fake token like `ghp_EXAMPLE` is fine

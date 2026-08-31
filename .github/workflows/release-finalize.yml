@@ -60,6 +60,27 @@ jobs:
               || { if [ -n "$SOFT" ]; then echo "dry run: @asc-agent/$p@$V is not on the registry (a real finalize would stop here)"; else echo "::error::@asc-agent/$p@$V is not on the registry — run release.yml first"; exit 1; fi; }
           done
 
+      # The tag must point at the commit the registry actually published, not
+      # at whatever main is when finalize runs — main is allowed to move between
+      # the stages. npm's signed provenance (Trusted Publishing) is the durable
+      # record of that commit; resolve it, and verify it is a real commit whose
+      # manifests carry this version. This gate is never softened: even a dry
+      # run resolves the real identity.
+      - name: resolve the published commit (npm provenance)
+        id: published
+        run: |
+          V="${{ inputs.version }}"
+          SHA=$(node scripts/resolve-published-commit.mjs "$V")
+          echo "published commit: $SHA"
+          git cat-file -e "$SHA^{commit}" || { echo "::error::$SHA is not a commit in this repository"; exit 1; }
+          for p in runtime bootstrap; do
+            M=$(git show "$SHA:packages/$p/package.json" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+            [ "$M" = "$V" ] || { echo "::error::packages/$p at $SHA is $M, expected $V — that commit did not publish this version"; exit 1; }
+          done
+          git show "$SHA:docs/releases/v$V.md" > /dev/null 2>&1             || { echo "::error::docs/releases/v$V.md does not exist at the published commit $SHA"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "current HEAD: $(git rev-parse HEAD) — a real finalize tags $SHA regardless"
+
       - name: tag does not exist yet
         run: |
           V="${{ inputs.version }}"
@@ -75,8 +96,10 @@ jobs:
       - name: release note exists and is structured
         run: |
           V="${{ inputs.version }}"
-          NOTE="docs/releases/v$V.md"
-          [ -f "$NOTE" ] || { echo "::error::$NOTE is missing — the Release body is authored, not generated"; exit 1; }
+          # The body that ships is the note AT the published commit — validate
+          # that one, not whatever the current checkout holds.
+          NOTE=/tmp/note-gate.md
+          git show "${{ steps.published.outputs.sha }}:docs/releases/v$V.md" > "$NOTE"             || { echo "::error::docs/releases/v$V.md is missing at the published commit"; exit 1; }
           for section in "## What changed" "## Install / Upgrade" "## Agent setup" "## Compatibility" "## Verified" "## Known limitations"; do
             grep -qF "$section" "$NOTE" || { echo "::error::$NOTE lacks required section: $section"; exit 1; }
           done
@@ -88,9 +111,12 @@ jobs:
           V="${{ inputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # First line is the title; the body is the note's lead paragraph.
-          LEAD=$(awk '/^[^#[]/{print; exit}' "docs/releases/v$V.md")
-          git tag -a "v$V" -m "ASC v$V" -m "$LEAD"
+          SHA="${{ steps.published.outputs.sha }}"
+          # First line is the title; the body is the lead paragraph of the note
+          # AS PUBLISHED — read at the published commit, not at current HEAD.
+          git show "$SHA:docs/releases/v$V.md" > /tmp/note.md
+          LEAD=$(awk '/^[^#[]/{print; exit}' /tmp/note.md)
+          git tag -a "v$V" -m "ASC v$V" -m "$LEAD" "$SHA"
           git push origin "v$V"
 
       - name: GitHub Release
@@ -107,6 +133,7 @@ jobs:
         run: |
           if ${{ inputs.dry_run }}; then
             echo "Dry run complete. All finalize gates hold; no tag, no Release."
+            echo "A real finalize would tag ${{ steps.published.outputs.sha }} (current HEAD: $(git rev-parse HEAD))."
           else
             echo "v${{ inputs.version }} tagged (annotated) and the GitHub Release is up."
           fi
