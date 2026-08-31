@@ -15,7 +15,7 @@
 // 셋 다 실패하면 이름 그대로 돌려준다 — PATH에 진짜 실행 파일이 있는 환경이 그 경우다.
 
 import { existsSync, readFileSync } from 'node:fs'
-import { delimiter, dirname, extname, isAbsolute, join } from 'node:path'
+import { delimiter as winDelimiter, dirname, extname, isAbsolute, join } from 'node:path/win32'
 
 export type ResolvedInvocation = { command: string; args: string[] }
 
@@ -68,7 +68,7 @@ export function resolveExternalCommand(
   const pathValue = env.PATH ?? env.Path ?? ''
 
   let firstShim: string | null = null
-  for (const dir of pathValue.split(delimiter)) {
+  for (const dir of pathValue.split(winDelimiter)) {
     if (!dir) continue
     const exe = join(dir, `${command}.exe`)
     if (exists(exe)) return { command: exe, args: [...args] }
