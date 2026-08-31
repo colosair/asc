@@ -11,7 +11,7 @@ export const RUNTIME_PACKAGE = '@asc-agent/runtime'
 export const BOOTSTRAP_PACKAGE = '@asc-agent/bootstrap'
 
 /** runtime과 bootstrap은 초기 release에서 lockstep이다. */
-export const RELEASE_VERSION = '0.3.1'
+export const RELEASE_VERSION = '0.3.2'
 
 export const RUNTIME_SPEC = `${RUNTIME_PACKAGE}@${RELEASE_VERSION}`
 export const BOOTSTRAP_SPEC = `${BOOTSTRAP_PACKAGE}@${RELEASE_VERSION}`

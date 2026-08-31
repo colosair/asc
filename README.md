@@ -59,7 +59,7 @@ ASC ships as two packages:
 ### First run, on a machine with nothing installed
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.3.1 init
+npx --yes @asc-agent/bootstrap@0.3.2 init
 ```
 
 ### A profile for your project
@@ -94,10 +94,10 @@ not break an existing attachment — are in [docs/profiles.md](docs/profiles.md)
 The command does not appear by magic, and this is the whole chain:
 
 ```text
-npx --yes @asc-agent/bootstrap@0.3.1 init
+npx --yes @asc-agent/bootstrap@0.3.2 init
         ↓  the bootstrap runs ASC's ordinary setup: detect → plan → apply → verify
         ↓  the plan lists "install the runtime on this machine" as a change
-        ↓  apply runs: npm install -g @asc-agent/runtime@0.3.1
+        ↓  apply runs: npm install -g @asc-agent/runtime@0.3.2
         ↓  npm owns the executable link (on Windows, npm's own asc.cmd)
         ↓  verify checks the installed version and that a NEW process can run it
 bootstrap exits
@@ -123,8 +123,8 @@ Every command exists in all three tiers; only the entry differs.
 
 | Tier | Entry | When |
 |---|---|---|
-| Zero-install | `npx --yes @asc-agent/bootstrap@0.3.1 <command> --json` | nothing is installed yet |
-| Persistent | `npm install -g @asc-agent/runtime@0.3.1`, then `asc <command>` | the stable local command — and the fallback when `npx` itself cannot start |
+| Zero-install | `npx --yes @asc-agent/bootstrap@0.3.2 <command> --json` | nothing is installed yet |
+| Persistent | `npm install -g @asc-agent/runtime@0.3.2`, then `asc <command>` | the stable local command — and the fallback when `npx` itself cannot start |
 | Development | `asc runtime use development <checkout>` | run a built checkout instead of the package |
 
 If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
@@ -154,7 +154,7 @@ to `stderr`.
 On a fresh machine, start from the bootstrap — there is no `asc` yet:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.3.1 setup apply --json
+npx --yes @asc-agent/bootstrap@0.3.2 setup apply --json
 ```
 
 The document carries a stable shape:
@@ -176,9 +176,9 @@ The document carries a stable shape:
     // must exist before anything can be selected.
     { "type": "apply_setup",
       "display":  "asc setup apply",
-      "portable": "npx --yes @asc-agent/bootstrap@0.3.1 setup apply" }
+      "portable": "npx --yes @asc-agent/bootstrap@0.3.2 setup apply" }
   ],
-  "nextActions": ["npx --yes @asc-agent/bootstrap@0.3.1 setup apply"],
+  "nextActions": ["npx --yes @asc-agent/bootstrap@0.3.2 setup apply"],
   "evidence": ["project=/path", "git=yes", "attached=no", "runtime=NOT_INSTALLED"]
 }
 ```

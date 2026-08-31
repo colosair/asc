@@ -408,3 +408,29 @@ describe('B-45 Gate — CLI가 한 문만 지난다', () => {
     assert.doesNotMatch(source, /for \(;;\) \{[\s\S]{0,200}join\(dir, '\.asc'\)/)
   })
 })
+
+describe('B-45 — 남의 홈 .asc 를 프로젝트 상태로 오인하지 않는다 (SSAFESTA Windows 실측)', () => {
+  // OS별 path separator 차이를 지운다 — 이 테스트는 walk 논리만 본다.
+  const fakeExists = (paths: string[]) => async (path: string) =>
+    paths.includes(path.replaceAll('\\', '/').replace(/^[A-Za-z]:/, ''))
+
+  it('workspaces/·profiles/·runtime.json 을 가진 .asc 는 user runtime이다 — 프로젝트로 매칭하지 않는다', async () => {
+    // Windows: temp가 사용자 프로필 아래라, temp의 프로젝트에서 위로 걷다
+    // 실사용자 ~/.asc 에 닿는다. 정지선(stopAt)은 "현재" 홈만 알므로 못 거른다.
+    const resolution = await resolveWorkspace({
+      cwd: '/users/u/appdata/temp/smoke/work',
+      stopAt: '/isolated/home3',
+      exists: fakeExists(['/users/u/.asc', '/users/u/.asc/workspaces']),
+    })
+    assert.equal(resolution.kind, 'UNRESOLVED')
+  })
+
+  it('내용이 프로젝트 부착 꼴이면 그대로 PROJECT_LOCAL 이다', async () => {
+    const resolution = await resolveWorkspace({
+      cwd: '/repo/src',
+      stopAt: '/users/u',
+      exists: fakeExists(['/repo/.asc']),
+    })
+    assert.equal(resolution.kind, 'PROJECT_LOCAL')
+  })
+})

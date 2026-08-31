@@ -102,7 +102,7 @@ Every portable answers in JSON — that is why they end in `--json`.
 **1 — first run.** No `asc` exists yet, so start from the bootstrap:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.3.1 setup apply --json
+npx --yes @asc-agent/bootstrap@0.3.2 setup apply --json
 ```
 
 This is the canonical entry, and the only one you need to remember. `setup plan --json`
@@ -114,7 +114,7 @@ genuinely left to decide — including the case in step 2.
 If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
 failure, no ASC JSON on stdout — that is not an ASC failure, and there is no `code` to
 branch on. Do not retry the same shape. Fall back to the persistent entry:
-`npm install -g @asc-agent/runtime@0.3.1`, then re-run the same subcommand as `asc …`.
+`npm install -g @asc-agent/runtime@0.3.2`, then re-run the same subcommand as `asc …`.
 This is distinct from `HOST_EXECUTION_PERMISSION_REQUIRED`, where the host refused a
 command ASC asked to run — that one is ASC speaking, and its JSON says what to do.
 
@@ -123,7 +123,7 @@ command ASC asked to run — that one is ASC speaking, and its JSON says what to
 them describes this project. Run the `adopt_profile` action's `portable` command:
 
 ```bash
-asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.3.1 profile adopt --json
+asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.3.2 profile adopt --json
 ```
 
 It reads this repository's git remote and writes `~/.asc/profiles/<id>/profile.json` — in

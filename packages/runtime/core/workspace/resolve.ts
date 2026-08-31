@@ -95,12 +95,29 @@ async function findProjectLocal(
     const normalized = normalizeLocator(dir)
     // 정지선 자체는 보지 않는다 — 홈의 `.asc` 는 user runtime이지 프로젝트 상태가 아니다
     if (boundary && normalized === boundary) return null
-    if (await exists(join(dir, ASC_DIR))) return dir
+    const candidate = join(dir, ASC_DIR)
+    // 정지선이 홈이어도 **다른 홈**의 `.asc` 는 걸러지지 않는다. Windows는 temp
+    // 디렉터리가 사용자 프로필 아래라, temp의 프로젝트에서 위로 걷다 실사용자
+    // `~/.asc` 를 프로젝트 상태로 오인했다 (SSAFESTA 실측 — setup status가
+    // UNATTACHED 대신 BROKEN을 답한 원인). user runtime은 내용으로 알아본다:
+    // workspaces/·profiles/·runtime.json 은 홈에만 생긴다.
+    if ((await exists(candidate)) && !(await looksLikeUserRuntime(candidate, exists))) return dir
 
     const parent = dirname(dir)
     if (parent === dir) return null
     dir = parent
   }
+}
+
+/** `~/.asc` 꼴인가 — 프로젝트 부착이 아니라 이 기계의 user runtime 홈인가. */
+async function looksLikeUserRuntime(
+  ascDir: string,
+  exists: (path: string) => Promise<boolean>,
+): Promise<boolean> {
+  for (const marker of ['workspaces', 'profiles', 'runtime.json']) {
+    if (await exists(join(ascDir, marker))) return true
+  }
+  return false
 }
 
 /** 사람이 읽는 한 줄. 왜 그 뿌리인지가 함께 와야 사람이 틀린 결합을 알아챈다. */

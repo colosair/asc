@@ -1,6 +1,6 @@
 {
   "name": "@asc-agent/runtime",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "ASC (Agent Session Control) \u2014 local-first human-in-the-loop agent control plane: core, CLI, and adapters",
   "keywords": [
     "agent",
