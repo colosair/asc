@@ -77,7 +77,17 @@ jobs:
             M=$(git show "$SHA:packages/$p/package.json" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
             [ "$M" = "$V" ] || { echo "::error::packages/$p at $SHA is $M, expected $V — that commit did not publish this version"; exit 1; }
           done
-          git show "$SHA:docs/releases/v$V.md" > /dev/null 2>&1             || { echo "::error::docs/releases/v$V.md does not exist at the published commit $SHA"; exit 1; }
+          # Note presence is a content gate, not part of the SHA identity, and a
+          # version published before the note convention existed is the only
+          # honest dry-run target — so only the real run stops on it.
+          if ! git show "$SHA:docs/releases/v$V.md" > /dev/null 2>&1; then
+            if ${{ inputs.dry_run }}; then
+              echo "dry run: docs/releases/v$V.md does not exist at the published commit $SHA (a real finalize would stop here)"
+            else
+              echo "::error::docs/releases/v$V.md does not exist at the published commit $SHA"
+              exit 1
+            fi
+          fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "current HEAD: $(git rev-parse HEAD) — a real finalize tags $SHA regardless"
 
@@ -99,7 +109,15 @@ jobs:
           # The body that ships is the note AT the published commit — validate
           # that one, not whatever the current checkout holds.
           NOTE=/tmp/note-gate.md
-          git show "${{ steps.published.outputs.sha }}:docs/releases/v$V.md" > "$NOTE"             || { echo "::error::docs/releases/v$V.md is missing at the published commit"; exit 1; }
+          if ! git show "${{ steps.published.outputs.sha }}:docs/releases/v$V.md" > "$NOTE" 2>/dev/null; then
+            if ${{ inputs.dry_run }}; then
+              echo "dry run: validating the working-tree note instead (the published commit predates the note convention)"
+              cp "docs/releases/v$V.md" "$NOTE"
+            else
+              echo "::error::docs/releases/v$V.md is missing at the published commit"
+              exit 1
+            fi
+          fi
           for section in "## What changed" "## Install / Upgrade" "## Agent setup" "## Compatibility" "## Verified" "## Known limitations"; do
             grep -qF "$section" "$NOTE" || { echo "::error::$NOTE lacks required section: $section"; exit 1; }
           done
@@ -125,9 +143,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           V="${{ inputs.version }}"
+          SHA="${{ steps.published.outputs.sha }}"
+          git show "$SHA:docs/releases/v$V.md" > /tmp/note.md
           gh release create "v$V" \
             --title "ASC v$V" \
-            --notes-file "docs/releases/v$V.md"
+            --notes-file /tmp/note.md
 
       - name: result
         run: |
