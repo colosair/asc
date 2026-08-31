@@ -93,7 +93,19 @@ jobs:
       - name: publish (runtime → bootstrap)
         run: |
           FLAGS=""
-          if ${{ inputs.dry_run }}; then FLAGS="--dry-run"; fi
+          if ${{ inputs.dry_run }}; then
+            FLAGS="--dry-run"
+            # npm refuses --dry-run over an already-published version too, and
+            # a released version is the only honest target a pipeline dry run
+            # has. Fall back to the packing check alone in that case.
+            V="${{ inputs.version }}"
+            if curl -fs -m 20 -o /dev/null "https://registry.npmjs.org/@asc-agent%2fruntime/$V"; then
+              echo "dry run: $V is already on the registry — npm pack --dry-run only (a real publish would be refused by the version gate)"
+              (cd packages/runtime && npm pack --dry-run)
+              (cd packages/bootstrap && npm pack --dry-run)
+              exit 0
+            fi
+          fi
           (cd packages/runtime && npm publish $FLAGS)
           (cd packages/bootstrap && npm publish $FLAGS)
 
