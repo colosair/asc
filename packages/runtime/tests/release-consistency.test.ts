@@ -76,7 +76,7 @@ describe('namespace — @asc-agent 정본화', () => {
     const walk = async (dir: string): Promise<void> => {
       for (const entry of await readdir(join(REPO, dir), { withFileTypes: true })) {
         const rel = dir === '.' ? entry.name : `${dir}/${entry.name}`
-        if (['node_modules', 'dist', 'private', '.git'].includes(entry.name)) continue
+        if (['node_modules', 'dist', 'private', '.git', '.claude'].includes(entry.name)) continue
         if (entry.isDirectory()) {
           await walk(rel)
           continue

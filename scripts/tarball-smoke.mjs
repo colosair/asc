@@ -392,6 +392,75 @@ try {
   check('the global runs leave the repository untouched', (await treeOf(globalWork)) === beforeGlobalRepo)
   check('and write nothing more into HOME', (await treeOf(globalHome)) === beforeGlobalHome)
 
+  // ── 기존 사용자 업그레이드 — 이전 published runtime 위에 지금 bootstrap ─────
+  //
+  // fresh 만 검증하면 기존 사용자를 깨고도 초록이 된다. 레지스트리의 직전 버전을
+  // 격리 prefix 에 심고, 이번 tarball 의 bootstrap 이 그것을 STALE 로 판정해
+  // runtime-install 을 계획에 싣는지를 본다 — in-place 업그레이드 계약의 회귀다.
+  // 레지스트리에 닿지 못하는 환경(오프라인)에서는 건너뛰되, 건너뛰었다고 말한다.
+  console.log('\nExisting-user upgrade: previous published runtime → this bootstrap')
+
+  const upHome = join(base, 'home4')
+  const upWork = join(base, 'work4')
+  for (const dir of [upHome, upWork]) await mkdir(dir, { recursive: true })
+  execFileSync('git', ['init', '-q', upWork])
+  await writeFile(join(upWork, 'README.md'), '# upgrade fixture\n', 'utf8')
+
+  const currentVersion = JSON.parse(await readFile(join(root, 'packages', 'runtime', 'package.json'), 'utf8')).version
+  let previousVersion = null
+  try {
+    const versions = JSON.parse(
+      execFileSync('npm', ['view', '@asc-agent/runtime', 'versions', '--json'], {
+        encoding: 'utf8',
+        stdio: 'pipe',
+        shell: process.platform === 'win32',
+        timeout: 60_000,
+      }),
+    )
+    previousVersion = versions.filter((v) => v !== currentVersion).pop() ?? null
+  } catch {
+    previousVersion = null
+  }
+
+  if (previousVersion === null) {
+    console.log('  SKIP registry unreachable or no previous version — upgrade regression not exercised this run')
+  } else {
+    runNpm(['install', '-g', '--no-audit', '--no-fund', `@asc-agent/runtime@${previousVersion}`], {
+      cwd: upWork,
+      env: isolated(upHome),
+      stdio: 'pipe',
+    })
+    // 이번 배포본의 bootstrap 진입을 그대로 쓴다 — npx tarball 호출은 Windows에서
+    // stdout을 삼키는 사례가 실측됐다(무츨력 exit 0). 같은 artifact, 같은 진입점이다.
+    const upPlanRaw = (() => {
+      try {
+        return execFileSync(join(bin, binName('asc-bootstrap')), ['setup', 'plan', '--json'], {
+          cwd: upWork,
+          env: isolated(upHome),
+          encoding: 'utf8',
+          stdio: 'pipe',
+          shell: process.platform === 'win32',
+          timeout: 300_000,
+        })
+      } catch (error) {
+        return error.stdout ?? ''
+      }
+    })()
+    let upPlan = null
+    try {
+      upPlan = JSON.parse(upPlanRaw)
+    } catch {
+      upPlan = null
+    }
+    check('upgrade: the plan is machine-readable JSON', upPlan !== null, upPlanRaw.slice(0, 200))
+    const runtimeChange = (upPlan?.changes ?? []).find((c) => c.target === 'runtime-install')
+    check(
+      `upgrade: previous runtime ${previousVersion} is judged stale and the install to ${currentVersion} is planned`,
+      runtimeChange !== undefined && runtimeChange.version === currentVersion && runtimeChange.from !== 'NOT_INSTALLED',
+      JSON.stringify(runtimeChange ?? upPlan?.evidence ?? null),
+    )
+  }
+
   // ── 배포본에 무엇이 실렸는가 ────────────────────────────────────────────────
   //
   // 설치된 트리가 곧 artifact다. 여기서 보는 것은 "도는가"가 아니라 **남의 것이 실려
