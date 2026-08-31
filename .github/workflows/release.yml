@@ -67,23 +67,33 @@ jobs:
           (cd packages/runtime && npm publish)
           (cd packages/bootstrap && npm publish)
 
+      # npm's client cache can answer with a stale 404 for a version published
+      # seconds earlier, and registry propagation has overrun a 5-minute window
+      # for real (asc v0.3.2, run 33353249629: publish succeeded, this step
+      # failed, Release was skipped). Ask the registry over HTTP with caching
+      # off, and give propagation 15 minutes before calling it a failure.
       - name: registry verification
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           for p in runtime bootstrap; do
             ok=""
-            for i in $(seq 1 30); do
-              [ "$(npm view "@asc-agent/$p@$TAG" version 2>/dev/null)" = "$TAG" ] && { ok=1; break; }
+            for i in $(seq 1 90); do
+              if curl -fs -m 20 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+                   -o /dev/null "https://registry.npmjs.org/@asc-agent%2f$p/$TAG"; then
+                ok=1
+                echo "@asc-agent/$p@$TAG visible after $(( (i - 1) * 10 ))s"
+                break
+              fi
               sleep 10
             done
-            [ -n "$ok" ] || { echo "::error::@asc-agent/$p@$TAG never appeared on the registry"; exit 1; }
+            [ -n "$ok" ] || { echo "::error::@asc-agent/$p@$TAG never appeared on the registry within 15 minutes"; exit 1; }
           done
 
       - name: published smoke
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PREFIX=$(mktemp -d)
-          npm install -g --prefix "$PREFIX" "@asc-agent/runtime@$TAG"
+          npm install -g --prefer-online --prefix "$PREFIX" "@asc-agent/runtime@$TAG"
           # Capture, then grep: `cmd | grep -q` kills the pipe on first match
           # and the resulting EPIPE fails the step under pipefail (seen on the
           # jam v1.4.1 run). Exit codes stay visible without a pipe.
