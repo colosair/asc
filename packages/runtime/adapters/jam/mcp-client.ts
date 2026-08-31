@@ -11,6 +11,7 @@
 //   자격 값을 절대 기록하지 않는다 — 이 파일은 토큰을 받지도, 보지도, 남기지도 않는다
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { resolveExternalCommand } from '../../core/distribution/external-command.ts'
 
 export type McpRequest = { method: string; params?: unknown }
 
@@ -62,9 +63,12 @@ export class JamMcpClient {
     if (this.#ready && this.#child) return { ok: true, value: { name: '', version: '' } }
 
     try {
+      // Windows에서 `jam` 은 npm `.cmd` shim이다 — bare 이름 spawn은 ENOENT가 나고
+      // (asc init 실측: "spawn jam ENOENT"), 실행 형태를 해석해야 세 OS에서 같다.
+      const resolved = resolveExternalCommand(this.#deps.command, this.#deps.args ?? [])
       this.#child = this.#deps.spawnProcess
         ? this.#deps.spawnProcess()
-        : spawn(this.#deps.command, [...(this.#deps.args ?? [])], {
+        : spawn(resolved.command, resolved.args, {
             stdio: ['pipe', 'pipe', 'pipe'],
             ...(this.#deps.cwd ? { cwd: this.#deps.cwd } : {}),
           })

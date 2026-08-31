@@ -155,7 +155,13 @@ export class SessionRuntime {
       return {
         ok: false,
         reason: 'NOT_OWNER',
-        detail: `${id} 에는 Runtime이 붙어 있다 — owner(${binding.physicalSessionId})만 기록할 수 있다`,
+        // owner가 누구인지만 말하면 owner 본인도 다음 명령을 모른다 — pause/done은
+        // `--physical <owner>` 로 자격을 대고, 아니면 소유권을 먼저 놓는다 (실측 ASC-6).
+        // Core는 host 이름을 모른다(B-17) — `<host>` 자리는 Surface의 어휘다.
+        detail:
+          `${id} 에는 Runtime이 붙어 있다 — owner(${binding.physicalSessionId})만 기록할 수 있다. ` +
+          `owner라면 --physical ${binding.physicalSessionId} 을 붙여 다시 실행하고, ` +
+          `그 세션이 끝났다면 asc host <host> release ${id} --physical ${binding.physicalSessionId} 로 소유권을 놓아라`,
       }
     }
     if (binding.physicalSessionId !== physicalSessionId) {

@@ -8,6 +8,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { resolveExternalCommand } from '../../core/distribution/external-command.ts'
 
 const run = promisify(execFile)
 
@@ -50,8 +51,12 @@ export const SAFETY_CRITICAL: readonly CapabilityName[] = ['external_write_guard
 export type CommandRunner = (command: string, args: string[]) => Promise<{ ok: boolean; stdout: string }>
 
 const tryRun: CommandRunner = async (command, args) => {
+  // Windows에서 `claude` 는 npm이 만든 `.cmd` shim이라 bare 이름 execFile은
+  // 실패한다 — PATH에 실재하는데 "못 찾았다"가 되는 오판이 실측에서 나왔다.
+  // 실행 형태를 먼저 해석해 세 OS에서 같은 의미로 부른다.
+  const resolved = resolveExternalCommand(command, args)
   try {
-    const { stdout } = await run(command, args, { timeout: 15_000 })
+    const { stdout } = await run(resolved.command, resolved.args, { timeout: 15_000 })
     return { ok: true, stdout }
   } catch {
     return { ok: false, stdout: '' }
