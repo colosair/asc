@@ -124,7 +124,7 @@ const floaters = []
 const walk = async (dir) => {
   for (const entry of await readdir(join(root, dir), { withFileTypes: true })) {
     const rel = `${dir}/${entry.name}`
-    if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'private' || entry.name === '.git') continue
+    if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'private' || entry.name === '.git' || entry.name === '.claude') continue
     if (entry.isDirectory()) {
       await walk(rel)
       continue
@@ -176,6 +176,47 @@ check(
   'release checklist publishes runtime before bootstrap',
 )
 check(checklist.includes(version), `release checklist names ${version}`)
+
+// ── the Release body is authored, not generated ────────────────────────────
+// The GitHub Release for this version is created from docs/releases/v<version>.md
+// by release-finalize.yml. A missing or unstructured note fails here first, so the
+// release-prep PR carries it rather than someone writing it into a web form later.
+const notePath = `docs/releases/v${version}.md`
+let note = null
+try {
+  note = await text(notePath)
+} catch {
+  note = null
+}
+check(note !== null, `release note exists: ${notePath}`)
+if (note !== null) {
+  for (const section of [
+    '## What changed',
+    '## Install / Upgrade',
+    '## Agent setup',
+    '## Compatibility',
+    '## Verified',
+    '## Known limitations',
+  ]) {
+    check(note.includes(section), `release note has "${section}"`)
+  }
+  check(note.includes(version), `release note names ${version}`)
+  // Public artefacts are English (docs/release/README.md conventions).
+  check(!/[가-힣]/.test(note), 'release note is English (no Hangul)')
+  check(note.includes(`@asc-agent/bootstrap@${version}`), 'release note pins the bootstrap install command')
+}
+
+// ── stale version literals in consumer docs ────────────────────────────────
+// A JSON example carrying an old release version reads as the current release
+// (the 0.2.0 example lived in the README for two releases). Any quoted
+// "version": "x.y.z" in the consumer docs must be the current version.
+for (const path of docs) {
+  const source = await text(path)
+  const staleVersionLiterals = [...source.matchAll(/"version":s*"(d+.d+.d+)"/g)]
+    .map((m) => m[1])
+    .filter((v) => v !== version)
+  check(staleVersionLiterals.length === 0, `no stale "version" literal in ${path}`, staleVersionLiterals.join(', '))
+}
 
 // SECURITY.md — 없는 채널을 있다고 적지 않는다
 const security = await text('SECURITY.md')

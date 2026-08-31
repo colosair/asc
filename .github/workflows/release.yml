@@ -1,7 +1,12 @@
-# The release path. A `v*` tag on a main commit is the trigger; everything after
-# that — gate, publish, registry check, GitHub Release — happens here, with npm
-# Trusted Publishing (OIDC) instead of a local login. Local `npm publish` is an
-# emergency fallback only (docs/release/).
+# Stage 1 of 2: publish. Dispatched by a maintainer against main; it gates,
+# publishes via npm Trusted Publishing (OIDC), verifies the registry, and runs a
+# published smoke. It creates NO tag and NO GitHub Release — those belong to
+# release-finalize.yml, which runs only after acceptance against the published
+# artefacts. That order is the invariant: a tag is a claim that the published
+# artefacts passed acceptance, so nothing here may create one.
+#
+# The filename stays release.yml because npm's trusted-publisher connection is
+# bound to repo + workflow filename. Renaming it breaks publishing silently.
 #
 # Requirements this workflow encodes (npm trusted-publishers contract, 2026):
 #   - GitHub-hosted runner, npm CLI >= 11.5.1, Node >= 22.14
@@ -10,23 +15,36 @@
 name: Release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (must equal the manifests on main HEAD, e.g. 0.3.3)'
+        required: true
+      dry_run:
+        description: 'Run every gate but publish with --dry-run and skip registry/smoke'
+        type: boolean
+        default: false
 
 permissions:
-  contents: write # GitHub Release
+  contents: read
   id-token: write # npm Trusted Publishing
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.version }}
 
 env:
   NO_COLOR: '1'
 
 jobs:
-  release:
+  publish:
     runs-on: ubuntu-latest
     steps:
+      - name: refuse non-main refs
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::publish runs against main only (got ${GITHUB_REF})"
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -39,20 +57,30 @@ jobs:
       # The runner's bundled npm can trail the trusted-publishing floor.
       - run: npm install -g npm@^11.5.1 && npm --version
 
-      - name: tag ↔ manifest ↔ main consistency
+      - name: version ↔ manifest consistency
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          V="${{ inputs.version }}"
           for p in runtime bootstrap; do
-            V=$(node -p "require('./packages/$p/package.json').version")
-            [ "$V" = "$TAG" ] || { echo "::error::packages/$p is $V, tag says $TAG"; exit 1; }
+            M=$(node -p "require('./packages/$p/package.json').version")
+            [ "$M" = "$V" ] || { echo "::error::packages/$p is $M, dispatch says $V"; exit 1; }
           done
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-            || { echo "::error::tag commit is not on main"; exit 1; }
+
+      # An immutable registry means a re-publish of the same version can only
+      # fail late and confusingly. Refuse it up front instead.
+      - name: version is not already published
+        if: ${{ !inputs.dry_run }}
+        run: |
+          V="${{ inputs.version }}"
+          for p in runtime bootstrap; do
+            if curl -fs -m 20 -o /dev/null "https://registry.npmjs.org/@asc-agent%2f$p/$V"; then
+              echo "::error::@asc-agent/$p@$V already exists on the registry — bump the version instead"
+              exit 1
+            fi
+          done
 
       - run: npm ci
 
-      # The full CI gate, re-run on the exact commit being released.
+      # The full CI gate, re-run on the exact commit being published.
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
@@ -64,46 +92,54 @@ jobs:
       # on the registry before anyone can install bootstrap.
       - name: publish (runtime → bootstrap)
         run: |
-          (cd packages/runtime && npm publish)
-          (cd packages/bootstrap && npm publish)
+          FLAGS=""
+          if ${{ inputs.dry_run }}; then FLAGS="--dry-run"; fi
+          (cd packages/runtime && npm publish $FLAGS)
+          (cd packages/bootstrap && npm publish $FLAGS)
 
       # npm's client cache can answer with a stale 404 for a version published
       # seconds earlier, and registry propagation has overrun a 5-minute window
-      # for real (asc v0.3.2, run 33353249629: publish succeeded, this step
-      # failed, Release was skipped). Ask the registry over HTTP with caching
-      # off, and give propagation 15 minutes before calling it a failure.
+      # for real (asc v0.3.2, run 33350405149's sibling: publish succeeded, the
+      # old verification failed). Ask the registry over HTTP with caching off,
+      # and give propagation 15 minutes before calling it a failure.
       - name: registry verification
+        if: ${{ !inputs.dry_run }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          V="${{ inputs.version }}"
           for p in runtime bootstrap; do
             ok=""
             for i in $(seq 1 90); do
               if curl -fs -m 20 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-                   -o /dev/null "https://registry.npmjs.org/@asc-agent%2f$p/$TAG"; then
+                   -o /dev/null "https://registry.npmjs.org/@asc-agent%2f$p/$V"; then
                 ok=1
-                echo "@asc-agent/$p@$TAG visible after $(( (i - 1) * 10 ))s"
+                echo "@asc-agent/$p@$V visible after $(( (i - 1) * 10 ))s"
                 break
               fi
               sleep 10
             done
-            [ -n "$ok" ] || { echo "::error::@asc-agent/$p@$TAG never appeared on the registry within 15 minutes"; exit 1; }
+            [ -n "$ok" ] || { echo "::error::@asc-agent/$p@$V never appeared on the registry within 15 minutes"; exit 1; }
           done
 
       - name: published smoke
+        if: ${{ !inputs.dry_run }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          V="${{ inputs.version }}"
           PREFIX=$(mktemp -d)
-          npm install -g --prefer-online --prefix "$PREFIX" "@asc-agent/runtime@$TAG"
+          npm install -g --prefer-online --prefix "$PREFIX" "@asc-agent/runtime@$V"
           # Capture, then grep: `cmd | grep -q` kills the pipe on first match
           # and the resulting EPIPE fails the step under pipefail (seen on the
           # jam v1.4.1 run). Exit codes stay visible without a pipe.
           "$PREFIX/bin/asc" > usage.out 2>&1
           grep -q "Agent Session Control" usage.out
+          "$PREFIX/bin/asc" --version > version.out 2>&1
+          grep -qx "$V" version.out
 
-      - name: GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: what happens next
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "ASC $GITHUB_REF_NAME" \
-            --generate-notes
+          if ${{ inputs.dry_run }}; then
+            echo "Dry run complete. Nothing was published."
+          else
+            echo "Published @asc-agent/{runtime,bootstrap}@${{ inputs.version }}."
+            echo "Run acceptance against the PUBLISHED packages (docs/release/README.md),"
+            echo "then dispatch release-finalize.yml with the same version to tag and cut the Release."
+          fi

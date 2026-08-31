@@ -3,6 +3,11 @@
 **A local-first control plane for coding agents.** Run several AI sessions without losing
 track of what each one is allowed to do, what it decided, and what still needs you.
 
+[![CI](https://github.com/colosair/asc/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/colosair/asc/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@asc-agent/runtime)](https://www.npmjs.com/package/@asc-agent/runtime)
+[![node](https://img.shields.io/node/v/@asc-agent/runtime)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/@asc-agent/runtime)](LICENSE)
+
 ASC gives an agent a contract — a goal, done-criteria, a write boundary — lets it proceed
 on what it owns, and stops it at the boundaries that are yours: ownership, shared
 contracts, secrets, irreversible actions. Nothing reaches an external system without an
@@ -166,7 +171,7 @@ The document carries a stable shape:
   "executionMode": "bootstrap",     // or installed-runtime
   "changes": [
     { "target": "runtime-install", "package": "@asc-agent/runtime",
-      "version": "0.2.0", "strategy": "npm-global", "from": "NOT_INSTALLED" },
+      "version": "0.3.2", "strategy": "npm-global", "from": "NOT_INSTALLED" },
     { "target": "attach-workspace", "scope": "local", "profile": "..." }
   ],
   "requiresUserAction": false,
@@ -207,7 +212,7 @@ target repository**.
 - `.git/info/exclude` is touched under project scope only. Local scope does not modify a
   single byte of the repository.
 
-Measured, not asserted: see (비공개 evidence 저장소).
+Measured, not asserted — recorded in the private evidence repository.
 
 ## Workspace identity
 
@@ -319,15 +324,6 @@ Updating the runtime can leave host artefacts behind — `asc setup plan` report
 `INSTALLED_STALE` and lists the repair as a change. Runtime removal and deleting your data
 are **not the same command**: `ASC_HOME` state is kept unless you say otherwise.
 
-## Security
-
-- No credential is ever written into a project file.
-- No machine-specific absolute path is ever written into a project file.
-- External writes leave only through an approved execution grant; a guard hook blocks
-  them at the point of execution for ASC-managed sessions.
-- Host installation touches only the ASC namespace. Your files and other tools' hooks
-  are left alone.
-
 ## Troubleshooting
 
 | Symptom | Cause | What to do |
@@ -368,8 +364,9 @@ npm run release:check  # version, namespace and documented-command drift
 ```
 
 `npm run smoke` is the one that matters before a release: it never touches your real
-`~/.asc`, `~/.claude`, or npm cache. `release:check` does not publish anything — publishing
-stays human-controlled; only drift detection is automated.
+`~/.asc`, `~/.claude`, or npm cache. `release:check` does not publish anything — it only
+detects drift. Publishing runs remotely through npm Trusted Publishing, dispatched by a
+maintainer; the procedure is [docs/release/README.md](docs/release/README.md).
 
 ## Document map
 
@@ -385,8 +382,8 @@ stays human-controlled; only drift detection is automated.
 | Profiles — bringing your own | [docs/profiles.md](docs/profiles.md) | where a real project's profile lives |
 | Team setup and upgrading | [docs/team-setup.md](docs/team-setup.md) | onboarding a teammate; moving to a newer runtime |
 | **Product status (SSOT)** | [docs/status.md](docs/status.md) | what exists, what is proven, what is not claimed |
-| Block-level history | (비공개 evidence 저장소) §2 | development record — private evidence repository |
-| Measured evidence | (비공개 evidence 저장소) | runtime observations — private evidence repository |
+| Block-level history | private evidence repository §2 | development record |
+| Measured evidence | private evidence repository | runtime observations |
 
 The canonical design (OM v5.1) and C-01~C-03 are **frozen**. They reopen only on evidence
 that a port, profile, or adapter boundary cannot solve the problem. Later contracts are
@@ -410,6 +407,13 @@ something that actually happened, be likely to recur, and carry a clear gate. Wh
 evidence is thin, the next block stays undecided.
 
 ## Security
+
+- No credential is ever written into a project file.
+- No machine-specific absolute path is ever written into a project file.
+- External writes leave only through an approved execution grant; a guard hook blocks
+  them at the point of execution for ASC-managed sessions.
+- Host installation touches only the ASC namespace. Your files and other tools' hooks
+  are left alone.
 
 ASC controls what an agent may do and reads credentials from your environment. Report
 issues through GitHub private vulnerability reporting — see [SECURITY.md](SECURITY.md),
