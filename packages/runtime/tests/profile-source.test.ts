@@ -4,9 +4,9 @@
 // 같은 digest다**, **모호하거나 위험한 것은 통과시키지 않는다.**
 
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, symlink } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdir, writeFile, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
+import { tempDir } from './support/temp.ts'
 import { describe, it } from 'node:test'
 
 import {
@@ -28,7 +28,7 @@ const PROFILE = {
 
 /** 설치 뿌리 하나와 사용자 소유 Profile 디렉터리 하나. 둘 다 임시다. */
 async function roots(): Promise<{ installRoot: string; externalRoot: string }> {
-  const base = await mkdtemp(join(tmpdir(), 'asc-profile-source-'))
+  const base = await tempDir('asc-profile-source-')
   const installRoot = join(base, 'install')
   const externalRoot = join(base, 'home', 'profiles')
   await mkdir(join(installRoot, 'profiles'), { recursive: true })
