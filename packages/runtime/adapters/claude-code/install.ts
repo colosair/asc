@@ -16,6 +16,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { hookScript } from './guard.ts'
+import { sessionStartScript } from './session-start.ts'
 import { skillBundle } from './skill.ts'
 
 const sha = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
@@ -23,14 +24,36 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex').sl
 export type InstallPaths = {
   /** 보통 ~/.claude — 테스트가 격리 디렉터리를 넘긴다. */
   claudeHome: string
+  /**
+   * 이 hook들을 부를 ASC CLI의 경로. SessionStart hook이 상태를 물어볼 곳이다.
+   *
+   * 없으면 SessionStart는 설치되지 않는다 — 어디를 부를지 모르는 hook을 심느니
+   * 그 기능이 없는 편이 낫다.
+   */
+  entry?: string
 }
 
 export const defaultPaths = (): InstallPaths => ({ claudeHome: join(homedir(), '.claude') })
 
-const HOOK_MATCHER = 'Bash'
 const HOOK_MARKER = 'asc-external-write-guard'
+const FRONT_MARKER = 'asc-front-binding'
+
+/**
+ * ASC가 등록하는 hook들. 이벤트마다 **하나**씩이며 중복 등록은 그 자체가 결함이다.
+ *
+ * `_asc` 표식이 소유권의 근거다 — 이것이 붙은 항목만 우리가 고치고 지운다.
+ */
+type HookSpec = {
+  event: string
+  marker: string
+  /** 이 이벤트가 matcher를 쓰는가. SessionStart는 도구 이름으로 거르지 않는다. */
+  matcher?: string
+  script: string
+}
 
 function locate(paths: InstallPaths) {
+  const guard = join(paths.claudeHome, 'asc', 'guard-hook.mjs')
+  const front = join(paths.claudeHome, 'asc', 'front-hook.mjs')
   return {
     /** Bundle 전체. 파일이 늘어도 아래 계약(manifest·digest·멱등)은 그대로다 (C-05 §5). */
     skills: skillBundle().map((skill) => ({
@@ -39,10 +62,92 @@ function locate(paths: InstallPaths) {
       text: skill.text,
     })),
     /** hook은 **하나**로 둔다. guard는 안전 층이고 중복 등록은 그 자체가 위험이다. */
-    hook: join(paths.claudeHome, 'asc', 'guard-hook.mjs'),
+    hook: guard,
+    front,
     settings: join(paths.claudeHome, 'settings.json'),
     manifest: join(paths.claudeHome, 'asc', 'install-manifest.json'),
+    hooks: ((): HookSpec[] => {
+      const specs: HookSpec[] = [
+        { event: 'PreToolUse', marker: HOOK_MARKER, matcher: 'Bash', script: guard },
+      ]
+      // 부를 곳을 모르면 심지 않는다 (§InstallPaths.entry)
+      if (paths.entry) specs.push({ event: 'SessionStart', marker: FRONT_MARKER, script: front })
+      return specs
+    })(),
   }
+}
+
+/**
+ * settings.json 의 hook 목록에서 **우리 항목만** 손본다 (C-03 §5.1).
+ *
+ * 표식이 없는 남의 항목은 읽지도 고치지도 않는다. 여기가 "사용자의 host integration을
+ * 보존한다"가 실제로 지켜지는 자리다 — 사람이 넣어 둔 SessionStart hook 옆에 우리 것을
+ * **더할** 뿐이다.
+ *
+ * 표식 없이 우리 스크립트를 가리키는 항목은 **옛 설치본이다.** 그것을 남으로 보면 재설치가
+ * 같은 guard를 하나 더 등록해 버린다 (실측: 표식 이전 버전으로 설치한 기계에서 그렇게
+ * 됐다). 그래서 명령이 우리 스크립트를 가리키면 그 항목을 우리 것으로 **입양한다**.
+ */
+function reconcileHooks(
+  settings: Record<string, unknown>,
+  specs: readonly HookSpec[],
+): { settings: Record<string, unknown>; changed: string[] } {
+  const hooks = { ...((settings.hooks ?? {}) as Record<string, unknown[]>) }
+  const changed: string[] = []
+
+  for (const spec of specs) {
+    const command = hookCommand(spec.script)
+    const entries = [...((hooks[spec.event] ?? []) as {
+      matcher?: string
+      hooks?: { type: string; command: string; _asc?: string }[]
+    }[])]
+
+    let touched = false
+    // 표식 없이 우리 스크립트를 가리키는 옛 항목을 입양한다
+    for (const entry of entries) {
+      for (const hook of entry.hooks ?? []) {
+        if (hook._asc === undefined && hook.command === command) {
+          hook._asc = spec.marker
+          touched = true
+        }
+      }
+    }
+
+    const ours = entries.filter((entry) => entry.hooks?.some((h) => h._asc === spec.marker))
+    if (ours.length === 0) {
+      entries.push({
+        ...(spec.matcher ? { matcher: spec.matcher } : {}),
+        hooks: [{ type: 'command', command, _asc: spec.marker }],
+      })
+      touched = true
+    } else {
+      // 등록은 돼 있는데 **다른 곳을 가리키는** 경우가 있다 — 그 상태에서 "설치됨"이라고
+      // 하면 hook이 없는데 있다고 믿는다. 우리 항목만 지금 경로로 고친다.
+      for (const entry of ours) {
+        for (const hook of entry.hooks ?? []) {
+          if (hook._asc === spec.marker && hook.command !== command) {
+            hook.command = command
+            touched = true
+          }
+        }
+      }
+      // 같은 표식이 여럿이면 하나만 남긴다 — 중복 등록은 그 자체가 결함이다
+      if (ours.length > 1) {
+        for (const extra of ours.slice(1)) {
+          const at = entries.indexOf(extra)
+          if (at >= 0) entries.splice(at, 1)
+        }
+        touched = true
+      }
+    }
+
+    if (touched) {
+      hooks[spec.event] = entries
+      changed.push(spec.event)
+    }
+  }
+
+  return { settings: changed.length > 0 ? { ...settings, hooks } : settings, changed }
 }
 
 type Manifest = { files: Record<string, string>; settingsHook: boolean; installedAt: string }
@@ -84,6 +189,8 @@ export async function install(
   for (const [path, content] of [
     ...where.skills.map((skill) => [skill.path, skill.text] as const),
     [where.hook, hookScript()],
+    // 부를 CLI를 모르면 SessionStart hook 자체를 만들지 않는다
+    ...(paths.entry ? ([[where.front, sessionStartScript(paths.entry)]] as const) : []),
   ] as const) {
     const existing = await readFile(path, 'utf8').catch(() => null)
     const state = fileState(existing, content, manifest.files[path])
@@ -107,31 +214,12 @@ export async function install(
     written.push(path)
   }
 
-  // settings.json에 PreToolUse hook 등록 — ASC 항목만 다루고 나머지는 손대지 않는다
-  const settings = (await readJson(where.settings)) ?? {}
-  const hooks = (settings.hooks ?? {}) as Record<string, unknown[]>
-  const preToolUse = (hooks.PreToolUse ?? []) as {
-    matcher?: string
-    hooks?: { type: string; command: string; _asc?: string }[]
-  }[]
-
-  const command = hookCommand(where.hook)
-  const ours = preToolUse.filter((entry) => entry.hooks?.some((h) => h._asc === HOOK_MARKER))
-  // 등록은 돼 있는데 **다른 곳을 가리키는** 경우가 있다 — 그 상태에서 "설치됨"이라고
-  // 하면 guard가 없는데 있다고 믿는다. 우리 항목만 지금 경로로 고친다.
-  const misdirected = ours.some((entry) => entry.hooks?.some((h) => h._asc === HOOK_MARKER && h.command !== command))
-  if (ours.length === 0) {
-    preToolUse.push({ matcher: HOOK_MATCHER, hooks: [{ type: 'command', command, _asc: HOOK_MARKER }] })
-  } else if (misdirected) {
-    for (const entry of ours) {
-      for (const h of entry.hooks ?? []) if (h._asc === HOOK_MARKER) h.command = command
-    }
-  }
-  if (ours.length === 0 || misdirected) {
-    settings.hooks = { ...hooks, PreToolUse: preToolUse }
+  // settings.json 의 hook 등록 — **ASC 항목만** 다루고 나머지는 한 글자도 건드리지 않는다
+  const reconciled = reconcileHooks((await readJson(where.settings)) ?? {}, where.hooks)
+  if (reconciled.changed.length > 0) {
     await mkdir(dirname(where.settings), { recursive: true })
-    await writeFile(where.settings, JSON.stringify(settings, null, 2) + '\n', 'utf8')
-    written.push(`${where.settings} (PreToolUse hook)`)
+    await writeFile(where.settings, JSON.stringify(reconciled.settings, null, 2) + '\n', 'utf8')
+    written.push(`${where.settings} (${reconciled.changed.join(', ')} hook)`)
   }
   manifest.settingsHook = true
 
@@ -199,6 +287,7 @@ export async function verifyInstall(paths: InstallPaths): Promise<InstallReport>
   const expected = [
     ...where.skills.map((skill) => [skill.path, skill.text] as const),
     [where.hook, hookScript()] as const,
+    ...(paths.entry ? [[where.front, sessionStartScript(paths.entry)] as const] : []),
   ]
 
   const files: { path: string; state: FileState }[] = []
@@ -208,13 +297,18 @@ export async function verifyInstall(paths: InstallPaths): Promise<InstallReport>
   }
 
   const settings = await readJson(where.settings)
-  const preToolUse = ((settings?.hooks as Record<string, unknown[]>)?.PreToolUse ?? []) as {
-    hooks?: { _asc?: string; command?: string }[]
-  }[]
-  const ourHooks = preToolUse.flatMap((entry) => (entry.hooks ?? []).filter((h) => h._asc === HOOK_MARKER))
-  const hookRegistered = ourHooks.length > 0
+  // 이벤트마다 우리 항목이 있는가. 하나라도 없으면 등록이 성립하지 않은 것으로 본다 —
+  // 반쯤 등록된 상태를 "설치됨"이라 부르면 없는 hook을 있다고 믿게 된다.
+  const registrations = where.hooks.map((spec) => {
+    const entries = ((settings?.hooks as Record<string, unknown[]>)?.[spec.event] ?? []) as {
+      hooks?: { _asc?: string; command?: string }[]
+    }[]
+    const mine = entries.flatMap((entry) => (entry.hooks ?? []).filter((h) => h._asc === spec.marker))
+    return { present: mine.length > 0, pointsHere: mine.some((h) => h.command === hookCommand(spec.script)) }
+  })
+  const hookRegistered = registrations.every((r) => r.present)
   // 등록은 있는데 다른 곳을 가리키면 설치본이 뒤처진 것이다 — 없는 것으로 치지 않고 stale로 본다
-  const hookMisdirected = hookRegistered && !ourHooks.some((h) => h.command === hookCommand(where.hook))
+  const hookMisdirected = registrations.some((r) => r.present && !r.pointsHere)
 
   const status = ((): InstallStatus => {
     if (!manifest && files.every((f) => f.state === 'missing') && !hookRegistered) return 'NOT_INSTALLED'
@@ -249,7 +343,7 @@ export function installReportLines(report: InstallReport): string[] {
     if (file.state === 'current') continue
     lines.push(`  [${file.state}] ${file.path}`)
   }
-  if (!report.hookRegistered) lines.push('  [missing] PreToolUse hook registration in settings.json')
+  if (!report.hookRegistered) lines.push('  [missing] an ASC hook registration in settings.json')
   return lines
 }
 
@@ -274,19 +368,28 @@ export async function uninstall(paths: InstallPaths): Promise<UninstallOutcome> 
     removed.push(path)
   }
 
-  // settings에서 ASC hook 항목만 걷어낸다 — 무관한 설정은 그대로
+  // settings에서 ASC hook 항목만 걷어낸다 — 무관한 설정은 그대로.
+  // 표식(`_asc`)이 소유권의 근거다: 사람이 넣은 SessionStart hook은 그 자리에 남는다.
   const settings = await readJson(where.settings)
   if (settings?.hooks) {
     const hooks = settings.hooks as Record<string, unknown[]>
-    const preToolUse = (hooks.PreToolUse ?? []) as { hooks?: { _asc?: string }[] }[]
-    const filtered = preToolUse.filter((entry) => !entry.hooks?.some((h) => h._asc === HOOK_MARKER))
-    if (filtered.length !== preToolUse.length) {
-      if (filtered.length > 0) hooks.PreToolUse = filtered
-      else delete hooks.PreToolUse
+    // 지금 설치가 SessionStart를 안 심었더라도 옛 설치가 남긴 것은 걷는다 —
+    // 우리 표식이 붙은 것은 전부 우리 것이다.
+    const markers = new Set([HOOK_MARKER, FRONT_MARKER])
+    const dropped: string[] = []
+    for (const [event, value] of Object.entries(hooks)) {
+      const entries = (value ?? []) as { hooks?: { _asc?: string }[] }[]
+      const kept = entries.filter((entry) => !entry.hooks?.some((h) => h._asc && markers.has(h._asc)))
+      if (kept.length === entries.length) continue
+      if (kept.length > 0) hooks[event] = kept
+      else delete hooks[event]
+      dropped.push(event)
+    }
+    if (dropped.length > 0) {
       // 우리가 만든 hooks 컨테이너가 비면 키째 걷는다 — 빈 {}도 원래 없던 흔적이다
       if (Object.keys(hooks).length === 0) delete settings.hooks
       await writeFile(where.settings, JSON.stringify(settings, null, 2) + '\n', 'utf8')
-      removed.push(`${where.settings} (PreToolUse hook entry)`)
+      removed.push(`${where.settings} (${dropped.join(', ')} hook entry)`)
     }
   }
 

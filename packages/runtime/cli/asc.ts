@@ -129,7 +129,8 @@ import { ObservationLedger } from '../core/monitor/observation.ts'
 import { DeliveryLedger, deliver, planDigest } from '../core/presentation/digest.ts'
 import { LocalPresentation } from '../adapters/local/presentation.ts'
 import { collectSessions, renderCollect } from '../core/runtime/controller.ts'
-import { renderFront, restoreFront } from '../core/runtime/front.ts'
+import { frontOpeningLines, openFront, renderFront, restoreFront } from '../core/runtime/front.ts'
+import { sessionStartPayload } from '../adapters/claude-code/session-start.ts'
 import { EscalationLedger, escalationLines } from '../core/runtime/escalation.ts'
 import { deriveExecutionState, executionLine } from '../core/runtime/execution-state.ts'
 import { buildFinalReport, renderFinalReport } from '../core/runtime/report.ts'
@@ -179,6 +180,7 @@ const USAGE = `asc — Agent Session Control
   asc runtime use package
   asc runtime use development <checkout>   # run a built checkout instead
   asc front [status] [--json]
+  asc front open [--json]                  # a host session opened here — what is waiting
   asc escalate open <S-ID> --predicate <p>... --question <t> --blocked <node>...
                            --evidence <ref>... [--blocked-scope <path>...] [--previous <ESC-ID> --why <t>]
   asc escalate list
@@ -348,6 +350,15 @@ async function rememberWorktree(
 }
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * Claude Host 설치 경로 + **이 CLI의 위치**.
+ *
+ * SessionStart hook은 상태를 물어볼 곳이 필요하고, 그곳은 지금 도는 이 실행파일이다.
+ * 그 CLI가 다시 선택된 build로 넘기므로(`runtime use development` 포함) hook이 build를
+ * 고르는 일은 없다.
+ */
+const hostPaths = () => ({ ...defaultPaths(), entry: fileURLToPath(import.meta.url) })
 
 /**
  * 이 binding이 가리키는 주소. 자체 호스팅은 발견 단계가 이미 알아냈으므로 같은 값을 쓴다 —
@@ -722,6 +733,11 @@ async function runParsedCommand(
   // setup은 **붙기 전에도** 답을 줘야 한다. 아래 discoverRoot 실패는 exit 2로 끊는데,
   // 그러면 "아직 안 붙었다"를 확인하려고 부른 명령이 안 붙었다는 이유로 죽는다.
   if (group === 'setup') return runSetup(command, values, entry)
+
+  // `front open` 도 같은 이유로 여기서 답한다. Host lifecycle이 부르는 갈래라
+  // **붙지 않은 자리에서 실패하면 안 된다** — 그 자리는 대부분 ASC와 무관한 프로젝트이고,
+  // 거기서 exit 2를 내는 것은 남의 세션에 오류를 얹는 일이다 (C-11 불변식 ⑪).
+  if (group === 'front' && command === 'open') return runFrontOpen(values)
 
   // adopt는 **붙기 전의 명령이다.** 붙을 Profile을 만드는 것이 일이므로 attach를 요구하면
   // 순서가 뒤집힌다. 나머지 profile 명령은 아래 attach 경로에 그대로 남는다.
@@ -1129,7 +1145,7 @@ async function runInit(values: Record<string, unknown>): Promise<number> {
       installRoot: installRoot(),
       externalProfileRoot: externalProfileRoot(),
       ...(attachedRoot ? { ascRoot: attachedRoot } : {}),
-      hosts: [{ id: 'claude', installed: await verifyInstalled(defaultPaths()) }],
+      hosts: [{ id: 'claude', installed: await verifyInstalled(hostPaths()) }],
       bindings,
       declaredPolicies: declaredPolicies(attachedRoot ? await attachedRuntime(attachedRoot) : undefined),
     })
@@ -1392,7 +1408,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
   // "붙어 있음"으로 넘기면 plan이 applied를 답하며 실패할 proceed를 준다 (실측 ASC-2).
   const attachmentBroken = ascRoot ? (await inspectSetup(ascRoot)).attachment === 'BROKEN' : false
   const scope = values.scope === 'project' ? 'project' : 'local'
-  const hostReport = await verifyInstall(defaultPaths())
+  const hostReport = await verifyInstall(hostPaths())
   return {
     entry,
     projectRoot,
@@ -1920,7 +1936,7 @@ async function runHost(
     console.error(`Unknown host: ${provider ?? '(none)'} — only claude is supported today`)
     return 2
   }
-  const paths = defaultPaths()
+  const paths = hostPaths()
 
   switch (command) {
     case 'install': {
@@ -4030,6 +4046,66 @@ ${USAGE}`)
   return 2
 }
 
+/** 판정 결과에서 workspace 신원만 꺼낸다. 갈래마다 모양이 달라 한 곳에서 접는다. */
+function workspaceOf(resolution: Resolution): { workspaceId: string; locator: string } | null {
+  return resolution.kind === 'REGISTERED' || resolution.kind === 'LINKED_WORKTREE'
+    ? { workspaceId: resolution.workspaceId, locator: resolution.locator }
+    : null
+}
+
+/**
+ * Host 세션이 열렸다 (C-12 §4). **이 명령은 실패하지 않는다.**
+ *
+ * Host lifecycle이 부르는 자리라 세 가지를 지킨다:
+ *
+ *   붙지 않은 자리        아무 말도 하지 않고 exit 0 — 남의 프로젝트를 방해하지 않는다
+ *   상태를 못 읽는 자리    왜인지 말한다 — 조용한 빈 화면을 주지 않는다 (불변식 ⑰)
+ *   미등록 linked worktree 공용 resolver가 풀고 등록까지 한다 (C-11 §1.3)
+ *
+ * **workspace 신원을 여기서 다시 구현하지 않는다.** `resolveRoot` 하나만 부른다.
+ */
+async function runFrontOpen(values: Record<string, unknown>): Promise<number> {
+  const emit = async (opening: Awaited<ReturnType<typeof openFront>>): Promise<number> => {
+    const lines = frontOpeningLines(opening)
+    if (values.json) {
+      // payload는 Claude Code가 SessionStart에서 읽는 봉투다. 다른 host는 lines를 쓴다.
+      console.log(JSON.stringify({ kind: opening.kind, lines, payload: sessionStartPayload(lines) }, null, 2))
+      return 0
+    }
+    for (const line of lines) console.log(line)
+    return 0
+  }
+
+  const resolution = await resolveRoot(process.cwd(), values.root as string | undefined).catch(() => null)
+  const workspace = resolution ? workspaceOf(resolution) : null
+  // EXPLICIT·PROJECT_LOCAL 은 workspace id가 없지만 붙은 자리다 — 신원 없이도 상태는 읽는다.
+  const root = resolution && resolution.kind !== 'UNRESOLVED' ? resolution.root : null
+  if (!root) return emit({ kind: 'NOT_ASC' })
+
+  const store = new MarkdownStateStore(root)
+  return emit(
+    await openFront({
+      // 신원을 모르는 자리(project-local)라도 붙은 것은 붙은 것이다
+      workspace: workspace ?? { workspaceId: '(project-local)', locator: root },
+      restore: async () => {
+        const scope = await activeMonitorScope(store)
+        return restoreFront({
+          store,
+          pending: await new LocalOperator({ store }).list({}),
+          escalations: await escalationLedger(store).pending(),
+          health: evaluateHealth(
+            await new CoverageLedger(store.scope(scope)).health(),
+            new Date().toISOString(),
+            HEALTH_THRESHOLDS,
+          ),
+          ...(workspace ? { workspace } : {}),
+          bindings: claudeBindings(store),
+        })
+      },
+    }),
+  )
+}
+
 async function runFront(
   command: string | undefined,
   values: Record<string, unknown>,
@@ -4044,8 +4120,9 @@ ${USAGE}`)
   }
 
   const scope = await activeMonitorScope(store)
-  const index = await readIndex(ascHome())
-  const located = lookupLocator(index, process.cwd())
+  // **index를 직접 뒤지지 않는다.** 모든 root 판정이 지나는 같은 문을 쓴다 — 그래야
+  // 미등록 linked worktree도 같은 workspace로 풀리고, 그 자리가 등록까지 된다 (C-11 §1.3).
+  const located = workspaceOf(await resolveRoot(process.cwd(), values.root as string | undefined))
 
   const state = await restoreFront({
     store,
