@@ -409,7 +409,7 @@ describe('B-45 Gate — CLI가 한 문만 지난다', () => {
   })
 })
 
-describe('B-45 — 남의 홈 .asc 를 프로젝트 상태로 오인하지 않는다 (SSAFESTA Windows 실측)', () => {
+describe('B-45 — 남의 홈 .asc 를 프로젝트 상태로 오인하지 않는다 (Windows 실전 실측)', () => {
   // OS별 path separator 차이를 지운다 — 이 테스트는 walk 논리만 본다.
   const fakeExists = (paths: string[]) => async (path: string) =>
     paths.includes(path.replaceAll('\\', '/').replace(/^[A-Za-z]:/, ''))
