@@ -40,7 +40,7 @@ import { AdoptError, buildAdoptedProfile, type AdoptedProfile, type RemoteEntry 
 import { locatorsOf, lookupLocator, readIndex, register, writeIndex } from '../core/workspace/index-store.ts'
 import { adoptionLine, judgeAdoption, migrate } from '../core/workspace/migrate.ts'
 import { newWorkspaceId, normalizeRemote, recoverCandidates, recoverLines } from '../core/workspace/identity.ts'
-import { resolveWorkspace, resolutionLine, type Resolution } from '../core/workspace/resolve.ts'
+import { gitWorktrees, resolveWorkspace, resolutionLine, type Resolution } from '../core/workspace/resolve.ts'
 import { assessSetup, renderSetup, type AttachmentState, type SetupStatus } from '../core/attach/setup.ts'
 import { withIdentity } from '../core/attach/init.ts'
 import {
@@ -288,13 +288,54 @@ async function discoverRoot(start: string, explicitRoot?: string): Promise<strin
 }
 
 async function resolveRoot(start: string, explicitRoot?: string): Promise<Resolution> {
-  return resolveWorkspace({
+  const home = ascHome()
+  const index = await readIndex(home)
+  const resolution = await resolveWorkspace({
     cwd: start,
     ...(explicitRoot ? { explicitRoot } : {}),
-    index: await readIndex(ascHome()),
+    index,
     // 홈의 `~/.asc` 는 user runtime이지 프로젝트 상태가 아니다 — 그 위로 올라가지 않는다
     stopAt: homedir(),
+    // 등록이 빗나갔을 때만 Git에게 구조를 묻는다 (C-11 §1.3).
+    worktrees: gitWorktrees,
   })
+  // 같은 저장소의 다른 checkout으로 풀렸으면 **이 경로를 등록해 둔다.** 그래야 다음부터는
+  // 예전과 같은 index 조회 하나로 끝나고, guard hook도 이 checkout을 관리 대상으로 본다.
+  if (resolution.kind === 'LINKED_WORKTREE') await rememberWorktree(home, index, resolution)
+  return resolution
+}
+
+/**
+ * 이번에 구조로 풀린 checkout을 index에 적는다. **workspace를 새로 만들지 않는다** —
+ * 같은 논리 workspace의 execution instance가 하나 늘었을 뿐이다 (C-11 §1.3).
+ *
+ * 실패해도 이번 판정을 무르지 않는다. 다음 호출이 Git을 한 번 더 부르는 것으로 끝난다 —
+ * 쓰기 하나가 안 됐다고 붙어 있는 workspace를 못 쓰게 만드는 쪽이 나쁘다.
+ */
+async function rememberWorktree(
+  home: string,
+  index: Awaited<ReturnType<typeof readIndex>>,
+  resolution: Extract<Resolution, { kind: 'LINKED_WORKTREE' }>,
+): Promise<void> {
+  const now = new Date().toISOString()
+  try {
+    await writeIndex(
+      home,
+      register(index, {
+        workspaceId: resolution.workspaceId,
+        root: resolution.root,
+        locator: {
+          path: resolution.locator,
+          kind: resolution.kindOfLocator,
+          platform: process.platform,
+          observedAt: now,
+        },
+        now,
+      }),
+    )
+  } catch {
+    // 등록만 못 했을 뿐이다. 판정은 그대로 선다.
+  }
 }
 
 const execFileAsync = promisify(execFile)
