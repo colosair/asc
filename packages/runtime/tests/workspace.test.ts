@@ -444,6 +444,11 @@ describe('linked worktree — 같은 workspace의 다른 execution instance', ()
   const NOW2 = '2026-09-05T00:00:00.000Z'
   const anywhere = async () => true
 
+  // Windows 는 `resolve('/w/feature')` 를 `C:\\w\\feature` 로 만든다. 이 테스트가 보는 것은
+  // walk 논리이지 드라이브 문자가 아니므로, 비교 전에 구분자와 드라이브를 지운다.
+  const at = (path: string) => normalizeLocator(path).replace(/^[A-Za-z]:/, '')
+  const only = (paths: string[]) => async (path: string) => paths.includes(at(path))
+
   const indexAt = (locator: string, root: string, workspaceId: string) =>
     register(emptyIndex(), {
       workspaceId,
@@ -513,7 +518,7 @@ describe('linked worktree — 같은 workspace의 다른 execution instance', ()
     const resolved = await resolveWorkspace({
       cwd: '/clones/b',
       index,
-      exists: async (path) => path !== '/clones/b/.asc',
+      exists: only([]),
       stopAt: '/home/me',
       worktrees: worktrees(['/clones/b']),
     })
@@ -550,7 +555,7 @@ describe('linked worktree — 같은 workspace의 다른 execution instance', ()
       cwd: '/w/feature',
       index,
       // runtime 뿌리는 없고 worktree 안에는 .asc 가 있다 — 그래도 그리로 붙지 않는다
-      exists: async (path) => normalizeLocator(path) === '/w/feature/.asc',
+      exists: only(['/w/feature/.asc']),
       stopAt: '/home/me',
       worktrees: worktrees(['/w/main', '/w/feature']),
     })
@@ -583,7 +588,7 @@ describe('linked worktree — 같은 workspace의 다른 execution instance', ()
     const resolved = await resolveWorkspace({
       cwd: '/repo/src',
       index: emptyIndex(),
-      exists: async (path) => normalizeLocator(path) === '/repo/.asc',
+      exists: only(['/repo/.asc']),
       stopAt: '/home/me',
       worktrees: async () => null,
     })
