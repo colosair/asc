@@ -11,6 +11,9 @@
 // (C-12 불변식 ②). scheduler 제품도 모른다 (불변식 ④) — cron이 tick을 부르든, 떨어져
 // 나간 프로세스가 스스로 돌든 같은 lease를 지난다.
 
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
+
 import type { ScopedStore } from '../../ports/state-store.ts'
 import type { TickKind } from './orchestrator.ts'
 
@@ -214,4 +217,55 @@ export function renderBackground(status: BackgroundStatus): string[] {
     lines.push(`  ${kind}: ${status.lastRun[kind] ?? 'never run'}`)
   }
   return lines
+}
+
+/**
+ * 파일 하나짜리 ScopedStore (설계 §5.1).
+ *
+ * **서비스 lease 와 workspace lease 는 다른 소유 영역이다.** 저쪽은 "이 workspace 의
+ * 이번 회차를 누가 잡았는가"이고, 이쪽은 "이 기계의 runtime 을 지금 누가 도는가"다.
+ * 둘을 합치면 workspace 가 늘 때마다 기계 수준 직렬화가 무너진다.
+ *
+ * workspace 상태 저장소를 기계 뿌리에 열지 않는 이유: 그러면 ~/.asc 에 workspace 용
+ * 파일들이 생기고, 그것은 그 자리에 없어야 할 것들이다.
+ */
+export function fileScope(path: string): ScopedStore {
+  const read = async (): Promise<Record<string, string>> => {
+    try {
+      return JSON.parse(await readFile(path, 'utf8')) as Record<string, string>
+    } catch {
+      // 없거나 깨진 파일은 빈 것으로 본다 — lease 는 시간으로 회수되므로 안전하다
+      return {}
+    }
+  }
+  // tmp+rename. 반쯤 쓰인 lease 를 다른 프로세스가 읽으면 판정이 흔들린다 (C-11 불변식 ⑨).
+  const write = async (data: Record<string, string>): Promise<void> => {
+    await mkdir(dirname(path), { recursive: true })
+    const tmp = `${path}.tmp-${process.pid}`
+    await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+    await rename(tmp, path)
+  }
+
+  return {
+    async get(key) {
+      return (await read())[key] ?? null
+    },
+    async set(key, value) {
+      await write({ ...(await read()), [key]: value })
+    },
+    async delete(key) {
+      const data = await read()
+      delete data[key]
+      await write(data)
+    },
+    async keys(prefix) {
+      return Object.keys(await read()).filter((key) => (prefix ? key.startsWith(prefix) : true))
+    },
+    async setIfAbsent(key, value) {
+      const data = await read()
+      if (key in data) return false
+      await write({ ...data, [key]: value })
+      return true
+    },
+  }
 }

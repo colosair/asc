@@ -34,6 +34,10 @@ function isolated(home, extra = {}) {
     HOME: home,
     USERPROFILE: home,
     ASC_HOME: join(home, '.asc'),
+    // **기계 서비스는 HOME 으로 격리되지 않는다.** launchd·Task Scheduler·systemd 는
+    // ASC_HOME 을 옮겨도 같은 기계 하나를 본다 — 이 축을 끄지 않으면, 격리를 주장하는
+    // 이 검사가 실행한 기계에 임시 경로를 가리키는 진짜 서비스를 남긴다.
+    ASC_SERVICE: 'off',
     npm_config_cache: join(home, '.npm-cache'),
     // **전역 prefix까지 빌리지 않는다.** 이것이 빠져 있었고, 이 기계에 ASC가 전역으로
     // 설치되자 드러났다 — `npm ls -g` 가 사용자의 진짜 전역을 보고 "이미 설치돼 있다"고
