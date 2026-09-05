@@ -51,6 +51,14 @@ export type SetupState = {
    */
   stableRuntime?: StableInstallState
   /**
+   * 이 기계의 지속 등록 상태 (설계 §6, Gate 7).
+   *
+   * **별도 onboarding 을 만들지 않는다.** 사용자가 `runtime enable` 을 따로 치게 하면
+   * 그것이 곧 "켜는 행위"가 되고, 이 제품이 없애려던 바로 그 단계다. 같은 plan 이
+   * runtime·host·workspace 와 함께 판단한다.
+   */
+  persistentRuntime?: { action: 'none' | 'install' | 'unsupported'; adapter: string; detail?: string }
+  /**
    * Profile 이 선언한 작업 항목 결합의 준비 상태 (설계 §9.3).
    *
    * **선언은 이미 내려진 결정이다.** 그런데 그 도구가 준비되지 않았다는 이유로 setup 이
@@ -87,6 +95,13 @@ export type SetupChange =
    * ASC 가 그 도구의 설정을 손으로 조립하지 않는다 — 부르기만 한다.
    */
   | { target: 'work-binding-setup'; adapter: string; resource: string; version: string }
+  /**
+   * 이 기계에 ASC runtime 을 등록한다 (설계 §4).
+   *
+   * **workspace 마다가 아니라 기계당 하나다.** 그래서 이 변경은 프로젝트와 무관하고,
+   * 붙는 것과 같은 계획에 함께 실린다.
+   */
+  | { target: 'persistent-runtime'; adapter: string }
 
 export type SetupStatus = 'already_configured' | 'ready_to_apply' | 'user_action_required'
 
@@ -211,6 +226,17 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
     if (host.status !== 'INSTALLED_CURRENT') {
       evidence.push(`host:${host.id}=${host.status}`)
       changes.push({ target: 'host-install', host: host.id, from: host.status })
+    }
+  }
+
+  // 이 기계의 지속 등록. 프로젝트와 무관하므로 profile 선택을 기다리지 않는다 —
+  // stable runtime 설치와 같은 자리다.
+  if (state.persistentRuntime) {
+    const persistent = state.persistentRuntime
+    evidence.push(`persistent=${persistent.action} (${persistent.adapter})`)
+    // 쓸 수 없는 OS 에서는 계획에 담지 않는다. 못 하는 것을 "할 일"로 적지 않는다.
+    if (persistent.action === 'install') {
+      changes.push({ target: 'persistent-runtime', adapter: persistent.adapter })
     }
   }
 
@@ -347,6 +373,8 @@ export type SetupEffects = {
   installHost(change: Extract<SetupChange, { target: 'host-install' }>): Promise<void>
   /** 작업 도구의 공식 setup 을 부른다. ASC 가 그 설정을 조립하지 않는다. */
   setupWorkBinding?(change: Extract<SetupChange, { target: 'work-binding-setup' }>): Promise<void>
+  /** 이 기계에 runtime 을 등록한다. OS 별 형식은 adapter 뒤에 있다. */
+  registerPersistentRuntime?(change: Extract<SetupChange, { target: 'persistent-runtime' }>): Promise<void>
 }
 
 export type ApplyResult = {
@@ -372,6 +400,11 @@ export async function applySetupPlan(plan: SetupPlan, effects: SetupEffects): Pr
         break
       case 'host-install':
         await effects.installHost(change)
+        break
+      case 'persistent-runtime':
+        // 이 갈래를 모르는 호출자에게는 이 변경이 없던 것으로 남는다.
+        if (!effects.registerPersistentRuntime) continue
+        await effects.registerPersistentRuntime(change)
         break
       case 'work-binding-setup':
         // 이 갈래를 모르는 호출자에게는 이 변경이 없던 것으로 남는다 —
@@ -409,5 +442,7 @@ function changeLine(change: SetupChange): string {
       return `  converge host installation: ${change.host} (currently ${change.from})`
     case 'work-binding-setup':
       return `  repair ${change.adapter} for ${change.resource} through its own setup (${change.version})`
+    case 'persistent-runtime':
+      return `  register this machine's ASC runtime with ${change.adapter}`
   }
 }

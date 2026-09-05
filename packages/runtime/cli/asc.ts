@@ -125,6 +125,21 @@ import {
   renderBackground,
   staleAfter,
 } from '../core/runtime/background.ts'
+import {
+  dueWorkspaces,
+  renderWorkspaces,
+  viewWorkspaces,
+  type WorkspaceView,
+} from '../core/runtime/workspaces.ts'
+import {
+  persistentRuntimeLine,
+  planPersistentRuntime,
+  type PersistentRuntimeAdapter,
+  type ServiceCommand,
+} from '../core/distribution/persistent-runtime.ts'
+import { launchdAdapter } from '../adapters/service/launchd.ts'
+import { schtasksAdapter } from '../adapters/service/schtasks.ts'
+import { serviceAdapterFor, systemdUserAdapter } from '../adapters/service/systemd-user.ts'
 import { QueryLedger } from '../core/runtime/query.ts'
 import { ObservationLedger } from '../core/monitor/observation.ts'
 import { DeliveryLedger, deliver, planDigest } from '../core/presentation/digest.ts'
@@ -175,7 +190,10 @@ const USAGE = `asc — Agent Session Control
   asc runtime start [--detach] [--interval-min <n>] [--delta-min <n>]
                     [--reconcile-min <n>] [--census-min <n>] [--digest-min <n>]
                         # --detach: keep observing after this terminal closes
-  asc runtime tick
+  asc runtime tick [--all]                 # --all: every workspace this machine knows
+  asc runtime list [--json]                # every workspace, without visiting each one
+  asc runtime service [status] [--json]    # the machine's persistent registration
+  asc runtime service install|uninstall [--interval-min <n>]
   asc runtime stop                         # ask the background runtime to finish its pass
   asc runtime status [--json]              # which build is in use, and whether it observes
   asc runtime use package
@@ -763,7 +781,17 @@ async function runParsedCommand(
   // 선택된 build로 넘길 것이 있으면 여기서 넘긴다. **선택 자체를 다루는 명령은 넘기지
   // 않는다** — 잘못 가리키는 선택을 고치거나 들여다보는 명령이 그 선택 때문에 못 돌면
   // 사람이 갇힌다.
-  if (!(group === 'runtime' && (command === 'use' || command === 'status'))) {
+  // 기계 수준 명령은 **프로젝트와 무관하다.** 붙지 않은 자리에서도 답해야 하고,
+  // 등록된 서비스는 어느 프로젝트 안에서 도는 것이 아니다 (설계 §4.1).
+  const machineLevelRuntime =
+    group === 'runtime' &&
+    (command === 'use' ||
+      command === 'status' ||
+      command === 'list' ||
+      command === 'service' ||
+      (command === 'tick' && Boolean(values.all)))
+
+  if (!machineLevelRuntime) {
     const redispatched = await redispatchIfNeeded(argv)
     if (redispatched !== null) return redispatched
   }
@@ -775,6 +803,10 @@ async function runParsedCommand(
   if (group === 'runtime' && (command === 'use' || command === 'status')) {
     return runRuntimeSelect(command, positionals[2], positionals[3], values)
   }
+  if (group === 'runtime' && command === 'list') return runRuntimeList(values)
+  if (group === 'runtime' && command === 'service') return runRuntimeService(positionals[2], values)
+  // 기계 전체 회차 — 등록된 서비스가 부르는 갈래다.
+  if (group === 'runtime' && command === 'tick' && values.all) return runRuntimeTickAll(values)
 
   if (group === 'host') return runHost(command, positionals[2], positionals[3], values)
 
@@ -1318,6 +1350,8 @@ async function runRuntimeSelect(
     // 어느 build를 쓰는지(C-14)와 지금 관측하고 있는지(C-12)는 다른 사실이다. 한 화면에
     // 같이 두되 섞지 않는다 — 붙지 않은 곳에서는 아래 절이 통째로 없다.
     const background = await backgroundHere(values)
+    // 서비스 등록은 workspace 와 무관한 기계의 사실이다. 같은 화면에 두되 섞지 않는다.
+    const service = await serviceHealth(values)
     if (values.json) {
       console.log(
         JSON.stringify(
@@ -1325,6 +1359,7 @@ async function runRuntimeSelect(
             selection: selection ?? null,
             target,
             file: selectionPath(home),
+            ...(service ? { service } : {}),
             ...(background ? { background } : {}),
             // 해법은 데이터로 준다 — agent가 산문에서 경로를 추론하지 않는다
             ...('code' in target ? { action: remediationAction(target) } : {}),
@@ -1340,6 +1375,7 @@ async function runRuntimeSelect(
       return 1
     }
     console.log(runtimeSelectionLine(target))
+    if (service) console.log(service.line)
     if (background) for (const line of renderBackground(background)) console.log(line)
     return 0
   }
@@ -1469,9 +1505,35 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     host: [{ id: 'claude', status: hostReport.status }],
     // Profile 이 작업 도구를 선언했으면 그 준비 상태까지 본다 (설계 §9.3).
     ...(await workBindingState(ascRoot, projectRoot)),
+    // 이 기계의 지속 등록. **별도 onboarding 을 만들지 않는다** — 같은 계획에 함께 든다.
+    ...(await persistentRuntimeState(values)),
     // **bootstrap으로 들어왔을 때만 본다.** 설치된 runtime이 자기를 다시 설치할 이유가
     // 없고, 그 축을 안 그리면 plan은 설치된 `asc` 를 전제하지도 않는다 (C-14 §3.4).
     ...(entry === 'bootstrap' ? { stableRuntime: await detectStableInstall(nodeProcessRunner) } : {}),
+  }
+}
+
+/**
+ * 이 기계에 ASC runtime 이 등록돼 있는가 (설계 §6, Gate 7).
+ *
+ * 물어볼 수 없으면 이 축을 그리지 않는다 — 모르는 것을 "해야 한다"로 적으면 설치되지
+ * 않은 기계에서 setup 이 영영 끝나지 않는다.
+ */
+async function persistentRuntimeState(
+  values: Record<string, unknown>,
+): Promise<Pick<SetupState, 'persistentRuntime'>> {
+  const adapter = serviceAdapter()
+  if (!adapter) return {}
+  const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values))).catch(() => null)
+  if (!plan) return {}
+  return {
+    persistentRuntime: {
+      action: plan.action,
+      adapter: adapter.id,
+      ...(plan.state.kind !== 'CURRENT' && 'detail' in plan.state && plan.state.detail
+        ? { detail: plan.state.detail }
+        : {}),
+    },
   }
 }
 
@@ -1732,6 +1794,12 @@ async function runSetupLifecycle(
       attachWorkspace: async (change) => {
         const code = await runInit({ ...values, profile: change.profile, scope: change.scope })
         if (code !== 0) throw new Error(`attach 실패 (exit ${code})`)
+      },
+      registerPersistentRuntime: async () => {
+        const adapter = serviceAdapter()
+        if (!adapter) return
+        await adapter.install(serviceCommand(serviceInterval(values)))
+        console.log(`Persistent runtime registered with ${adapter.id}.`)
       },
       // 그 도구의 공식 setup 을 부른다. ASC 가 그 설정을 손으로 조립하지 않는다.
       setupWorkBinding: async (change) => {
@@ -3705,6 +3773,190 @@ async function backgroundHere(values: Record<string, unknown>): Promise<Awaited<
     // 읽지 못한 것을 "안 돌고 있다"로 적지 않는다 (C-12 불변식 ⑫).
     return null
   }
+}
+
+/**
+ * 이 기계의 지속 등록 상태 (설계 §13.1).
+ *
+ * PID 는 여기 없다 — 등록물이 정본이고 프로세스는 갈아 끼우는 실행 인스턴스다
+ * (설계 §4.2). 물어볼 수 없으면 `null` 이고, 그때 화면에 그 줄이 없다.
+ */
+async function serviceHealth(
+  values: Record<string, unknown>,
+): Promise<{ adapter: string; action: string; line: string } | null> {
+  const adapter = serviceAdapter()
+  if (!adapter) return null
+  const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values))).catch(() => null)
+  if (!plan) return null
+  return { adapter: adapter.id, action: plan.action, line: persistentRuntimeLine(adapter.id, plan) }
+}
+
+/**
+ * 이 기계가 아는 workspace 들 (설계 §6).
+ *
+ * **두 번째 등록부를 읽지 않는다** — workspace index 하나에서 계산한다.
+ */
+async function machineWorkspaces(): Promise<WorkspaceView[]> {
+  const home = ascHome()
+  const index = await readIndex(home)
+  return viewWorkspaces(
+    Object.values(index.workspaces).map((workspace) => ({
+      workspaceId: workspace.workspaceId,
+      root: join(home, 'workspaces', workspace.workspaceId),
+      aliases: workspace.aliases,
+      locators: locatorsOf(index, workspace.workspaceId).map((entry) => entry.locator),
+    })),
+    (path) => existsSync(path),
+  )
+}
+
+/**
+ * `asc runtime list` — 기계 전체 화면 (설계 §13.2).
+ *
+ * workspace 마다 `cd` 해서 status 를 반복하게 만들지 않는다. 여기서 밖을 치지 않는다 —
+ * 이것은 읽기이고, 관측은 회차가 한다.
+ */
+async function runRuntimeList(values: Record<string, unknown>): Promise<number> {
+  const views = await machineWorkspaces()
+  if (values.json) {
+    console.log(JSON.stringify({ workspaces: views }, null, 2))
+    return 0
+  }
+  for (const line of renderWorkspaces(views)) console.log(line)
+  return 0
+}
+
+/** 이 OS 의 등록 통로. 모르는 OS 면 `null` — 없는 것을 있는 척하지 않는다. */
+function serviceAdapter(): PersistentRuntimeAdapter | null {
+  switch (serviceAdapterFor(process.platform)) {
+    case 'launchd':
+      return launchdAdapter()
+    case 'schtasks':
+      return schtasksAdapter()
+    case 'systemd-user':
+      return systemdUserAdapter()
+    default:
+      return null
+  }
+}
+
+/**
+ * 등록물이 실행할 명령. **한 회차만 돈다.**
+ *
+ * 지금 도는 실행 파일과 진입점을 그대로 쓴다 — 어느 build 를 쓸지는 그 진입점이 다시
+ * 정하므로(C-14), 등록물이 build 를 고르는 일은 없다.
+ */
+function serviceCommand(intervalSeconds: number): ServiceCommand {
+  return {
+    program: process.execPath,
+    args: [fileURLToPath(import.meta.url), 'runtime', 'tick', '--all'],
+    intervalSeconds,
+  }
+}
+
+const serviceInterval = (values: Record<string, unknown>): number =>
+  values['interval-min'] === undefined ? 5 * 60 : Math.max(60, Number(values['interval-min']) * 60)
+
+/**
+ * `asc runtime service` — 이 기계의 지속 등록 (설계 §4).
+ *
+ * **workspace 마다 하나가 아니다.** 사용자/기계당 하나이고, 그 하나가 아는 workspace
+ * 전부를 돌본다. 등록물은 우리가 만든 것만 다룬다.
+ */
+async function runRuntimeService(
+  command: string | undefined,
+  values: Record<string, unknown>,
+): Promise<number> {
+  const adapter = serviceAdapter()
+  if (!adapter) {
+    const detail = `no user-scope service manager for ${process.platform}`
+    if (values.json) console.log(JSON.stringify({ supported: false, detail }, null, 2))
+    else console.error(`Persistent runtime: ${detail}`)
+    // 못 하는 것을 "했다"로 적지 않는다. 다만 이것이 오류는 아니다.
+    return 0
+  }
+
+  const wanted = serviceCommand(serviceInterval(values))
+
+  if (command === undefined || command === 'status') {
+    const plan = await planPersistentRuntime(adapter, wanted)
+    if (values.json) {
+      console.log(JSON.stringify({ adapter: adapter.id, ...plan }, null, 2))
+      return 0
+    }
+    console.log(persistentRuntimeLine(adapter.id, plan))
+    return 0
+  }
+
+  if (command === 'install') {
+    const plan = await planPersistentRuntime(adapter, wanted)
+    if (plan.action === 'unsupported') {
+      console.error(persistentRuntimeLine(adapter.id, plan))
+      return 1
+    }
+    if (plan.action === 'none') {
+      // 멱등이다 — 같은 것을 다시 등록하지 않는다
+      console.log(persistentRuntimeLine(adapter.id, plan))
+      return 0
+    }
+    await adapter.install(wanted)
+    console.log(`Persistent runtime registered with ${adapter.id} — one pass every ${wanted.intervalSeconds / 60} min.`)
+    return 0
+  }
+
+  if (command === 'uninstall') {
+    await adapter.uninstall()
+    console.log(`Persistent runtime registration removed from ${adapter.id}.`)
+    return 0
+  }
+
+  console.error(`Unknown runtime service command: ${command}\n\n${USAGE}`)
+  return 2
+}
+
+/**
+ * 기계 전체 한 회차 (설계 §7).
+ *
+ * 싱글턴은 **판단하지 않는다** — 어느 workspace 가 지금 돌 수 있는지만 고르고, 회차 자체는
+ * 기존 경로가 그대로 돈다. workspace 마다 별개의 짧은 프로세스로 도는 이유는 둘이다:
+ * 한 workspace 의 실패가 다른 workspace 를 세우지 않고, 기존 lease·cursor·dedupe 경로를
+ * 한 줄도 바꾸지 않고 그대로 쓴다.
+ *
+ * DORMANT 는 건너뛴다. 살아 있는 checkout 이 없는 자리를 대신해 외부에 묻지 않는다.
+ */
+async function runRuntimeTickAll(values: Record<string, unknown>): Promise<number> {
+  const views = await machineWorkspaces()
+  const due = dueWorkspaces(views)
+  const skipped = views.filter((view) => view.health !== 'ACTIVE')
+
+  const results: { workspaceId: string; code: number }[] = []
+  for (const workspace of due) {
+    const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'runtime', 'tick'], {
+      cwd: workspace.cwd,
+      stdio: values.json ? 'ignore' : 'inherit',
+      env: process.env,
+    })
+    results.push({ workspaceId: workspace.workspaceId, code: child.status ?? 1 })
+  }
+
+  if (values.json) {
+    console.log(
+      JSON.stringify(
+        {
+          ran: results,
+          // 건너뛴 것을 조용히 빼지 않는다 — "아무 일도 없었다"와 다른 사실이다
+          skipped: skipped.map((view) => ({ workspaceId: view.workspaceId, health: view.health })),
+        },
+        null,
+        2,
+      ),
+    )
+  } else {
+    for (const result of results) console.log(`${result.workspaceId}: pass exited ${result.code}`)
+    for (const view of skipped) console.log(`${view.workspaceId}: ${view.health} — not observed this pass`)
+  }
+  // 한 workspace 가 실패해도 회차 자체는 성공이다. 다음 회차가 다시 본다.
+  return 0
 }
 
 /**
