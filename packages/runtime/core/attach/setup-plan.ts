@@ -50,6 +50,24 @@ export type SetupState = {
    * 그때는 설치된 `asc` 를 전제하지 않는다.
    */
   stableRuntime?: StableInstallState
+  /**
+   * Profile 이 선언한 작업 항목 결합의 준비 상태 (설계 §9.3).
+   *
+   * **선언은 이미 내려진 결정이다.** 그런데 그 도구가 준비되지 않았다는 이유로 setup 이
+   * 사람에게 "그 도구를 설정할까요?"라고 되물으면, 사람은 자기가 이미 적어 둔 것을 다시
+   * 답하게 된다. 고칠 수 있는 것은 고치고, 사람만 할 수 있는 것에서만 멈춘다.
+   */
+  workBinding?: {
+    adapter: string
+    resource: string
+    /** 지금 쓸 수 있는가. 쓸 수 있으면 아래 값들은 보지 않는다. */
+    ready: boolean
+    /** 고칠 수 있는가, 사람이 해야 하는가, 다시 돌려도 소용없는가. */
+    remedy?: 'SELF_HEAL' | 'HUMAN' | 'HARD'
+    detail?: string
+    /** 그 도구가 말한 자기 버전. 없으면 부를 수 없다 — 버전을 지어내지 않는다. */
+    version?: string
+  }
 }
 
 export type SetupChange =
@@ -63,6 +81,12 @@ export type SetupChange =
   | { target: 'attach-workspace'; scope: 'local' | 'project'; profile: string }
   /** Host 설치물을 지금 source에 맞춘다. 왜 필요한지까지 든다. */
   | { target: 'host-install'; host: string; from: string }
+  /**
+   * Profile 이 선언한 작업 도구를 **그 도구의 공식 setup 으로** 되살린다 (설계 §9.3).
+   *
+   * ASC 가 그 도구의 설정을 손으로 조립하지 않는다 — 부르기만 한다.
+   */
+  | { target: 'work-binding-setup'; adapter: string; resource: string; version: string }
 
 export type SetupStatus = 'already_configured' | 'ready_to_apply' | 'user_action_required'
 
@@ -73,6 +97,11 @@ export type SetupCode =
   | 'ASC_PROJECT_SCOPE_REQUIRES_CONSENT'
   /** 설치물을 사람이 고쳤다 — 덮는 것은 사람이 정한다 (L-5). */
   | 'ASC_HOST_INSTALL_MODIFIED'
+  /**
+   * 작업 도구가 사람을 기다린다 — 자격 입력처럼 ASC 가 대신할 수 없는 것 (설계 §9.4).
+   * ASC 는 토큰을 받지도 저장하지도 않는다.
+   */
+  | 'ASC_WORK_BINDING_NEEDS_USER'
 
 /**
  * 다음에 할 일 하나. **두 형태를 함께 든다** (C-14 §3.4, 불변식 ⑯).
@@ -185,6 +214,30 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
     }
   }
 
+  // Profile 이 선언한 작업 도구. **다시 묻지 않는다** — 결정은 이미 Profile 에 있다.
+  if (state.workBinding && !state.workBinding.ready) {
+    const work = state.workBinding
+    evidence.push(`work:${work.adapter}=${work.remedy ?? 'NOT_READY'}`)
+    if (work.remedy === 'HUMAN') {
+      return {
+        status: 'user_action_required',
+        code: 'ASC_WORK_BINDING_NEEDS_USER',
+        changes,
+        requiresUserAction: true,
+        ...actions(mode, evidence, [{ type: 'proceed', ...command(['setup', 'status']) }]),
+      }
+    }
+    // 고칠 수 있는 것만 계획에 담는다. HARD 는 담지 않는다 — 다시 돌려도 달라지지 않는다.
+    if (work.remedy === 'SELF_HEAL' && work.version) {
+      changes.push({
+        target: 'work-binding-setup',
+        adapter: work.adapter,
+        resource: work.resource,
+        version: work.version,
+      })
+    }
+  }
+
   if (state.ascRoot && !state.attachmentBroken) {
     // 붙어 있어도 **무엇을 고를 수 있었는지**는 사실이다. 사용자 소유 Profile을 새로 놓고
     // 계획을 물었을 때 그것이 어디에도 안 보이면, 놓은 사람은 경로를 의심하게 된다.
@@ -292,6 +345,8 @@ export type SetupEffects = {
   installRuntime(change: Extract<SetupChange, { target: 'runtime-install' }>): Promise<void>
   attachWorkspace(change: Extract<SetupChange, { target: 'attach-workspace' }>): Promise<void>
   installHost(change: Extract<SetupChange, { target: 'host-install' }>): Promise<void>
+  /** 작업 도구의 공식 setup 을 부른다. ASC 가 그 설정을 조립하지 않는다. */
+  setupWorkBinding?(change: Extract<SetupChange, { target: 'work-binding-setup' }>): Promise<void>
 }
 
 export type ApplyResult = {
@@ -317,6 +372,12 @@ export async function applySetupPlan(plan: SetupPlan, effects: SetupEffects): Pr
         break
       case 'host-install':
         await effects.installHost(change)
+        break
+      case 'work-binding-setup':
+        // 이 갈래를 모르는 호출자에게는 이 변경이 없던 것으로 남는다 —
+        // 안 한 것을 "했다"로 적지 않는다.
+        if (!effects.setupWorkBinding) continue
+        await effects.setupWorkBinding(change)
         break
     }
     applied.push(change)
@@ -346,5 +407,7 @@ function changeLine(change: SetupChange): string {
       return `  attach: ${change.profile} · scope ${change.scope}`
     case 'host-install':
       return `  converge host installation: ${change.host} (currently ${change.from})`
+    case 'work-binding-setup':
+      return `  repair ${change.adapter} for ${change.resource} through its own setup (${change.version})`
   }
 }

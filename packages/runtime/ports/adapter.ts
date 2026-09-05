@@ -18,6 +18,15 @@ export type DiscoveryContext = {
   projectRoot: string
   /** 환경변수. 자격 **존재 여부** 판단에만 쓰고 값을 실어 나르지 않는다. */
   env?: NodeJS.ProcessEnv
+  /**
+   * Profile 이 이 adapter 에 대해 선언한 자원들 (C-09 §3.1).
+   *
+   * **추측의 반대다.** adapter 가 지역 흔적에서 아무것도 못 찾아도, 사람이 Profile 에
+   * 적어 둔 것은 이미 내려진 결정이다 — 그것을 못 본 척하면 "선언은 있는데 아무 일도
+   * 일어나지 않는" 상태가 된다. adapter 는 이 값을 후보로 올릴 수 있고, 실제로 되는지는
+   * 여전히 probe 가 정한다.
+   */
+  declared?: readonly { adapterId: string; resource: string }[]
 }
 
 export type ProbeResult = {

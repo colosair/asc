@@ -53,8 +53,8 @@ export type JamAdapterDeps = {
    */
   command?: string
   args?: readonly string[]
-  /** 상태 조회 통로. 테스트가 실제 프로세스를 띄우지 않기 위한 주입점. */
-  authStatus?: (context: DiscoveryContext) => Promise<AuthStatus>
+  /** 진단 통로. 테스트가 실제 프로세스를 띄우지 않기 위한 주입점. */
+  doctor?: (context: DiscoveryContext) => Promise<JamDoctor>
   /** 선언 파일 읽기 통로. */
   readDeclaration?: (projectRoot: string) => Promise<string | null>
   /** 개인 선언 파일 읽기 통로. */
@@ -63,15 +63,62 @@ export type JamAdapterDeps = {
   listRemotes?: (projectRoot: string) => Promise<string[]>
 }
 
-/** `jam auth status --json` 의 응답. **토큰 값은 여기 오지 않는다.** */
-export type AuthStatus = {
-  status?: 'configured' | 'not_configured'
-  code?: string
-  source?: string
-  /** 어느 인스턴스인지. 사람이 "맞는 곳인가"를 확인하는 데 쓴다. */
-  baseUrl?: string
+/**
+ * `doctor --json` 의 응답에서 우리가 읽는 부분. **토큰 값은 여기 오지 않는다.**
+ *
+ * JAM 이 진단의 정본이다 (설계 §9.2). ASC 는 그 판정을 다시 만들지 않고 번역만 한다 —
+ * 예전에는 `auth status` 하나만 보고 준비 상태를 정했는데, 그러면 자격은 멀쩡한데
+ * 프로젝트 결합이나 host 등록이 어긋난 상태를 "쓸 수 있다"로 읽는다.
+ */
+export type JamDoctor = {
+  status?: 'ready' | 'failed' | string
+  diagnosis?: Record<string, { state?: string; code?: string; detail?: string }>
+  axes?: Record<string, string>
   /** 실행 자체가 안 됐을 때의 이유. */
   error?: string
+}
+
+/** 되살릴 수 있는가, 사람이 해야 하는가 (설계 §9.4). */
+export type JamRemedy =
+  /** 사람만 할 수 있다 — 자격 입력. ASC 는 토큰을 받지도 저장하지도 않는다. */
+  | { kind: 'HUMAN'; code: string; detail: string }
+  /** ASC 가 JAM 의 공식 setup 으로 스스로 고칠 수 있다. */
+  | { kind: 'SELF_HEAL'; code: string; detail: string }
+  /** 다시 돌려도 달라지지 않는다. */
+  | { kind: 'HARD'; code: string; detail: string }
+
+/**
+ * doctor 판정을 ASC 가 쓰는 세 갈래로 옮긴다.
+ *
+ * **코드로만 분기한다** — JAM 이 산문을 바꿔도 판정이 흔들리지 않아야 하고, 우리가 모르는
+ * 코드는 사람에게 넘긴다(조용히 자가 치유를 시도하지 않는다).
+ */
+export function remedyFor(doctor: JamDoctor): JamRemedy | null {
+  if (doctor.status === 'ready') return null
+  const failed = Object.entries(doctor.diagnosis ?? {}).filter(([, axis]) => axis.state === 'FAILED')
+  if (failed.length === 0) return null
+
+  for (const [axis, value] of failed) {
+    const code = value.code ?? axis
+    const detail = value.detail ?? axis
+    // 자격은 사람 몫이다. JAM 이 그렇게 설계돼 있고 ASC 가 그것을 우회하지 않는다.
+    if (code === 'JAM_AUTH_REQUIRED' || axis === 'credentials' || axis === 'jiraAuthentication') {
+      return { kind: 'HUMAN', code, detail }
+    }
+  }
+
+  const [firstAxis, first] = failed[0]!
+  const code = first.code ?? firstAxis
+  const detail = first.detail ?? firstAxis
+  // 프로젝트 결합·runtime 설정·host 등록은 JAM 의 공식 setup 이 고친다.
+  const healable = new Set([
+    'JAM_PROJECT_SELECTION_REQUIRED',
+    'JAM_RUNTIME_CONFIG_MISSING',
+    'HOST_REGISTRATION_STALE',
+    'HOST_REGISTRATION_MISSING',
+  ])
+  if (healable.has(code)) return { kind: 'SELF_HEAL', code, detail }
+  return { kind: 'HARD', code, detail }
 }
 
 /**
@@ -103,7 +150,7 @@ export function parseProjectKey(text: string): string | null {
 export class JamAdapter implements Adapter {
   #command: string
   #args: readonly string[]
-  #authStatus: ((context: DiscoveryContext) => Promise<AuthStatus>) | undefined
+  #doctor: ((context: DiscoveryContext) => Promise<JamDoctor>) | undefined
   #readDeclaration: (projectRoot: string) => Promise<string | null>
   #readPersonalBindings: (home: string) => Promise<string | null>
   #listRemotes: (projectRoot: string) => Promise<string[]>
@@ -111,7 +158,7 @@ export class JamAdapter implements Adapter {
   constructor(deps: JamAdapterDeps = {}) {
     this.#command = deps.command ?? 'jam'
     this.#args = deps.args ?? []
-    this.#authStatus = deps.authStatus
+    this.#doctor = deps.doctor
     this.#readDeclaration = deps.readDeclaration ?? defaultRead
     this.#readPersonalBindings = deps.readPersonalBindings ?? defaultReadPersonal
     this.#listRemotes = deps.listRemotes ?? defaultListRemotes
@@ -123,10 +170,10 @@ export class JamAdapter implements Adapter {
       version: '1',
       provides: PROVIDES,
       // 자격이 필요하다는 사실과 **사람이 해야 한다는 사실**까지. 값은 오지 않는다.
-      requiresCredential: ['사람이 직접 `jam auth login` — ASC가 대신 로그인하지 않는다'],
+      requiresCredential: ['사람이 직접 JAM 에 로그인해야 한다 — ASC가 대신 로그인하지 않는다'],
       prerequisites: [
-        '프로젝트 루트에 .jira-agent/project.yaml 이 있어야 한다',
-        'JAM 실행 경로를 ASC_JAM_PATH 로 알려 줘야 한다 (아직 패키지로 배포되지 않았다)',
+        // 개인 결합이 기본값이다. 저장소에 파일을 두는 것은 팀이 채택했을 때뿐이다.
+        'JAM 이 이 workspace 를 Jira 프로젝트에 결합하고 있어야 한다 (개인 결합이 기본, 팀 채택 시 .jira-agent/project.yaml)',
       ],
     }
   }
@@ -144,8 +191,20 @@ export class JamAdapter implements Adapter {
 
     // 저장소에 선언이 없다고 붙어 있지 않은 것은 아니다 — 개인 자리를 본다.
     const personal = await this.#personalKey(context)
-    if (!personal) return []
-    return [{ adapterId: 'jam', resource: personal, provides: PROVIDES, discoveredBy: PERSONAL_BINDINGS }]
+    if (personal) {
+      return [{ adapterId: 'jam', resource: personal, provides: PROVIDES, discoveredBy: PERSONAL_BINDINGS }]
+    }
+
+    // 지역 흔적이 없어도 **Profile 이 이미 정해 둔 것**은 후보다 (설계 §9.3).
+    // 이것은 추측이 아니다 — 사람이 적은 결정이고, 실제로 되는지는 probe 가 정한다.
+    // 이 갈래가 없으면 "선언은 있는데 아무 일도 일어나지 않는" 상태가 남는다.
+    const declared = (context.declared ?? []).filter((entry) => entry.adapterId === 'jam')
+    return declared.map((entry) => ({
+      adapterId: 'jam' as const,
+      resource: entry.resource,
+      provides: PROVIDES,
+      discoveredBy: 'Profile bindings',
+    }))
   }
 
   /** 개인 선언에서 이 저장소의 키를 찾는다. remote 가 일치할 때만 — 이름이 비슷한 것은 근거가 아니다. */
@@ -173,34 +232,54 @@ export class JamAdapter implements Adapter {
     return this.#status(context)
   }
 
-  async #status(context: DiscoveryContext): Promise<RuntimeStatus> {
-    const read = this.#authStatus ?? ((ctx: DiscoveryContext) => this.#defaultAuthStatus(ctx))
-    const status = await read(context).catch((error: unknown) => ({ error: String(error) }) as AuthStatus)
+  /** 마지막 진단. setup 경로가 자가 치유 여부를 정할 때 읽는다 — 다시 돌리지 않기 위해서다. */
+  #lastRemedy: JamRemedy | null = null
 
-    if (status.error) {
-      return { state: 'UNAVAILABLE', detail: `JAM을 실행하지 못했다 — ${status.error}` }
+  /** 직전 진단이 무엇을 요구했는가. 없으면 문제 없거나 아직 안 물어봤다. */
+  lastRemedy(): JamRemedy | null {
+    return this.#lastRemedy
+  }
+
+  async #status(context: DiscoveryContext): Promise<RuntimeStatus> {
+    const read = this.#doctor ?? ((ctx: DiscoveryContext) => this.#defaultDoctor(ctx))
+    const doctor = await read(context).catch((error: unknown) => ({ error: String(error) }) as JamDoctor)
+
+    if (doctor.error) {
+      this.#lastRemedy = null
+      return { state: 'UNAVAILABLE', detail: `JAM을 실행하지 못했다 — ${doctor.error}` }
     }
-    if (status.status === 'configured') {
-      return { state: 'AVAILABLE', ...(status.baseUrl ? { detail: `연결 대상 ${status.baseUrl}` } : {}) }
-    }
-    // 설정이 안 된 것은 고장이 아니다. 사람이 할 일이 남았다는 뜻이고, 그 일을 알려 준다.
-    return {
-      state: 'UNCONFIGURED',
-      detail: '자격이 없다 — 사람이 직접 `jam auth login` 을 실행해야 한다 (ASC가 대신하지 않는다)',
+
+    const remedy = remedyFor(doctor)
+    this.#lastRemedy = remedy
+    if (!remedy) return { state: 'AVAILABLE', ...(jamTarget(doctor) ? { detail: jamTarget(doctor)! } : {}) }
+
+    switch (remedy.kind) {
+      case 'HUMAN':
+        // 설정이 안 된 것은 고장이 아니다. 사람이 할 일이 남았다는 뜻이고, 그 일을 알려 준다.
+        return {
+          state: 'UNCONFIGURED',
+          detail: `${remedy.code} — 사람이 직접 JAM 에 로그인해야 한다 (ASC가 대신하지 않는다): ${remedy.detail}`,
+        }
+      case 'SELF_HEAL':
+        // 고칠 수 있는 것을 "못 쓴다"로 적지 않는다 — 그 판단이 setup 을 멈추게 만든다.
+        return { state: 'UNCONFIGURED', detail: `${remedy.code} — JAM 공식 setup 으로 고칠 수 있다: ${remedy.detail}` }
+      case 'HARD':
+        return { state: 'UNAVAILABLE', detail: `${remedy.code} — ${remedy.detail}` }
     }
   }
 
-  async #defaultAuthStatus(context: DiscoveryContext): Promise<AuthStatus> {
+  async #defaultDoctor(context: DiscoveryContext): Promise<JamDoctor> {
     const { command, args } = resolveJamCommand(context.env, this.#command, this.#args)
     try {
-      const { stdout } = await run(command, [...args, 'auth', 'status', '--json'])
-      return JSON.parse(stdout) as AuthStatus
+      const { stdout } = await run(command, [...args, 'doctor', '--json'], { cwd: context.projectRoot })
+      return JSON.parse(stdout) as JamDoctor
     } catch (error) {
-      // 실행 실패와 "자격 없음"을 합치지 않는다. 전자는 설치·경로 문제다.
+      // 실행 실패와 "준비 안 됨"을 합치지 않는다. 전자는 설치·경로 문제다.
+      // doctor 는 준비되지 않았을 때 0 이 아닌 코드로 끝나면서도 JSON 을 낸다.
       const stdout = (error as { stdout?: string }).stdout
       if (stdout) {
         try {
-          return JSON.parse(stdout) as AuthStatus
+          return JSON.parse(stdout) as JamDoctor
         } catch {
           // 아래로 떨어뜨린다
         }
@@ -208,6 +287,12 @@ export class JamAdapter implements Adapter {
       return { error: String((error as { message?: string }).message ?? error).slice(0, 200) }
     }
   }
+}
+
+/** 어느 인스턴스에 붙었는지. 사람이 "맞는 곳인가"를 확인하는 데 쓴다. */
+function jamTarget(doctor: JamDoctor): string | null {
+  const detail = doctor.diagnosis?.credentials?.detail ?? doctor.diagnosis?.jiraAuthentication?.detail
+  return detail ? `연결 확인됨 (${detail})` : null
 }
 
 async function defaultRead(projectRoot: string): Promise<string | null> {

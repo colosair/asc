@@ -241,20 +241,85 @@ describe('B-35 Gate — Adapter 계약 (§4)', () => {
     assert.deepEqual(await empty.discover(context), [])
   })
 
-  it('자격 없음과 실행 불가를 나눈다', async () => {
+  it('자격 없음과 실행 불가와 고칠 수 있는 것을 나눈다', async () => {
+    // 자격은 사람 몫이다 — ASC 가 대신 로그인하지 않는다
     const missing = new JamAdapter({
-      authStatus: async () => ({ status: 'not_configured', code: 'JAM_AUTH_REQUIRED' }),
+      doctor: async () => ({
+        status: 'failed',
+        diagnosis: { credentials: { state: 'FAILED', code: 'JAM_AUTH_REQUIRED', detail: 'not signed in' } },
+      }),
     })
     const status = await missing.runtime(context)
     assert.equal(status.state, 'UNCONFIGURED')
-    // 사람이 할 일을 말한다 — 대신 하지 않는다
     assert.match(status.detail ?? '', /사람이 직접/)
+    assert.equal(missing.lastRemedy()?.kind, 'HUMAN')
 
-    const broken = new JamAdapter({ authStatus: async () => ({ error: 'command not found' }) })
+    // 실행 자체가 안 된 것과 준비가 안 된 것은 다른 사실이다
+    const broken = new JamAdapter({ doctor: async () => ({ error: 'command not found' }) })
     assert.equal((await broken.runtime(context)).state, 'UNAVAILABLE')
 
-    const ready = new JamAdapter({ authStatus: async () => ({ status: 'configured', baseUrl: 'https://example' }) })
+    const ready = new JamAdapter({
+      doctor: async () => ({ status: 'ready', diagnosis: { credentials: { state: 'OK', detail: 'secret-store' } } }),
+    })
     assert.equal((await ready.runtime(context)).state, 'AVAILABLE')
+    assert.equal(ready.lastRemedy(), null)
+  })
+
+  it('프로젝트 결합·host 등록이 어긋난 것은 고칠 수 있는 것으로 읽는다 (설계 §9.3)', async () => {
+    // 실측한 doctor 응답의 모양 그대로다: 자격은 멀쩡한데 결합과 등록이 어긋나 있다.
+    const adapter = new JamAdapter({
+      doctor: async () => ({
+        status: 'failed',
+        axes: { package: 'PACKAGE_READY', registration: 'HOST_REGISTRATION_STALE' },
+        diagnosis: {
+          credentials: { state: 'OK', detail: 'source secret-store' },
+          projectBinding: { state: 'FAILED', code: 'JAM_PROJECT_SELECTION_REQUIRED', detail: 'no project key' },
+          registration: { state: 'FAILED', code: 'HOST_REGISTRATION_STALE' },
+        },
+      }),
+    })
+    const status = await adapter.runtime(context)
+    // 자격은 멀쩡하다 — 사람을 부르지 않는다
+    assert.equal(status.state, 'UNCONFIGURED')
+    assert.equal(adapter.lastRemedy()?.kind, 'SELF_HEAL')
+    assert.equal(adapter.lastRemedy()?.code, 'JAM_PROJECT_SELECTION_REQUIRED')
+  })
+
+  it('모르는 실패 코드를 조용히 자가 치유하지 않는다', async () => {
+    const adapter = new JamAdapter({
+      doctor: async () => ({
+        status: 'failed',
+        diagnosis: { projectBinding: { state: 'FAILED', code: 'JAM_PROJECT_CONFIG_INVALID', detail: 'bad yaml' } },
+      }),
+    })
+    assert.equal((await adapter.runtime(context)).state, 'UNAVAILABLE')
+    assert.equal(adapter.lastRemedy()?.kind, 'HARD')
+  })
+
+  it('Profile 이 선언한 것은 지역 흔적이 없어도 후보가 된다 (설계 §9.3)', async () => {
+    // 추측이 아니다 — 사람이 Profile 에 적은 결정이다. 이 갈래가 없으면 선언이 있어도
+    // 아무 일도 일어나지 않는다.
+    const adapter = new JamAdapter({
+      readDeclaration: async () => null,
+      readPersonalBindings: async () => null,
+      listRemotes: async () => [],
+    })
+    const candidates = await adapter.discover({
+      ...context,
+      declared: [{ adapterId: 'jam', resource: 'WORK' }, { adapterId: 'gitlab', resource: 'g/p' }],
+    })
+    assert.equal(candidates.length, 1)
+    assert.equal(candidates[0]!.resource, 'WORK')
+    assert.equal(candidates[0]!.discoveredBy, 'Profile bindings')
+  })
+
+  it('선언이 없으면 키를 만들어 내지 않는다', async () => {
+    const adapter = new JamAdapter({
+      readDeclaration: async () => null,
+      readPersonalBindings: async () => null,
+      listRemotes: async () => [],
+    })
+    assert.deepEqual(await adapter.discover(context), [])
   })
 
   it('자격을 대신 다루지 않는다 — 값이 어디에도 나타나지 않는다', async () => {
