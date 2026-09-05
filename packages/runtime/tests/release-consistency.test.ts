@@ -253,3 +253,40 @@ describe('public artifact boundary — 남의 것이 배포본에 실리지 않�
     }
   })
 })
+
+// 공개 저장소에 남의 프로젝트 이름을 남기지 않는다.
+//
+// 배포물 감사는 **checkout 안의 비공개 Profile 에서** 금지 목록을 만든다. 공개 product
+// 저장소에는 그 Profile 이 없으므로 목록이 비고, 그래서 소스 주석·문서·테스트 fixture 에
+// 박힌 제3자 식별자는 그 감사에 걸리지 않았다 — 실제로 33곳이 그렇게 남아 있었다.
+//
+// 여기서 보는 것은 배포물이 아니라 **저장소 자체**다. 이름은 이 파일에 적지 않는다:
+// 적는 순간 그 이름이 다시 저장소에 들어온다.
+describe('저장소에 제3자 프로젝트 식별자가 남지 않는다', () => {
+  it('추적되는 파일 어디에도 없다', async () => {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const run = promisify(execFile)
+
+    // 조각으로 조립한다 — 이 소스에 온전한 문자열이 남지 않게.
+    const patterns = [
+      ['ss', 'afy'].join(''),
+      ['ss', 'afesta'].join(''),
+      // 실 프로젝트의 작업 항목 키 모양: 대문자 3+ · 숫자 · 대문자 · 숫자
+      'S[0-9]{2}P[0-9]{2}[A-Z][0-9]{3}',
+    ]
+    // pathspec 은 저장소 뿌리 기준(`:/`)으로 준다 — cwd 기준이면 이 파일이 사는
+    // 하위 디렉터리만 보게 되고, 그러면 저장소 위쪽 문서가 검사에서 빠진다.
+    const { stdout } = await run('git', [
+      'grep',
+      '-ilE',
+      patterns.join('|'),
+      '--',
+      ':/',
+      ':(exclude,top)node_modules',
+      ':(exclude,top)packages/runtime/tests/release-consistency.test.ts',
+    ]).catch((error) => ({ stdout: (error as { stdout?: string }).stdout ?? '' }))
+
+    assert.equal(stdout.trim(), '', `제3자 식별자가 남아 있다:\n${stdout}`)
+  })
+})
