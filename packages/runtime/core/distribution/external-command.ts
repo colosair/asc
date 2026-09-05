@@ -3,7 +3,7 @@
 // Node는 보안 수정 이후 shell 없이 `.cmd` 를 실행하지 않는다. 그런데 npm이 전역 설치로
 // 만들어 주는 명령은 Windows에서 전부 `.cmd` shim이다 — bare 이름을 Unix 방식으로만
 // spawn하면 ENOENT/EINVAL이 나고, 호출자는 "설치돼 있지 않다"고 오판한다
-// (SSAFESTA Windows 실측: shim이 PATH에 실재하는데 host probe가 not found →
+// (Windows 실전 실측: shim이 PATH에 실재하는데 host probe가 not found →
 // external_write_guard STOP까지 이어졌다).
 //
 // shell을 켜는 것은 답이 아니다 — 인자가 escape 없이 이어붙는다(DEP0190). 대신:

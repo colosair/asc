@@ -29,7 +29,7 @@ export type SetupState = {
    * runtime 디렉터리는 있는데 profile.lock을 읽지 못하는 상태 — 붙이다 만 것이다.
    *
    * 이것을 "붙어 있음"으로 읽으면 plan은 `applied`를 답하면서 실패할 `asc proceed`를
-   * 다음 행동으로 준다 (SSAFESTA Windows 실측 ASC-2: 파일 잠금이 빈 skeleton만 남긴
+   * 다음 행동으로 준다 (Windows 실전 실측 ASC-2: 파일 잠금이 빈 skeleton만 남긴
    * 경우). 붙이다 만 상태는 붙일 것이 남은 상태다 — repair가 plan에 드러나야 한다.
    */
   attachmentBroken?: boolean

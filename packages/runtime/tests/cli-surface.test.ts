@@ -1,4 +1,4 @@
-// CLI 표면 — 사용자 입력 오류에 Node 스택을 던지지 않는다 (SSAFESTA Windows 실측
+// CLI 표면 — 사용자 입력 오류에 Node 스택을 던지지 않는다 (Windows 실전 실측
 // ASC-1·ASC-3·ASC-5의 회귀 고정). 실행 중인 버전을 묻는 통로도 여기 산다.
 
 import assert from 'node:assert/strict'
