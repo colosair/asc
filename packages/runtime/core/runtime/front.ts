@@ -16,6 +16,7 @@ import type { StateStore } from '../../ports/state-store.ts'
 import type { HealthAlert } from '../monitor/health-alerts.ts'
 import type { EscalationRecord } from './escalation.ts'
 import type { DecisionSummary } from '../view/decision-view.ts'
+import type { CoordinationView } from './coordination.ts'
 
 export type FrontState = {
   /** 지금 돌고 있는 것. */
@@ -62,6 +63,13 @@ export type FrontState = {
   }[]
   /** 이 workspace가 무엇인지. 붙은 자리를 사람이 확인할 수 있어야 한다. */
   workspace?: { workspaceId: string; locator: string }
+  /**
+   * 밖에 물어 둔 것들의 지금 상태.
+   *
+   * **저장된 값이 아니다** — 기대와 증거에서 파생해 받은 것을 그대로 보인다. 이것이
+   * 화면에 없으면 "안에서 할 일이 없다"가 "끝났다"로 읽힌다.
+   */
+  coordination?: readonly CoordinationView[]
 }
 
 export type RestoreInput = {
@@ -71,6 +79,8 @@ export type RestoreInput = {
   /** 미해소 상신. 없으면 이 축은 그리지 않는다 — 없는 것을 0으로 보이게 하지 않는다. */
   escalations?: readonly EscalationRecord[]
   workspace?: { workspaceId: string; locator: string }
+  /** 파생된 조율 상태. 없으면 이 축을 그리지 않는다 — 모르는 것을 "없음"으로 그리지 않는다. */
+  coordination?: readonly CoordinationView[]
   /**
    * 세션별 소유권 조회. **구조로만 받는다** — Core가 Host adapter를 알면 안 된다.
    * 없으면 이 축은 그리지 않는다(모르는 것을 "없음"으로 그리지 않는다).
@@ -133,6 +143,7 @@ export async function restoreFront(input: RestoreInput): Promise<FrontState> {
       runnable: [...record.stillRunnableNodes],
     })),
     ...(input.workspace ? { workspace: input.workspace } : {}),
+    ...(input.coordination ? { coordination: input.coordination } : {}),
   }
 }
 
@@ -262,13 +273,30 @@ export function renderFront(state: FrontState): string[] {
     }
   }
 
+  // 밖에 걸린 것을 안에서 할 일과 나눠 든다. 나가지 않은 기대는 **아무도 기다리지
+  // 않는다** — 그것이 가장 조용한 실패다.
+  const outward = (state.coordination ?? []).filter((view) => view.state !== 'PUBLISHED')
+  if (outward.length > 0) {
+    const unpublished = outward.filter((view) => view.state === 'UNPUBLISHED')
+    const waiting = outward.filter((view) => view.state === 'WAITING_EXTERNAL')
+    const answered = outward.filter((view) => view.state === 'RESPONSE_RECEIVED')
+    lines.push(
+      `Asked outside (${outward.length}): not sent ${unpublished.length} · waiting ${waiting.length} · answered ${answered.length}`,
+    )
+    // 안 나간 것을 먼저 든다 — 기다리는 것보다 나쁜 상태다
+    for (const view of [...unpublished, ...answered, ...waiting]) {
+      lines.push(`  ${view.queryId} ${view.state}`)
+    }
+  }
+
   if (
     state.pendingDecisions.length === 0 &&
     state.active.length === 0 &&
     state.escalations.length === 0 &&
     state.unclaimed.length === 0 &&
     state.awaitingCollect.length === 0 &&
-    state.awaitingController.length === 0
+    state.awaitingController.length === 0 &&
+    outward.length === 0
   ) {
     // 비어 있는 것과 못 보는 것을 구분한다 (C-12 불변식 ⑫과 같은 태도)
     lines.push(
