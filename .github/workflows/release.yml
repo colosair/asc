@@ -137,7 +137,27 @@ jobs:
         run: |
           V="${{ inputs.version }}"
           PREFIX=$(mktemp -d)
-          npm install -g --prefer-online --prefix "$PREFIX" "@asc-agent/runtime@$V"
+          # The step above proves the registry serves the version over HTTP. That
+          # is not the same as npm being able to install it: the installer reads
+          # its own metadata through its own caches and edges, and on the 0.4.0
+          # run it answered ETARGET for a version that was already visible. The
+          # publish had succeeded, so failing here would have meant either a
+          # release that could not be finalised or a republish of an immutable
+          # version — neither is acceptable for a propagation delay.
+          #
+          # Six attempts over five minutes, then it is a real failure rather than
+          # a slow one. Same shape JAM arrived at for the same reason.
+          installed=""
+          for i in $(seq 1 6); do
+            if npm install -g --prefer-online --prefix "$PREFIX" "@asc-agent/runtime@$V"; then
+              installed=1
+              [ "$i" -gt 1 ] && echo "install succeeded on attempt $i"
+              break
+            fi
+            echo "install attempt $i failed; waiting for propagation"
+            sleep 50
+          done
+          [ -n "$installed" ] || { echo "::error::@asc-agent/runtime@$V could not be installed after 6 attempts over ~5 minutes"; exit 1; }
           # Capture, then grep: `cmd | grep -q` kills the pipe on first match
           # and the resulting EPIPE fails the step under pipefail (seen on the
           # jam v1.4.1 run). Exit codes stay visible without a pipe.
@@ -145,6 +165,21 @@ jobs:
           grep -q "Agent Session Control" usage.out
           "$PREFIX/bin/asc" --version > version.out 2>&1
           grep -qx "$V" version.out
+          # bootstrap pins runtime exactly, so its install resolves two versions
+          # at once — the one most likely to meet an edge that is still catching
+          # up. Proving it here is what keeps the documented entry command from
+          # being the first thing a user discovers is broken.
+          resolved=""
+          for i in $(seq 1 6); do
+            if npm view "@asc-agent/bootstrap@$V" dependencies --json > deps.json 2>/dev/null; then
+              resolved=1
+              break
+            fi
+            echo "bootstrap metadata attempt $i failed; waiting for propagation"
+            sleep 50
+          done
+          [ -n "$resolved" ] || { echo "::error::@asc-agent/bootstrap@$V metadata did not resolve after 6 attempts"; exit 1; }
+          node -e "const d=JSON.parse(require('fs').readFileSync('deps.json')); const p=d['@asc-agent/runtime']; if (p !== process.argv[1]) { console.error('bootstrap pins runtime at', p, 'expected', process.argv[1]); process.exit(1) }" "$V"
 
       - name: record the release-candidate identity
         run: |
