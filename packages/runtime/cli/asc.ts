@@ -510,7 +510,7 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
   const { values, positionals } = parsed
 
   // 실행 중인 버전을 묻는 유일한 공식 통로. 설치 안내가 버전을 핀으로 고정하는데
-  // 정작 지금 도는 것이 무엇인지 물을 방법이 없었다 (SSAFESTA Windows 실측 ASC-1).
+  // 정작 지금 도는 것이 무엇인지 물을 방법이 없었다 (Windows 실전 실측 ASC-1).
   if (values.version || positionals[0] === 'version') {
     console.log(RELEASE_VERSION)
     return 0
@@ -2637,7 +2637,7 @@ async function runSession(
   switch (command) {
     case 'issue': {
       // 누락과 오값은 다른 실수다 — "필수"라고 답하면 이미 준 사람은 자기가 무엇을
-      // 틀렸는지 모른다 (SSAFESTA Windows 실측 ASC-3).
+      // 틀렸는지 모른다 (Windows 실전 실측 ASC-3).
       const roleChoices = SessionRole.options.join('|')
       if (values.role === undefined || !values.goal) {
         console.error(`--role and --goal are required (role: ${roleChoices})`)

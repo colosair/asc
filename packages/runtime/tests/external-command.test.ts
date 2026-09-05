@@ -1,4 +1,4 @@
-// ASC-7 — Windows에서 npm `.cmd` shim CLI를 실제로 찾는다 (SSAFESTA 실측).
+// ASC-7 — Windows에서 npm `.cmd` shim CLI를 실제로 찾는다 (실 프로젝트 실측).
 //
 // claude.cmd·jam.cmd가 PATH에 실재하는데 bare 이름 execFile이 실패해
 // "Claude Code: not found" → external_write_guard STOP까지 이어진 사고의 회귀 고정.
