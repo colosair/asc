@@ -4,17 +4,10 @@
 > This file is the **public single source of truth for product status**. It describes the
 > product, not any project ASC has been pointed at.
 
-Current release: **v0.2.1** — published to npm. v0.2.0 got an agent from a repository URL to
-an attached control plane; re-running that on a real machine, the host refused to execute
-the bootstrap command before any ASC code ran. v0.2.1 is about what sits before ASC: one
-canonical agent command, a named boundary for a host that will not run it, a deterministic
-answer about Node, and the executionMode defect closed.
-
-In development on `main`: **setup and work are separated.** Setup ends at `attachment:
-READY` — a session is no longer created to demonstrate that installation worked, because a
-session is a contract about real work and there is none at install time. When real work does
-arrive, `asc session plan` validates the contract an agent drafts from it, marking which
-values were read and which were inferred. Not published yet.
+Which version is current is not written here. The published packages and the latest
+GitHub Release answer that, and they answer it without anyone remembering to edit a
+document. This file answers a different question: what the product does, what has actually
+been proven, and what is deliberately not claimed.
 
 Nothing below is dated by a release — it says what is true now.
 
@@ -34,6 +27,14 @@ Observation                 provider-neutral monitoring through capability bindi
                             GitHub, GitLab, and work-item adapters behind one port set
 Distribution                a stable `asc` executable installed by npm at an exact
                             version, plus a zero-install bootstrap entry point
+Workspace continuity        a logical workspace is not a path; linked checkouts of the
+                            same repository resolve to it, while independent clones of
+                            the same remote stay separate
+Persistent observation      one user-scope runtime per machine, registered with the OS,
+                            observes every attached workspace without a conversation or
+                            terminal being open
+Host front binding          opening a supported host in an attached directory restores
+                            what is already pending there, and creates nothing
 ```
 
 ## What is proven, and how
@@ -52,13 +53,12 @@ Current standing:
 ```text
 3-OS CI (ubuntu · macOS · windows)          TEST_VERIFIED
 Zero-base setup path — a repository URL,    RUNTIME_OBSERVED — `npx` the published
-  no profile name, through adopt · attach     0.2.1 bootstrap into a machine with
-  · attachment READY                          nothing installed, against a project ASC
-                                              had never seen. Every command after the
-                                              first came from the previous command's
-                                              JSON, unedited. Driven by a person
-                                              following the runbook. Also TEST_VERIFIED
-                                              on tarballs, in CI.
+  no profile name, through adopt · attach     bootstrap into a machine with nothing
+  · attachment READY                          installed, against a project ASC had never
+                                              seen. Every command after the first came
+                                              from the previous command's JSON, unedited.
+                                              Driven by a person following the runbook.
+                                              Also TEST_VERIFIED on tarballs, in CI.
 Two-URL run under a coding agent            NOT PASSED as pure auto mode. The agent found
   in automatic mode                           the right path on its own and classified the
                                               refusal correctly, but Claude Code's
@@ -73,8 +73,8 @@ Node below the supported floor stops        RUNTIME_OBSERVED — the published a
                                               names the newer Node already installed.
 The installed `asc` knows it is installed   RUNTIME_OBSERVED — `executionMode:
                                               installed-runtime`, portables are `asc …`
-                                              and need no network. This was the defect
-                                              the 0.2.0 registry run found.
+                                              and need no network. A registry run found
+                                              this defect and it is closed.
 Real registry distribution — `npx` the      RUNTIME_OBSERVED
   published bootstrap into a zero state,
   it installs the exact runtime globally
@@ -83,6 +83,22 @@ Windows physical machine — npm global,      RUNTIME_OBSERVED
 Installed ASC with no network — local       RUNTIME_OBSERVED
   control-plane commands keep working
 Multi-agent orchestration end to end        DOGFOOD_VERIFIED (development checkout)
+Linked-worktree continuity                  DOGFOOD_VERIFIED — a worktree created and
+                                              never registered resolved to its workspace
+                                              and registered itself; an independent clone
+                                              of an already-registered remote resolved to
+                                              nothing and was not registered.
+Host first-open restore                     DOGFOOD_VERIFIED — a host hook run in that
+                                              unregistered worktree, with no prior ASC
+                                              command, restored the real pending state.
+Two observation channels at once            DOGFOOD_VERIFIED — a project declaring both a
+                                              code binding and a work binding observed
+                                              both in one pass, and a repeated pass over
+                                              unchanged external state produced no new
+                                              reports, across a process restart.
+Machine-level persistent runtime            RUNTIME_OBSERVED (macOS) — registered with the
+                                              OS, loaded by it, a pass run and exited
+                                              cleanly, with no user action.
 ```
 
 ## What is not claimed
@@ -100,14 +116,22 @@ True zero-base JAM              NOT OBSERVED — JAM reached ready in the same r
                                 run is a different claim.
 Approval routing over a real    WAITING_FOR_CREDENTIAL — implemented; the end-to-end
   messenger server (B-13)       run needs a server and credentials we do not have
-Coverage health against a real  WAITING_FOR_CREDENTIAL — same shape: code complete,
-  self-hosted GitLab (B-37)     evidence gated on access
+Windows and Linux machine       NOT OBSERVED — both adapters are fixed by contract
+  runtime registration          tests only. Neither has been run on a live machine.
+Reboot and login recovery       NOT OBSERVED — the macOS registration runs at load, which
+                                is that path, but no reboot has been performed.
+Credentials under a service-    NOT OBSERVED — whether provider credentials resolve the
+  started process               same way when the OS starts the process, rather than a
+                                shell, has not been measured.
+A second host adapter           NOT OBSERVED — host neutrality is fixed structurally: core
+                                imports no adapter and branches on no host id. Only one
+                                host has been driven.
 ```
 
 Waiting for a credential is not the same as unfinished code. Neither is written down as
 done.
 
-## What the host observation found (0.2.1 candidate)
+## What the host observation found
 
 ```text
 Host denial is not about the   RUNTIME_OBSERVED. The canonical command was denied twice in
@@ -124,25 +148,20 @@ Recovery that works            RUNTIME_OBSERVED. Adding an allow rule for the ex
 
 Tests cannot reach a host classifier and none was faked to look as though they can.
 
-## Not yet observed on 0.2.1
+## Still owed
 
 ```text
-Host classifier, published   the classifier observation above was made against the
-                             candidate build. It was not repeated against the published
-                             package, and a thing not observed is not written down as
-                             observed. Nothing in that finding depends on which build
-                             it was, but the sentence stays honest.
-```
-
-## After v0.2.1
-
-```text
+Host classifier, published   the classifier observation above was made against a
+                             candidate build. It has not been repeated against a
+                             published package, and a thing not observed is not written
+                             down as observed. Nothing in that finding depends on which
+                             build it was, but the sentence stays honest.
 Public surface English II    the deep operational renderers (monitor, investigation,
                              digest, query, closure, preflight, resolver, entities) are
                              still Korean. The entry surface is English.
 Distribution dogfood         a real multi-agent task driven by the published package.
-                             Setting it up from a URL is now observed; being used for a
-                             real task is not the same thing, and is still owed.
+                             Setting it up from a URL is observed; being used for a real
+                             task is not the same thing, and is still owed.
 ```
 
 ## Where the detail lives

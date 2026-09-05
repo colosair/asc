@@ -171,7 +171,7 @@ The document carries a stable shape:
   "executionMode": "bootstrap",     // or installed-runtime
   "changes": [
     { "target": "runtime-install", "package": "@asc-agent/runtime",
-      "version": "0.3.2", "strategy": "npm-global", "from": "NOT_INSTALLED" },
+      "version": "0.4.0", "strategy": "npm-global", "from": "NOT_INSTALLED" },
     { "target": "attach-workspace", "scope": "local", "profile": "..." }
   ],
   "requiresUserAction": false,
