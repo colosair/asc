@@ -137,6 +137,66 @@ export async function restoreFront(input: RestoreInput): Promise<FrontState> {
 }
 
 /**
+ * 새 Front Session이 열렸을 때의 판정 (C-12 §4).
+ *
+ * **Host를 모른다.** Claude Code든 다른 무엇이든 "여기서 세션이 열렸다"는 사실 하나를
+ * 받고, 붙을 수 있는지와 무엇이 걸려 있는지를 답한다. Host adapter는 이 답을 자기
+ * 호스트의 형식으로 옮기기만 한다 — Core에 `if (host === 'claude')` 가 생기면 그 순간
+ * 두 번째 호스트는 Core를 고쳐야 들어온다.
+ *
+ * 세 갈래를 **구분한다**:
+ *
+ *   NOT_ASC       이 경로는 ASC 소관이 아니다. 조용히 지나간다 — 남의 도구를 방해하지
+ *                 않는다 (C-11 불변식 ⑪).
+ *   UNAVAILABLE   붙어야 하는데 못 붙었다. **빈 화면을 주지 않고 왜인지 말한다**
+ *                 (C-12 불변식 ⑰).
+ *   BOUND         붙었다. 지금 무엇이 걸려 있는지가 함께 온다.
+ */
+export type FrontOpening =
+  | { kind: 'NOT_ASC' }
+  | { kind: 'UNAVAILABLE'; detail: string }
+  | { kind: 'BOUND'; state: FrontState }
+
+/**
+ * 세션이 열렸다 — 붙을 수 있는가.
+ *
+ * **읽기만 한다.** 세션을 만들지 않는다: 실제 작업 요청이 없는데 Session Contract를
+ * 만들어 내는 것은 없던 사실을 제조하는 일이다 (AGENTS.md "Do not create a session to
+ * demonstrate that setup worked" 와 같은 선).
+ */
+export async function openFront(input: {
+  /** 이 경로가 어느 workspace인가. `null` 이면 ASC 소관이 아니다. */
+  workspace: { workspaceId: string; locator: string } | null
+  /** 상태를 읽는다. 던지면 UNAVAILABLE 로 접힌다 — 못 읽은 것을 "없음"으로 그리지 않는다. */
+  restore: () => Promise<FrontState>
+}): Promise<FrontOpening> {
+  if (!input.workspace) return { kind: 'NOT_ASC' }
+  try {
+    return { kind: 'BOUND', state: await input.restore() }
+  } catch (error) {
+    return { kind: 'UNAVAILABLE', detail: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Host가 사람에게 보여 줄 줄. **Host별 포장은 여기 없다** — 문자열 목록까지가 Core다.
+ *
+ * `NOT_ASC` 는 빈 목록이다. 할 말이 없는 것과 "아무 일도 없다"는 다르고, 전자는
+ * 아무것도 띄우지 않는 것이 맞다.
+ */
+export function frontOpeningLines(opening: FrontOpening): string[] {
+  switch (opening.kind) {
+    case 'NOT_ASC':
+      return []
+    case 'UNAVAILABLE':
+      // 조용히 빈 화면을 주지 않는다 (C-12 불변식 ⑰)
+      return [`ASC is attached here but its state could not be read — ${opening.detail}`]
+    case 'BOUND':
+      return renderFront(opening.state)
+  }
+}
+
+/**
  * 사람이 읽는 복원 화면.
  *
  * 순서가 곧 우선순위다: **내가 지금 결정해야 하는 것**이 먼저고, 돌고 있는 것이 그다음,

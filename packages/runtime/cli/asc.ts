@@ -122,7 +122,8 @@ import { ObservationLedger } from '../core/monitor/observation.ts'
 import { DeliveryLedger, deliver, planDigest } from '../core/presentation/digest.ts'
 import { LocalPresentation } from '../adapters/local/presentation.ts'
 import { collectSessions, renderCollect } from '../core/runtime/controller.ts'
-import { renderFront, restoreFront } from '../core/runtime/front.ts'
+import { frontOpeningLines, openFront, renderFront, restoreFront } from '../core/runtime/front.ts'
+import { sessionStartPayload } from '../adapters/claude-code/session-start.ts'
 import { EscalationLedger, escalationLines } from '../core/runtime/escalation.ts'
 import { deriveExecutionState, executionLine } from '../core/runtime/execution-state.ts'
 import { buildFinalReport, renderFinalReport } from '../core/runtime/report.ts'
@@ -170,6 +171,7 @@ const USAGE = `asc — Agent Session Control
   asc runtime use package
   asc runtime use development <checkout>   # run a built checkout instead
   asc front [status] [--json]
+  asc front open [--json]                  # a host session opened here — what is waiting
   asc escalate open <S-ID> --predicate <p>... --question <t> --blocked <node>...
                            --evidence <ref>... [--blocked-scope <path>...] [--previous <ESC-ID> --why <t>]
   asc escalate list
@@ -298,6 +300,15 @@ async function resolveRoot(start: string, explicitRoot?: string): Promise<Resolu
 }
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * Claude Host 설치 경로 + **이 CLI의 위치**.
+ *
+ * SessionStart hook은 상태를 물어볼 곳이 필요하고, 그곳은 지금 도는 이 실행파일이다.
+ * 그 CLI가 다시 선택된 build로 넘기므로(`runtime use development` 포함) hook이 build를
+ * 고르는 일은 없다.
+ */
+const hostPaths = () => ({ ...defaultPaths(), entry: fileURLToPath(import.meta.url) })
 
 /**
  * 이 binding이 가리키는 주소. 자체 호스팅은 발견 단계가 이미 알아냈으므로 같은 값을 쓴다 —
@@ -1078,7 +1089,7 @@ async function runInit(values: Record<string, unknown>): Promise<number> {
       installRoot: installRoot(),
       externalProfileRoot: externalProfileRoot(),
       ...(attachedRoot ? { ascRoot: attachedRoot } : {}),
-      hosts: [{ id: 'claude', installed: await verifyInstalled(defaultPaths()) }],
+      hosts: [{ id: 'claude', installed: await verifyInstalled(hostPaths()) }],
       bindings,
       declaredPolicies: declaredPolicies(attachedRoot ? await attachedRuntime(attachedRoot) : undefined),
     })
@@ -1336,7 +1347,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
   // "붙어 있음"으로 넘기면 plan이 applied를 답하며 실패할 proceed를 준다 (실측 ASC-2).
   const attachmentBroken = ascRoot ? (await inspectSetup(ascRoot)).attachment === 'BROKEN' : false
   const scope = values.scope === 'project' ? 'project' : 'local'
-  const hostReport = await verifyInstall(defaultPaths())
+  const hostReport = await verifyInstall(hostPaths())
   return {
     entry,
     projectRoot,
@@ -1864,7 +1875,7 @@ async function runHost(
     console.error(`Unknown host: ${provider ?? '(none)'} — only claude is supported today`)
     return 2
   }
-  const paths = defaultPaths()
+  const paths = hostPaths()
 
   switch (command) {
     case 'install': {
@@ -3841,7 +3852,7 @@ async function runFront(
   store: MarkdownStateStore,
   root: string,
 ): Promise<number> {
-  if (command !== undefined && command !== 'status') {
+  if (command !== undefined && command !== 'status' && command !== 'open') {
     console.error(`Unknown front command: ${command}
 
 ${USAGE}`)
@@ -3865,6 +3876,23 @@ ${USAGE}`)
     // 도는 세션을 누가 집고 있는지. --physical 을 다시 물어보게 하지 않는다 (L-4).
     bindings: claudeBindings(store),
   })
+
+  // Host lifecycle이 부르는 갈래. **판정은 Core가 하고 포장만 adapter가 한다** —
+  // 여기서 host별 분기를 만들면 두 번째 host가 Core를 고쳐야 들어온다 (C-12 §4).
+  if (command === 'open') {
+    const opening = await openFront({
+      workspace: located ? { workspaceId: located.workspaceId, locator: located.locator } : null,
+      restore: async () => state,
+    })
+    const lines = frontOpeningLines(opening)
+    if (values.json) {
+      // payload는 Claude Code가 SessionStart에서 읽는 봉투다. 다른 host는 lines를 쓴다.
+      console.log(JSON.stringify({ kind: opening.kind, lines, payload: sessionStartPayload(lines) }, null, 2))
+      return 0
+    }
+    for (const line of lines) console.log(line)
+    return 0
+  }
 
   if (values.json) {
     console.log(JSON.stringify({ ...state, root }, null, 2))
