@@ -142,6 +142,12 @@ import { launchdAdapter } from '../adapters/service/launchd.ts'
 import { schtasksAdapter } from '../adapters/service/schtasks.ts'
 import { serviceAdapterFor, systemdUserAdapter } from '../adapters/service/systemd-user.ts'
 import { QueryLedger } from '../core/runtime/query.ts'
+import {
+  CoordinationLedger,
+  coordinationLines,
+  viewCoordination,
+  type CoordinationView,
+} from '../core/runtime/coordination.ts'
 import { ObservationLedger } from '../core/monitor/observation.ts'
 import { DeliveryLedger, deliver, planDigest } from '../core/presentation/digest.ts'
 import { LocalPresentation } from '../adapters/local/presentation.ts'
@@ -261,6 +267,8 @@ const USAGE = `asc — Agent Session Control
   asc query answer <X-ID> --kind DECIDE|ANSWER|ESCALATE --by <role> --body <text>
                         [--to <authority>]
   asc query list   [--json]
+
+  asc coordination [status] [--json]   # what was asked outside, and whether it reached anyone
 
   asc progress show   [<S-ID>]
   asc progress report <S-ID> --physical <id> --phase <text>
@@ -834,7 +842,7 @@ async function runParsedCommand(
   // 순서가 뒤집힌다. 나머지 profile 명령은 아래 attach 경로에 그대로 남는다.
   if (group === 'profile' && command === 'adopt') return runProfileAdopt(values, entry)
 
-  if (!['inbox', 'grant', 'monitor', 'runtime', 'front', 'freeze', 'thaw', 'escalate', 'profile', 'session', 'controller', 'proceed', 'progress', 'preflight', 'closure', 'query'].includes(group)) {
+  if (!['inbox', 'grant', 'monitor', 'runtime', 'front', 'coordination', 'freeze', 'thaw', 'escalate', 'profile', 'session', 'controller', 'proceed', 'progress', 'preflight', 'closure', 'query'].includes(group)) {
     console.error(`Unknown command: ${group}\n\n${USAGE}`)
     return 2
   }
@@ -870,6 +878,9 @@ async function runParsedCommand(
 
   // 새 대화가 붙었을 때 지금 상태를 되찾는다 (C-12 §4). 읽기만 한다.
   if (group === 'front') return runFront(command, values, store, root)
+
+  // 밖에 물은 것이 실제로 전달됐는가. 읽기만 한다.
+  if (group === 'coordination') return runCoordination(command, values, store, guard.runtime)
 
   // 사람에게 올릴 자격이 있는가 (C-13). 자격 없으면 request가 만들어지지 않는다.
   if (group === 'escalate') return runEscalate(command, target, values, store, guard.runtime)
@@ -3402,6 +3413,32 @@ const auditLedger = (store: MarkdownStateStore) => new AuditLedger(store.scope('
 
 const closureLedger = (store: MarkdownStateStore) => new ClosureLedger(store.scope('closure'))
 
+/**
+ * 조율 증거 원장. Bounded Query 와 **다른 scope** 에 산다 — 기대와 증거는 다른 사실이고,
+ * 한 자리에 두면 "물어봤다"와 "전달됐다"가 다시 한 레코드가 된다.
+ */
+const coordinationLedger = (store: MarkdownStateStore) => new CoordinationLedger(store.scope('coordination'))
+
+/**
+ * 지금 이 workspace 의 조율 상태.
+ *
+ * 기대는 Bounded Query 에서 오고 증거는 원장에서 온다. **여기서 상태를 만들지 않는다** —
+ * 둘을 맞춰 파생할 뿐이다.
+ */
+async function coordinationNow(
+  store: MarkdownStateStore,
+  resolved?: ResolvedRuntime,
+): Promise<CoordinationView[]> {
+  const queries = await queryLedger(store, resolved).list()
+  return viewCoordination(
+    coordinationLedger(store),
+    // 답이 이미 안에서 쓰인 질의는 조율 대상이 아니다 — 밖에 물을 이유가 끝났다.
+    queries
+      .filter((entry) => entry.answer === null)
+      .map((entry) => ({ id: entry.query.id, expectsResponse: entry.query.expectedResponse !== undefined })),
+  )
+}
+
 /** Bounded Query (B-25). 결정권 판정에 Profile 책임 지도가 필요하다. */
 const queryLedger = (store: MarkdownStateStore, resolved?: ResolvedRuntime) =>
   new QueryLedger(store.scope('query'), resolved?.ownership)
@@ -4572,11 +4609,38 @@ async function runFrontOpen(values: Record<string, unknown>): Promise<number> {
             HEALTH_THRESHOLDS,
           ),
           ...(workspace ? { workspace } : {}),
+          // 안에서 할 일이 없는 것과 밖에서 답이 안 온 것은 다른 사실이다
+          coordination: await coordinationNow(store),
           bindings: claudeBindings(store),
         })
       },
     }),
   )
+}
+
+/**
+ * `asc coordination` — 밖에 물은 것이 실제로 나갔는가, 답이 왔는가.
+ *
+ * **읽기만 한다.** 이 화면이 상태를 만들지 않는다는 것이 요점이다 — 보이는 것은 전부
+ * 기대와 증거에서 파생한 값이다.
+ */
+async function runCoordination(
+  command: string | undefined,
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  resolved?: ResolvedRuntime,
+): Promise<number> {
+  if (command !== undefined && command !== 'status') {
+    console.error(`Unknown coordination command: ${command}\n\n${USAGE}`)
+    return 2
+  }
+  const views = await coordinationNow(store, resolved)
+  if (values.json) {
+    console.log(JSON.stringify({ coordination: views }, null, 2))
+    return 0
+  }
+  for (const line of coordinationLines(views)) console.log(line)
+  return 0
 }
 
 async function runFront(
@@ -4607,6 +4671,7 @@ ${USAGE}`)
       HEALTH_THRESHOLDS,
     ),
     ...(located ? { workspace: { workspaceId: located.workspaceId, locator: located.locator } } : {}),
+    coordination: await coordinationNow(store),
     // 도는 세션을 누가 집고 있는지. --physical 을 다시 물어보게 하지 않는다 (L-4).
     bindings: claudeBindings(store),
   })
