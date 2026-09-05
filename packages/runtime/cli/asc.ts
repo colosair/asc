@@ -7,12 +7,12 @@
 //
 // 읽기 전용이다. 결정 제출은 사람의 명시적 의사표현을 받는 별도 경로로 나간다 (B-06).
 
-import { execFile, spawnSync } from 'node:child_process'
+import { execFile, spawn, spawnSync } from 'node:child_process'
 import { parseArgs, promisify } from 'node:util'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { homedir, userInfo } from 'node:os'
+import { homedir, hostname, userInfo } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   MINIMUM_NODE_MAJOR,
@@ -118,6 +118,13 @@ import {
 } from '../core/runtime/audit.ts'
 import { ClosureLedger } from '../core/runtime/closure.ts'
 import { Orchestrator, renderTick } from '../core/runtime/orchestrator.ts'
+import {
+  LAST_RUN_KEY,
+  RuntimeLease,
+  readBackground,
+  renderBackground,
+  staleAfter,
+} from '../core/runtime/background.ts'
 import { QueryLedger } from '../core/runtime/query.ts'
 import { ObservationLedger } from '../core/monitor/observation.ts'
 import { DeliveryLedger, deliver, planDigest } from '../core/presentation/digest.ts'
@@ -165,10 +172,12 @@ const USAGE = `asc — Agent Session Control
   asc profile adopt   [--id <name>] [--json]  # make a profile for this repository
   asc profile resolve --profile <id> [--preset <id>] [--install <path>] [--write]
 
-  asc runtime start [--interval-min <n>] [--delta-min <n>] [--reconcile-min <n>]
-                    [--census-min <n>] [--digest-min <n>]
+  asc runtime start [--detach] [--interval-min <n>] [--delta-min <n>]
+                    [--reconcile-min <n>] [--census-min <n>] [--digest-min <n>]
+                        # --detach: keep observing after this terminal closes
   asc runtime tick
-  asc runtime status [--json]              # which build is in use (C-14 §4)
+  asc runtime stop                         # ask the background runtime to finish its pass
+  asc runtime status [--json]              # which build is in use, and whether it observes
   asc runtime use package
   asc runtime use development <checkout>   # run a built checkout instead
   asc front [status] [--json]
@@ -640,6 +649,7 @@ function parseArgsOrThrow(argv: string[]) {
   intent: { type: 'string' },
   grant: { type: 'string' },
   'interval-min': { type: 'string' },
+  detach: { type: 'boolean' },
   'delta-min': { type: 'string' },
   'reconcile-min': { type: 'string' },
   'census-min': { type: 'string' },
@@ -1305,6 +1315,9 @@ async function runRuntimeSelect(
   if (command === 'status') {
     const selection = await readRuntimeSelection(home)
     const target = await resolveRuntimeTarget(selection)
+    // 어느 build를 쓰는지(C-14)와 지금 관측하고 있는지(C-12)는 다른 사실이다. 한 화면에
+    // 같이 두되 섞지 않는다 — 붙지 않은 곳에서는 아래 절이 통째로 없다.
+    const background = await backgroundHere(values)
     if (values.json) {
       console.log(
         JSON.stringify(
@@ -1312,6 +1325,7 @@ async function runRuntimeSelect(
             selection: selection ?? null,
             target,
             file: selectionPath(home),
+            ...(background ? { background } : {}),
             // 해법은 데이터로 준다 — agent가 산문에서 경로를 추론하지 않는다
             ...('code' in target ? { action: remediationAction(target) } : {}),
           },
@@ -1326,6 +1340,7 @@ async function runRuntimeSelect(
       return 1
     }
     console.log(runtimeSelectionLine(target))
+    if (background) for (const line of renderBackground(background)) console.log(line)
     return 0
   }
 
@@ -3673,6 +3688,26 @@ async function buildMonitorEngines(
 }
 
 /**
+ * 이 자리에서 background runtime이 돌고 있는가.
+ *
+ * **붙지 않았으면 없는 것으로 답한다** (`null`). `runtime status` 는 붙기 전에도 답해야
+ * 하는 명령이라(C-14 §5) 여기서 attach를 요구하면 그 성질이 깨진다.
+ */
+async function backgroundHere(values: Record<string, unknown>): Promise<Awaited<ReturnType<typeof readBackground>> | null> {
+  const root = await discoverRoot(process.cwd(), values.root as string | undefined).catch(() => null)
+  if (!root) return null
+  try {
+    const scope = new MarkdownStateStore(root).scope('runtime')
+    // 기본 주기 1분에서 나온 회수 기준. start가 다른 주기를 썼다면 그쪽이 더 길 뿐이고,
+    // 살아 있는 lease를 죽은 것으로 읽지는 않는다 — heartbeat가 회차마다 갱신된다.
+    return await readBackground(scope, staleAfter(60_000))
+  } catch {
+    // 읽지 못한 것을 "안 돌고 있다"로 적지 않는다 (C-12 불변식 ⑫).
+    return null
+  }
+}
+
+/**
  * 상시 Runtime (C-12). 대화를 켜 두지 않고 **상태를 지속시키고 계산을 짧게 돌린다.**
  *
  * 여기는 계기만 갖는다 — 판정도 승인도 하지 않고, 사람이 부르던 것과 같은 함수를 부른다.
@@ -3685,7 +3720,7 @@ async function runRuntime(
   renderer: TextRenderer,
   resolved?: ResolvedRuntime,
 ): Promise<number> {
-  if (command !== 'start' && command !== 'tick') {
+  if (command !== 'start' && command !== 'tick' && command !== 'stop') {
     console.error(`Unknown runtime command: ${command ?? '(none)'}\n\n${USAGE}`)
     return 2
   }
@@ -3693,6 +3728,13 @@ async function runRuntime(
     console.error('This only runs inside an attached project. Run `asc init --profile <id>` first.')
     return 2
   }
+
+  // 멈추는 것은 감시를 조립하지 않아도 된다 — 외부 자격이 상해 있어도 끌 수 있어야 한다.
+  if (command === 'stop') return stopBackground(store)
+
+  // 떨어져 나가는 것은 감시를 조립하기 **전에** 한다. 부모가 외부를 한 번 치고 나서
+  // 자식이 또 치면 같은 회차를 두 번 부르는 셈이다.
+  if (command === 'start' && values.detach) return detachRuntime(values)
 
   const built = await buildMonitorEngines(values, store, resolved)
   if (!built.ok) return built.code
@@ -3714,13 +3756,13 @@ async function runRuntime(
     log: (line) => console.log(line),
     lastRunAt: {
       read: async () => {
-        const raw = await scope.get('last-run')
+        const raw = await scope.get(LAST_RUN_KEY)
         return raw ? (JSON.parse(raw) as Record<string, string>) : {}
       },
       write: async (kind, at) => {
-        const raw = await scope.get('last-run')
+        const raw = await scope.get(LAST_RUN_KEY)
         const current = raw ? (JSON.parse(raw) as Record<string, string>) : {}
-        await scope.set('last-run', JSON.stringify({ ...current, [kind]: at }))
+        await scope.set(LAST_RUN_KEY, JSON.stringify({ ...current, [kind]: at }))
       },
     },
     actions: {
@@ -3762,22 +3804,134 @@ async function runRuntime(
     },
   })
 
-  if (command === 'tick') {
-    const outcome = await orchestrator.tick()
-    console.log(renderTick(outcome))
-    return outcome.failures.length > 0 ? 1 : 0
+  const intervalMs = minutes(values['interval-min'], 1)
+  // 회수 기준은 주기가 정한다 — 주기보다 짧은 만료는 자기 lease를 죽은 것으로 읽는다.
+  const staleMs = staleAfter(intervalMs)
+  const lease = new RuntimeLease({ scope, owner: `${process.pid}@${hostname()}`, staleMs })
+
+  // cron이 부르는 tick과 떨어져 나간 루프가 겹쳐 돌면 같은 회차를 둘이 한다.
+  // 같은 문을 지나게 해서 하나만 돌린다 (C-12 불변식 ⑥).
+  if (!(await lease.acquire())) {
+    const held = await lease.read()
+    console.log(
+      held.kind === 'HELD'
+        ? `Another runtime already holds this workspace (pid ${held.record.pid}) — leaving it to that one.`
+        : 'Another runtime already holds this workspace — leaving it to that one.',
+    )
+    return 0
   }
 
-  const intervalMs = minutes(values['interval-min'], 1)
+  if (command === 'tick') {
+    try {
+      const outcome = await orchestrator.tick()
+      console.log(renderTick(outcome))
+      return outcome.failures.length > 0 ? 1 : 0
+    } finally {
+      await lease.release()
+    }
+  }
+
   console.log(`Always-on runtime started — one pass every ${intervalMs / 60_000} min. Ctrl+C to stop.`)
+
+  // 자는 동안에도 멈출 수 있어야 한다. 깨우지 않으면 `runtime stop` 이 한 주기를 통째로
+  // 기다리고, 주기가 30분이면 30분 동안 "멈추는 중"이 된다.
+  let wake: (() => void) | null = null
   const stop = () => {
     console.log('Stopping — a pass still running is carried to the next start by its lease.')
     orchestrator.stop()
+    wake?.()
   }
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
 
-  await orchestrator.run(intervalMs, (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref?.()))
+  try {
+    await orchestrator.run(intervalMs, async (ms) => {
+      // 회차마다 살아 있다고 말한다. 밀려났으면 조용히 물러난다 — 두 루프가 같은
+      // workspace를 갈아 대는 것보다 하나가 도는 편이 낫다.
+      if (!(await lease.renew())) {
+        console.log('Another runtime took this workspace — stopping.')
+        orchestrator.stop()
+        return
+      }
+      await new Promise<void>((resolve) => {
+        // **unref 하지 않는다.** 예전에는 여기서 타이머를 unref 했는데, 그러면 이벤트
+        // 루프를 붙잡는 것이 아무것도 없어 첫 잠에서 프로세스가 끝난다 — Node 는
+        // `unsettled top-level await` 로 exit 13 을 낸다. 상시로 돌아야 하는 루프가
+        // 조용히 한 회차만 돌고 죽던 원인이다. 멈출 때는 아래 wake 가 타이머를 지운다.
+        const timer = setTimeout(resolve, ms)
+        wake = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+      })
+      wake = null
+    })
+  } finally {
+    await lease.release()
+  }
+  return 0
+}
+
+/**
+ * 이 터미널이 닫혀도 계속 보게 한다 (C-12 §0).
+ *
+ * scheduler 제품을 설치하지 않는다 (불변식 ④) — 같은 명령을 떨어져 나간 프로세스로 다시
+ * 띄울 뿐이다. cron·launchd·Task Scheduler로 `asc runtime tick` 을 부르는 길도 그대로
+ * 열려 있고, 둘은 같은 lease를 지나므로 겹쳐 돌지 않는다.
+ */
+async function detachRuntime(values: Record<string, unknown>): Promise<number> {
+  // 지금 프로세스가 받은 인자를 그대로 쓰되 --detach 만 뺀다. 옵션을 다시 조립하면
+  // 언젠가 부모와 자식이 다른 주기로 돌게 된다.
+  const args = process.argv.slice(2).filter((arg) => arg !== '--detach')
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], {
+    detached: true,
+    stdio: 'ignore',
+    cwd: process.cwd(),
+    env: process.env,
+  })
+  child.unref()
+  if (child.pid === undefined) {
+    console.error('Could not start a background runtime.')
+    return 1
+  }
+  console.log(`Background runtime started (pid ${child.pid}). \`asc runtime status\` says whether it is observing.`)
+  console.log('`asc runtime stop` ends it.')
+  void values
+  return 0
+}
+
+/**
+ * 도는 runtime에게 끝내라고 한다.
+ *
+ * **lease를 지우는 것으로 멈추지 않는다** — 그러면 프로세스는 살아 있는데 아무도 그것을
+ * 모르는 상태가 된다. 신호를 보내고, 그 프로세스가 자기 lease를 놓게 한다.
+ */
+async function stopBackground(store: MarkdownStateStore): Promise<number> {
+  const scope = store.scope('runtime')
+  const state = await new RuntimeLease({ scope, owner: '(reader)' }).read()
+  if (state.kind === 'FREE') {
+    console.log('No background runtime is registered here.')
+    return 0
+  }
+  if (state.kind === 'STALE') {
+    // 죽은 프로세스가 남긴 기록이다. 신호를 보낼 곳이 없으므로 기록만 치운다.
+    await scope.delete('runtime-lease')
+    console.log(`Cleared a stale lease from pid ${state.record.pid} — nothing was running.`)
+    return 0
+  }
+  try {
+    process.kill(state.record.pid, 'SIGTERM')
+  } catch (error) {
+    // 이미 죽은 프로세스다. 기록만 남았으므로 치운다 — 못 지우면 그 사실을 말한다.
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+      console.error(`Could not signal pid ${state.record.pid}: ${String(error)}`)
+      return 1
+    }
+    await scope.delete('runtime-lease')
+    console.log(`pid ${state.record.pid} was already gone — cleared its lease.`)
+    return 0
+  }
+  console.log(`Asked pid ${state.record.pid} to finish its pass and stop.`)
   return 0
 }
 
