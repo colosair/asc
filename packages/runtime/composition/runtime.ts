@@ -216,6 +216,123 @@ export function rolesFor(
   return roles
 }
 
+/**
+ * 관측 capability — 이 셋은 **하나를 고르는 문제가 아니다** (설계 §8).
+ *
+ * 코드가 GitLab 에 있고 작업 항목이 Jira 에 있는 프로젝트에서 둘 다 봐야 한다는 것은
+ * 요구이지 모호함이 아니다. 그런데 지금까지는 같은 capability 를 둘이 제공한다는
+ * 이유만으로 AMBIGUOUS 가 되어 감시가 통째로 서지 않았다.
+ *
+ * 그래서 capability 를 두 부류로 가른다:
+ *
+ *   singular    canonical.read 처럼 **한 곳이어야** 의미가 서는 것 → 역할로 하나를 고른다
+ *   observation observe.delta · inventory.enumerate · context.resource → binding 마다 하나씩
+ */
+const OBSERVATION_CAPABILITIES: readonly Capability[] = [
+  'observe.delta',
+  'inventory.enumerate',
+  'context.resource',
+]
+
+/**
+ * 한 binding 이 여는 관측 통로 하나.
+ *
+ * **Monitor Core 는 이것을 여러 개 받는 것이 아니라, 하나씩 여러 번 받는다** — 채널마다
+ * 자기 cursor·coverage·observation ledger 를 갖는 별개의 Run 이다. 그래서 Core 에
+ * provider 분기도, multi-source 개념도 생기지 않는다 (설계 §8.1).
+ */
+export type ObservationChannel = {
+  /** Profile 이 선언한 역할. 선언이 없으면 발견된 자리라는 뜻으로 비어 있다. */
+  role?: string
+  adapterId: string
+  resource: string
+  /** DEGRADED 도 채널이다 — 일부만 되는 것과 안 되는 것은 다르다. */
+  state: ResolvedBinding['state']
+  detail?: string
+  eventSource: EventSource
+  inventory?: InventoryPort
+  resourceContext?: ResourceContextPort
+  changeContext?: ChangeContextPort
+}
+
+export type ObservationChannels = {
+  channels: ObservationChannel[]
+  /** 무엇을 왜 못 열었는지. 조용히 빠지면 사람이 이유를 알 수 없다. */
+  unavailable: string[]
+}
+
+/**
+ * 선언된 binding 마다 관측 통로를 하나씩 연다.
+ *
+ * **선언이 있으면 선언만 본다.** 과거 mirror 로 남은 remote 가 발견됐다는 이유로 채널이
+ * 하나 더 생기면, 사람이 고르지 않은 곳을 감시하게 된다 — 발견은 후보이지 결합이 아니다
+ * (C-11 §7). 선언이 하나도 없으면 발견된 것을 쓰되, 그때는 갈리면 갈린다고 말한다.
+ */
+export async function buildObservationChannels(input: BuildInput): Promise<ObservationChannels> {
+  const usable = input.plan.bindings.filter(
+    (binding) =>
+      (binding.state === 'AVAILABLE' || binding.state === 'DEGRADED') &&
+      OBSERVATION_CAPABILITIES.some((capability) => binding.provides.includes(capability)),
+  )
+  const declared = usable.filter((binding) => binding.role !== undefined)
+  const chosen = declared.length > 0 ? declared : usable
+
+  const channels: ObservationChannel[] = []
+  const unavailable: string[] = []
+
+  if (chosen.length === 0) {
+    const blocked = input.plan.bindings.filter((binding) =>
+      OBSERVATION_CAPABILITIES.some((capability) => binding.provides.includes(capability)),
+    )
+    unavailable.push(
+      blocked.length > 0
+        ? `관측 통로를 제공하는 binding 이 있으나 지금 쓸 수 없다 (${blocked
+            .map((binding) => `${binding.adapterId}: ${binding.state}`)
+            .join(', ')})`
+        : '관측 통로를 제공하는 binding 이 없다',
+    )
+    return { channels, unavailable }
+  }
+
+  const findToken =
+    input.findToken ??
+    (async (adapterId: string) =>
+      adapterId === 'gitlab' ? await discoverGitLabAccess() : await discoverToken())
+
+  for (const binding of chosen) {
+    const where = `${binding.adapterId}:${binding.resource}`
+    const factory = FACTORIES[binding.adapterId]
+    if (!factory) {
+      unavailable.push(`${where}: 이 빌드에 조립 경로가 없다`)
+      continue
+    }
+    const token = TOKENLESS.has(binding.adapterId) ? '' : await findToken(binding.adapterId)
+    if (token === null) {
+      // 자격이 없는 것은 "변화 없음"이 아니다 — 그 채널만 빠지고 이유가 남는다
+      unavailable.push(`${where}: 자격이 없어 관측 통로를 만들지 않았다`)
+      continue
+    }
+    const made = factory(binding, input, token)
+    if (!made.eventSource) {
+      unavailable.push(`${where}: ${binding.adapterId} 가 관측 통로를 만들지 않았다`)
+      continue
+    }
+    channels.push({
+      ...(binding.role ? { role: binding.role } : {}),
+      adapterId: binding.adapterId,
+      resource: binding.resource,
+      state: binding.state,
+      ...(binding.detail ? { detail: binding.detail } : {}),
+      eventSource: made.eventSource,
+      ...(made.inventory ? { inventory: made.inventory } : {}),
+      ...(made.resourceContext ? { resourceContext: made.resourceContext } : {}),
+      ...(made.changeContext ? { changeContext: made.changeContext } : {}),
+    })
+  }
+
+  return { channels, unavailable }
+}
+
 export async function buildRuntimePorts(input: BuildInput): Promise<RuntimePorts> {
   const ports: RuntimePorts = { unavailable: [] }
   // 자격은 adapter마다 다른 곳에 있다. Core는 이 사실을 모르고, 여기서만 안다.

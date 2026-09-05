@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import type { BindingPlan, Capability, ResolvedBinding } from '../core/binding/types.ts'
-import { buildRuntimePorts, rolesFor } from '../composition/runtime.ts'
+import { buildObservationChannels, buildRuntimePorts, rolesFor } from '../composition/runtime.ts'
 
 const CODE: Capability[] = ['observe.delta', 'inventory.enumerate', 'context.change', 'context.resource']
 
@@ -136,7 +136,8 @@ describe('B-49 Gate — provider 이름이 Surface에 박혀 있지 않다', () 
     // 조립은 Composition의 몫이다. 여기서 다시 new 하면 provider 교체가 CLI 수정이 된다.
     assert.doesNotMatch(block, /new GitHub/)
     assert.doesNotMatch(block, /new GitLab/)
-    assert.match(block, /ports\.eventSource/)
+    // 통로는 Composition이 만든 채널에서만 온다 — CLI가 provider를 아는 자리가 없다
+    assert.match(block, /channel\.eventSource/)
   })
 
   it('관측 기록 scope가 provider 이름으로 박혀 있지 않다', async () => {
@@ -144,5 +145,73 @@ describe('B-49 Gate — provider 이름이 Surface에 박혀 있지 않다', () 
     // 'github-poll' 은 이제 이전 설치를 읽기 위한 기본값 한 곳에만 남는다
     const occurrences = source.match(/monitor:github-poll/g) ?? []
     assert.deepEqual(occurrences, [], "scope 문자열에 provider 이름이 박혀 있다")
+  })
+})
+
+// 설계 §8 — 관측은 "하나를 고르는 문제"가 아니다.
+//
+// 코드가 한 곳에 있고 작업 항목이 다른 곳에 있는 프로젝트에서 둘 다 봐야 한다는 것은
+// 요구이지 모호함이 아니다. 그런데 같은 capability 를 둘이 제공한다는 이유만으로
+// AMBIGUOUS 가 되어 감시가 통째로 서지 않았다 (실 프로젝트 실측).
+describe('관측 채널 — 선언된 binding 마다 하나씩 (설계 §8)', () => {
+  const binding = (adapterId: string, resource: string, role?: string) => ({
+    adapterId,
+    resource,
+    provides: ['observe.delta', 'inventory.enumerate', 'context.resource'] as const,
+    state: 'AVAILABLE' as const,
+    discoveredBy: 'test',
+    ...(role ? { role } : {}),
+  })
+
+  const build = (bindings: ReturnType<typeof binding>[]) =>
+    buildObservationChannels({
+      plan: { bindings },
+      findToken: async () => 'x',
+      jam: { command: 'jam', args: ['serve'], cwd: '/p' },
+    })
+
+  it('선언이 둘이면 채널도 둘이다 — 어느 쪽도 다른 쪽을 밀어내지 않는다', async () => {
+    const built = await build([
+      binding('gitlab', 'group/project', 'code-primary'),
+      binding('jam', 'WORK', 'work'),
+    ])
+    assert.equal(built.channels.length, 2)
+    assert.deepEqual(built.channels.map((channel) => channel.role).sort(), ['code-primary', 'work'])
+    // 통로가 서로 다른 source id 를 갖는다 — cursor·coverage 가 갈려야 중복이 안 생긴다
+    assert.equal(new Set(built.channels.map((channel) => channel.eventSource.id)).size, 2)
+  })
+
+  it('선언이 있으면 발견만 된 것은 채널이 되지 않는다', async () => {
+    // 과거 mirror 로 남은 remote 가 있다는 이유로 감시 대상이 하나 더 생기면,
+    // 사람이 고르지 않은 곳을 보게 된다 (C-11 §7).
+    const built = await build([
+      binding('gitlab', 'group/project', 'code-primary'),
+      binding('github', 'owner/mirror'),
+    ])
+    assert.deepEqual(built.channels.map((channel) => channel.adapterId), ['gitlab'])
+  })
+
+  it('선언이 하나도 없으면 발견된 것을 쓴다 — 기존 사용을 끊지 않는다', async () => {
+    const built = await build([binding('github', 'owner/repo')])
+    assert.deepEqual(built.channels.map((channel) => channel.adapterId), ['github'])
+  })
+
+  it('열지 못한 통로는 이유가 남는다 — 조용히 빠지지 않는다', async () => {
+    const built = await buildObservationChannels({
+      plan: { bindings: [binding('gitlab', 'group/project', 'code-primary')] },
+      // 자격이 없는 것은 "변화 없음"이 아니다
+      findToken: async () => null,
+    })
+    assert.equal(built.channels.length, 0)
+    assert.match(built.unavailable.join('\n'), /자격이 없어/)
+  })
+
+  it('쓸 수 없는 binding 은 채널이 되지 않고, 그 사실을 말한다', async () => {
+    const built = await buildObservationChannels({
+      plan: { bindings: [{ ...binding('gitlab', 'group/project', 'code-primary'), state: 'UNCONFIGURED' }] },
+      findToken: async () => 'x',
+    })
+    assert.equal(built.channels.length, 0)
+    assert.match(built.unavailable.join('\n'), /지금 쓸 수 없다/)
   })
 })
