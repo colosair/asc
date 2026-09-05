@@ -70,7 +70,8 @@ import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
 import { LocalRepoAdapter } from '../adapters/local/repo.ts'
 import { GitHubAdapter } from '../adapters/github/adapter.ts'
 import { GitLabAdapter } from '../adapters/gitlab/adapter.ts'
-import { JamAdapter } from '../adapters/jam/adapter.ts'
+import { JamAdapter, resolveJamCommand } from '../adapters/jam/adapter.ts'
+import { healJam, healLine } from '../adapters/jam/setup.ts'
 import type { ChangeSummary } from '../ports/change-context.ts'
 import type { ContextComment, ResourceSnapshot } from '../ports/resource-context.ts'
 import { statusIndicatesDone } from '../adapters/jam/ports.ts'
@@ -1466,9 +1467,80 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     profileCandidates: await availableProfiles(installRoot(), externalProfileRoot()),
     scope,
     host: [{ id: 'claude', status: hostReport.status }],
+    // Profile 이 작업 도구를 선언했으면 그 준비 상태까지 본다 (설계 §9.3).
+    ...(await workBindingState(ascRoot, projectRoot)),
     // **bootstrap으로 들어왔을 때만 본다.** 설치된 runtime이 자기를 다시 설치할 이유가
     // 없고, 그 축을 안 그리면 plan은 설치된 `asc` 를 전제하지도 않는다 (C-14 §3.4).
     ...(entry === 'bootstrap' ? { stableRuntime: await detectStableInstall(nodeProcessRunner) } : {}),
+  }
+}
+
+/**
+ * Profile 이 선언한 작업 도구가 지금 쓸 수 있는가 (설계 §9.3).
+ *
+ * **선언이 없으면 아무것도 보지 않는다** — 선언되지 않은 도구를 준비시키는 것은
+ * 사람이 하지 않은 결정을 대신 내리는 일이다.
+ *
+ * 판정은 그 도구가 한다. 여기서 하는 것은 그 판정을 setup 이 읽을 수 있는 모양으로
+ * 옮기는 것뿐이고, 도구를 실행하지 못하면 이 축을 그리지 않는다(모르는 것을
+ * "준비 안 됨"으로 적지 않는다).
+ */
+async function workBindingState(
+  ascRoot: string | undefined,
+  projectRoot: string,
+): Promise<Pick<SetupState, 'workBinding'>> {
+  if (!ascRoot) return {}
+  const runtime = await attachedRuntime(ascRoot)
+  const declared = (runtime?.layers.profile.bindings ?? []).find((binding) => binding.role === 'work')
+  // 지금 준비 상태를 물어볼 수 있는 도구는 JAM 뿐이다. 다른 adapter 가 생기면 여기가 는다.
+  if (!declared || declared.adapter !== 'jam') return {}
+
+  const launcher = jamLauncher()
+  const adapter = new JamAdapter(
+    process.env.ASC_JAM_PATH ? {} : { command: launcher.command, args: launcher.args },
+  )
+  const status = await adapter
+    .runtime({ projectRoot, env: process.env })
+    .catch(() => ({ state: 'UNAVAILABLE' as const, detail: 'could not ask' }))
+  if (status.state === 'AVAILABLE') {
+    return { workBinding: { adapter: 'jam', resource: declared.resource, ready: true } }
+  }
+
+  const remedy = adapter.lastRemedy()
+  // 도구를 아예 못 불렀으면 이 축을 그리지 않는다 — 그 상태에서 "고쳐야 한다"고 적으면
+  // 설치되지 않은 기계에서 setup 이 영영 끝나지 않는다.
+  if (!remedy) return {}
+  const version = await jamVersion(projectRoot)
+  return {
+    workBinding: {
+      adapter: 'jam',
+      resource: declared.resource,
+      ready: false,
+      remedy: remedy.kind,
+      detail: remedy.detail,
+      ...(version ? { version } : {}),
+    },
+  }
+}
+
+/**
+ * JAM 이 말한 자기 버전. **여기서 정하지 않는다** — 두 제품의 릴리스를 묶지 않기 위해서다.
+ * 못 읽으면 undefined 이고, 그러면 계획이 그 도구를 부르지 않는다.
+ */
+async function jamVersion(projectRoot: string): Promise<string | undefined> {
+  const launcher = jamLauncher()
+  const { command, args } = resolveJamCommand(process.env, launcher.command, launcher.args)
+  try {
+    const { stdout } = await execFileAsync(command, [...args, 'doctor', '--json'], { cwd: projectRoot })
+    return (JSON.parse(stdout) as { axes?: { packageVersion?: string } }).axes?.packageVersion
+  } catch (error) {
+    const stdout = (error as { stdout?: string }).stdout
+    if (!stdout) return undefined
+    try {
+      return (JSON.parse(stdout) as { axes?: { packageVersion?: string } }).axes?.packageVersion
+    } catch {
+      return undefined
+    }
   }
 }
 
@@ -1660,6 +1732,12 @@ async function runSetupLifecycle(
       attachWorkspace: async (change) => {
         const code = await runInit({ ...values, profile: change.profile, scope: change.scope })
         if (code !== 0) throw new Error(`attach 실패 (exit ${code})`)
+      },
+      // 그 도구의 공식 setup 을 부른다. ASC 가 그 설정을 손으로 조립하지 않는다.
+      setupWorkBinding: async (change) => {
+        const outcome = await healJam({ cwd: process.cwd(), version: change.version })
+        console.log(healLine(outcome))
+        if (outcome.kind === 'FAILED') throw new Error(healLine(outcome))
       },
       installHost: async (change) => {
         const code = await runHost('claude', 'install', undefined, { ...values, json: false })

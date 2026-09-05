@@ -47,22 +47,31 @@ export async function composeBindings(input: ComposeInput): Promise<BindingPlan>
   const bindings: ResolvedBinding[] = []
   const runtimes: AdapterRuntime[] = []
 
+  // Profile 이 선언한 것을 발견 단계에 알려 준다. adapter 가 지역 흔적을 못 찾아도
+  // 사람이 적어 둔 결정은 후보가 될 수 있다 — 되는지는 여전히 probe 가 정한다 (C-09 §3.1).
+  const context: DiscoveryContext = {
+    ...input.context,
+    ...(input.roles?.length
+      ? { declared: input.roles.map((role) => ({ adapterId: role.adapterId, resource: role.resource })) }
+      : {}),
+  }
+
   for (const adapter of adapters) {
     // 도구가 쓸 수 있는가와 이 프로젝트가 그 도구에 붙어 있는가는 다른 사실이다.
     // 합치면 사람이 "설치할 일인지 붙일 일인지"를 알 수 없다.
     if (adapter.runtime) {
       const status = await adapter
-        .runtime(input.context)
+        .runtime(context)
         .catch((error: unknown) => ({ state: 'UNAVAILABLE' as const, detail: String(error) }))
       runtimes.push({ adapterId: adapter.describe().id, ...status })
     }
 
-    const candidates = await adapter.discover(input.context).catch(() => [])
+    const candidates = await adapter.discover(context).catch(() => [])
     for (const candidate of candidates) {
       // probe가 터지는 것과 "안 된다"는 다르다. 예외를 UNAVAILABLE로 옮겨 적되
       // 이유를 남긴다 — 조용히 후보에서 빼면 왜 안 보이는지 알 수 없다.
       const result: ProbeResult = await adapter
-        .probe(candidate, input.context)
+        .probe(candidate, context)
         .catch((error: unknown) => ({ state: 'UNAVAILABLE' as const, detail: String(error) }))
 
       const role = input.roles?.find(
