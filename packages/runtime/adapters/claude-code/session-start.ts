@@ -46,54 +46,30 @@ export function sessionStartScript(entry: string): string {
 //
 // **이 hook은 무엇도 막지 않는다.** 어떤 실패도 exit 0 이고, 그때 stdout은 비어 있다 —
 // 상태를 못 읽었다고 사람의 세션이 안 열리면 그것이 더 큰 고장이다.
+//
+// **workspace 신원을 여기서 판정하지 않는다.** 예전에는 index를 직접 뒤져 걸리지 않으면
+// 빠져나갔는데, 그러면 아직 등록되지 않은 linked worktree에서 Host를 처음 여는 경우가
+// 통째로 빠진다 — 그 자리를 풀 수 있는 것은 공용 resolver뿐이다 (C-11 §1.3).
+// 여기서 보는 것은 "이 기계가 ASC를 쓰기는 하는가" 한 가지이고, 그것은 신원이 아니다.
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 
 const ENTRY = ${JSON.stringify(entry)}
 /** 이 안에 못 끝내면 지나간다. 세션 시작을 기다리게 하지 않는다. */
 const BUDGET_MS = 10_000
 
-/** 경로 비교용 정규화. guard hook·index와 같은 규칙이어야 한다. */
-function normalizePath(path) {
-  const slashed = resolve(path).replace(/\\\\/g, '/').replace(/\\/+$/, '')
-  return /^[a-zA-Z]:/.test(slashed) ? slashed[0].toUpperCase() + slashed.slice(1) : slashed
-}
-
 /**
- * 이 경로가 등록된 workspace인가 — **읽기 한 번, 파싱 한 번**.
+ * 이 기계에 ASC runtime state가 있는가 — 파일 존재 확인 하나.
  *
- * 여기서 CLI를 먼저 부르지 않는 이유: ASC를 쓰지 않는 프로젝트에서 세션을 열 때마다
- * 프로세스를 하나 띄우게 된다. index에 없으면 그냥 지나간다.
- *
- * 등록돼 있지 않아도 저장소 안에 \`.asc\` 가 있으면 그것도 ASC 자리다(팀 채택·legacy).
+ * 없으면 어느 경로도 ASC 자리일 수 없으므로 CLI를 부르지 않는다. 이것은 workspace
+ * 판정이 아니라 "부를 이유가 있는가"이며, 그 판정은 아래 \`front open\` 이 한다.
  */
-function attachedHere(start) {
+function ascUsedHere() {
   const home = process.env.ASC_HOME || join(homedir(), '.asc')
-  try {
-    const index = JSON.parse(readFileSync(join(home, 'workspace-index.json'), 'utf8'))
-    const locators = (index && index.locators) || {}
-    let path = normalizePath(start)
-    for (;;) {
-      if (locators[path]) return true
-      const parent = path.slice(0, path.lastIndexOf('/'))
-      if (!parent || parent === path || /^[a-zA-Z]:$/.test(path)) break
-      path = parent
-    }
-  } catch {
-    // index가 없는 설치도 있다 — 아래 저장소 안 \`.asc\` 로 한 번 더 본다
-  }
-  let dir = resolve(start)
-  const stop = normalizePath(homedir())
-  for (;;) {
-    // 홈의 ~/.asc 는 user runtime이지 프로젝트 상태가 아니다
-    if (normalizePath(dir) === stop) return false
-    if (existsSync(join(dir, '.asc'))) return true
-    const parent = resolve(dir, '..')
-    if (parent === dir) return false
-    dir = parent
-  }
+  return existsSync(join(home, 'workspace-index.json')) || existsSync(join(home, 'workspaces'))
 }
 
 function main() {
@@ -106,8 +82,9 @@ function main() {
     // 읽지 못해도 계속한다 — 입력 형식 하나 때문에 복원을 통째로 버리지 않는다
   }
 
-  if (!attachedHere(cwd)) return
+  if (!ascUsedHere()) return
 
+  // 붙지 않은 자리에서도 이 명령은 성공하고 조용하다. 판정은 전부 저쪽이 한다.
   const run = spawnSync(process.execPath, [ENTRY, 'front', 'open', '--json'], {
     cwd,
     encoding: 'utf8',

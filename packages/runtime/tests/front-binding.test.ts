@@ -104,14 +104,27 @@ describe('openFront — Core는 Host를 모른다 (C-12 §4)', () => {
   })
 })
 
-describe('SessionStart hook — 세션을 막지 않는다', () => {
+describe('SessionStart hook — 세션을 막지 않고, 신원을 스스로 판정하지 않는다', () => {
   it('무슨 일이 나도 exit 0 이고, 부를 CLI 경로가 박혀 있다', () => {
     const script = sessionStartScript('/opt/asc/dist/cli/asc.js')
     assert.match(script, /process\.exit\(0\)/)
     assert.match(script, /\/opt\/asc\/dist\/cli\/asc\.js/)
-    // 등록되지 않은 자리에서는 CLI를 부르지도 않는다 — 세션마다 프로세스를 띄우지 않는다
-    assert.match(script, /attachedHere/)
     assert.match(script, /timeout: BUDGET_MS/)
+  })
+
+  it('workspace 신원을 hook 안에서 다시 구현하지 않는다', () => {
+    const script = sessionStartScript('/opt/asc/dist/cli/asc.js')
+    // 예전에는 hook이 index를 직접 걸어 올라가 판정했고, 그래서 아직 등록되지 않은
+    // linked worktree의 첫 Host open 이 통째로 빠졌다 (C-11 §1.3).
+    assert.doesNotMatch(script, /locators\[/, 'index의 locator 표를 직접 걷지 않는다')
+    assert.doesNotMatch(script, /spawnSync\(\s*'git'/, 'git을 직접 부르지 않는다')
+    // 대신 공용 문을 부른다
+    assert.match(script, /'front', 'open', '--json'/)
+  })
+
+  it('ASC를 쓰지 않는 기계에서는 CLI를 부르지 않는다', () => {
+    // 이것은 workspace 판정이 아니라 "부를 이유가 있는가"다
+    assert.match(sessionStartScript('/opt/asc/dist/cli/asc.js'), /workspace-index\.json/)
   })
 })
 
@@ -262,5 +275,31 @@ describe('설치 — 사람의 host 설정을 보존한다 (C-03 §5.1)', () => 
     } finally {
       await rm(p.dir, { recursive: true, force: true })
     }
+  })
+})
+
+// C-12 §4 + C-11 §1.3 — 미등록 linked worktree에서 Host를 **바로** 여는 경우.
+//
+// 이 조합이 실제 사용의 첫 순간이다: `git worktree add` 하고 그 자리에서 Claude 를 연다.
+// 그 전에 `asc` 명령을 한 번 치라고 요구하면 제품이 아니다.
+describe('first-open — 미등록 worktree에서 Host를 바로 연다', () => {
+  const opening = async (workspace: { workspaceId: string; locator: string } | null) =>
+    frontOpeningLines(
+      await openFront({
+        workspace,
+        // Surface 가 하는 일과 같다: 푼 자리를 상태에 실어 준다
+        restore: async () => ({ ...emptyState(), ...(workspace ? { workspace } : {}) }),
+      }),
+    )
+
+  it('공용 resolver가 푼 자리면 그대로 복원한다 — 등록 여부를 따로 묻지 않는다', async () => {
+    // resolver 가 LINKED_WORKTREE 로 풀어 준 자리를 그대로 받는다. Front 는 그 판정을
+    // 다시 하지 않는다 — 다시 하는 순간 두 곳이 다르게 답하기 시작한다.
+    const lines = await opening({ workspaceId: 'W-1', locator: '/w/feature' })
+    assert.match(lines.join('\n'), /W-1 · \/w\/feature/)
+  })
+
+  it('resolver 가 풀지 못한 자리는 조용하다 — 남의 프로젝트 세션에 오류를 얹지 않는다', async () => {
+    assert.deepEqual(await opening(null), [])
   })
 })
