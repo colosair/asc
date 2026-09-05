@@ -29,7 +29,7 @@ import {
   register,
   writeIndex,
 } from '../core/workspace/index-store.ts'
-import { resolveWorkspace, resolutionLine } from '../core/workspace/resolve.ts'
+import { parseWorktreeList, resolveWorkspace, resolutionLine } from '../core/workspace/resolve.ts'
 
 const NOW = '2026-08-26T21:00:00+09:00'
 
@@ -432,5 +432,194 @@ describe('B-45 — 남의 홈 .asc 를 프로젝트 상태로 오인하지 않�
       exists: fakeExists(['/repo/.asc']),
     })
     assert.equal(resolution.kind, 'PROJECT_LOCAL')
+  })
+})
+
+// C-11 §1.3 — 같은 Git repository의 다른 checkout은 같은 논리 workspace다.
+//
+// 지키는 문장 둘:
+//   같은 linked repository는 로컬에서 증명되므로 자동으로 이어붙는다
+//   remote만 같은 독립 clone은 증명이 아니므로 절대 이어붙지 않는다
+describe('linked worktree — 같은 workspace의 다른 execution instance', () => {
+  const NOW2 = '2026-09-05T00:00:00.000Z'
+  const anywhere = async () => true
+
+  // Windows 는 `resolve('/w/feature')` 를 `C:\\w\\feature` 로 만든다. 이 테스트가 보는 것은
+  // walk 논리이지 드라이브 문자가 아니므로, 비교 전에 구분자와 드라이브를 지운다.
+  const at = (path: string) => normalizeLocator(path).replace(/^[A-Za-z]:/, '')
+  const only = (paths: string[]) => async (path: string) => paths.includes(at(path))
+
+  const indexAt = (locator: string, root: string, workspaceId: string) =>
+    register(emptyIndex(), {
+      workspaceId,
+      root,
+      locator: { path: locator, platform: 'linux', observedAt: NOW2 },
+      now: NOW2,
+    })
+
+  /** git worktree list 대역. 첫 항목이 main worktree라는 계약을 그대로 흉내낸다. */
+  const worktrees = (paths: string[]) => async () => paths
+
+  it('등록된 main checkout이 있으면 미등록 linked worktree가 같은 workspace로 풀린다', async () => {
+    const id = newWorkspaceId()
+    const index = indexAt('/w/main', '/home/me/.asc/workspaces/W', id)
+
+    const resolved = await resolveWorkspace({
+      cwd: '/w/feature',
+      index,
+      exists: anywhere,
+      stopAt: '/home/me',
+      worktrees: worktrees(['/w/main', '/w/feature']),
+    })
+
+    assert.equal(resolved.kind, 'LINKED_WORKTREE')
+    assert.equal(resolved.kind === 'LINKED_WORKTREE' && resolved.workspaceId, id)
+    assert.equal(resolved.kind === 'LINKED_WORKTREE' && resolved.root, '/home/me/.asc/workspaces/W')
+    assert.equal(resolved.kind === 'LINKED_WORKTREE' && resolved.via, '/w/main')
+    // main이 아니므로 worktree다 — 등록될 때 이 값이 실린다
+    assert.equal(resolved.kind === 'LINKED_WORKTREE' && resolved.kindOfLocator, 'worktree')
+  })
+
+  it('worktree 안의 하위 디렉터리에서도 그 worktree 최상위로 풀린다', async () => {
+    const id = newWorkspaceId()
+    const index = indexAt('/w/main', '/home/me/.asc/workspaces/W', id)
+
+    const resolved = await resolveWorkspace({
+      cwd: '/w/feature/packages/runtime/core',
+      index,
+      exists: anywhere,
+      worktrees: worktrees(['/w/main', '/w/feature']),
+    })
+
+    // 등록되는 것은 cwd가 아니라 checkout 최상위다 — 그래야 형제 디렉터리도 walk-up으로 붙는다
+    assert.equal(resolved.kind === 'LINKED_WORKTREE' && resolved.locator, '/w/feature')
+  })
+
+  it('이름이 접두어로 겹치는 checkout을 삼키지 않는다', async () => {
+    const id = newWorkspaceId()
+    const index = indexAt('/w/repo', '/home/me/.asc/workspaces/W', id)
+
+    const resolved = await resolveWorkspace({
+      // `/w/repo-2` 는 `/w/repo` 로 시작하지만 다른 checkout이다
+      cwd: '/w/repo-2/src',
+      index,
+      exists: anywhere,
+      worktrees: worktrees(['/w/repo', '/w/repo-2']),
+    })
+
+    assert.equal(resolved.kind === 'LINKED_WORKTREE' && resolved.locator, '/w/repo-2')
+  })
+
+  it('remote만 같은 독립 clone은 이어붙지 않는다', async () => {
+    // clone B에서 부른 `git worktree list` 는 B의 checkout만 든다.
+    // A의 경로가 목록에 없으므로 근거가 서지 않는다 (C-11 불변식 ③).
+    const index = indexAt('/clones/a', '/home/me/.asc/workspaces/W', newWorkspaceId())
+
+    const resolved = await resolveWorkspace({
+      cwd: '/clones/b',
+      index,
+      exists: only([]),
+      stopAt: '/home/me',
+      worktrees: worktrees(['/clones/b']),
+    })
+
+    assert.equal(resolved.kind, 'UNRESOLVED')
+  })
+
+  it('형제 checkout들이 서로 다른 workspace면 고르지 않는다', async () => {
+    const first = newWorkspaceId()
+    const second = newWorkspaceId()
+    let index = indexAt('/w/one', '/home/me/.asc/workspaces/W1', first)
+    index = register(index, {
+      workspaceId: second,
+      root: '/home/me/.asc/workspaces/W2',
+      locator: { path: '/w/two', platform: 'linux', observedAt: NOW2 },
+      now: NOW2,
+    })
+
+    const resolved = await resolveWorkspace({
+      cwd: '/w/three',
+      index,
+      exists: anywhere,
+      worktrees: worktrees(['/w/one', '/w/two', '/w/three']),
+    })
+
+    assert.equal(resolved.kind, 'UNRESOLVED')
+    assert.match(resolved.kind === 'UNRESOLVED' ? resolved.detail : '', /고르지 않는다/)
+  })
+
+  it('형제가 가리키는 runtime이 사라졌으면 조용히 다음 후보로 넘어가지 않는다', async () => {
+    const index = indexAt('/w/main', '/home/me/.asc/workspaces/gone', newWorkspaceId())
+
+    const resolved = await resolveWorkspace({
+      cwd: '/w/feature',
+      index,
+      // runtime 뿌리는 없고 worktree 안에는 .asc 가 있다 — 그래도 그리로 붙지 않는다
+      exists: only(['/w/feature/.asc']),
+      stopAt: '/home/me',
+      worktrees: worktrees(['/w/main', '/w/feature']),
+    })
+
+    assert.equal(resolved.kind, 'UNRESOLVED')
+    assert.match(resolved.kind === 'UNRESOLVED' ? resolved.detail : '', /옮겼거나 지워졌다/)
+  })
+
+  it('등록된 locator로 풀리는 정상 경로에서는 Git을 부르지 않는다', async () => {
+    const id = newWorkspaceId()
+    const index = indexAt('/w/main', '/home/me/.asc/workspaces/W', id)
+    let asked = 0
+
+    const resolved = await resolveWorkspace({
+      cwd: '/w/main/src',
+      index,
+      exists: anywhere,
+      worktrees: async () => {
+        asked += 1
+        return ['/w/main']
+      },
+    })
+
+    assert.equal(resolved.kind, 'REGISTERED')
+    // guard hook이 매 Bash 호출마다 지나는 길이다 — 여기서 subprocess가 생기면 안 된다
+    assert.equal(asked, 0, 'index가 맞으면 Git을 부르지 않는다')
+  })
+
+  it('저장소가 아니거나 git이 없으면 예전 그대로 동작한다', async () => {
+    const resolved = await resolveWorkspace({
+      cwd: '/repo/src',
+      index: emptyIndex(),
+      exists: only(['/repo/.asc']),
+      stopAt: '/home/me',
+      worktrees: async () => null,
+    })
+
+    assert.equal(resolved.kind, 'PROJECT_LOCAL')
+  })
+
+  it('porcelain 출력에서 checkout 경로만 순서대로 읽는다', () => {
+    const stdout = [
+      'worktree /w/main',
+      'HEAD 0123456789abcdef0123456789abcdef01234567',
+      'branch refs/heads/main',
+      '',
+      'worktree /w/feature',
+      'HEAD 89abcdef0123456789abcdef0123456789abcdef',
+      'detached',
+      '',
+    ].join('\n')
+
+    assert.deepEqual(parseWorktreeList(stdout), ['/w/main', '/w/feature'])
+  })
+
+  it('사람이 읽는 줄에 무엇을 근거로 붙었는지 남는다', () => {
+    const line = resolutionLine({
+      kind: 'LINKED_WORKTREE',
+      root: '/home/me/.asc/workspaces/W',
+      workspaceId: 'W-00000000000000000000000000000000',
+      locator: '/w/feature',
+      via: '/w/main',
+      kindOfLocator: 'worktree',
+    })
+    assert.match(line, /same git repository as \/w\/main/)
   })
 })
