@@ -21,7 +21,7 @@ const item = (over: Partial<ResourceSnapshot> = {}): ResourceSnapshot => ({
 
 const repo = (over: Partial<RepoObservation> = {}): RepoObservation => ({
   branch: 'front',
-  remotes: [{ name: 'origin', url: 'https://lab.ssafy.com/g/p.git' }],
+  remotes: [{ name: 'origin', url: 'https://git.example.com/g/p.git' }],
   refs: [],
   canonicalRef: 'origin/develop',
   // 기본 픽스처는 신선한 관측이다 — 신선도 자체를 다루는 케이스가 이 값을 덮는다.

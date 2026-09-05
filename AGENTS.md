@@ -245,7 +245,7 @@ is a value nobody can correct later.
 
 ### Fill in what you can, then ask about one thing
 
-"S15P21A604-247 구현해" already carries more than it looks like:
+"ABC-1234 구현해" already carries more than it looks like:
 
 ```text
 id        FACT       the person named the work item
