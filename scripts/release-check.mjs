@@ -210,13 +210,39 @@ if (note !== null) {
 // A JSON example carrying an old release version reads as the current release
 // (the 0.2.0 example lived in the README for two releases). Any quoted
 // "version": "x.y.z" in the consumer docs must be the current version.
+//
+// This ran for four releases without being able to fail: the pattern was written
+// unescaped, so `s*` asked for a literal `s` and `d+` for a literal `d`, and it
+// matched nothing at all. A gate that cannot fail is worse than no gate — it
+// reads as coverage. Escaped, and given a self-test below so an edit that breaks
+// it again is caught by the same run.
+const versionLiteral = /"version":\s*"(\d+\.\d+\.\d+)"/g
+check(
+  [...'"version": "9.9.9"'.matchAll(versionLiteral)].map((m) => m[1]).join('') === '9.9.9',
+  'the version-literal pattern still matches a version literal',
+)
 for (const path of docs) {
   const source = await text(path)
-  const staleVersionLiterals = [...source.matchAll(/"version":s*"(d+.d+.d+)"/g)]
+  const staleVersionLiterals = [...source.matchAll(versionLiteral)]
     .map((m) => m[1])
     .filter((v) => v !== version)
   check(staleVersionLiterals.length === 0, `no stale "version" literal in ${path}`, staleVersionLiterals.join(', '))
 }
+
+// ── product status carries no release version ──────────────────────────────
+// `docs/status.md` claimed a current release and drifted four releases behind,
+// because nothing required it to move and nothing here looked at it. The fix is
+// not another thing to remember: the file states what the product does and what
+// is proven, and the published packages state which version that is. One fact,
+// one place. This gate keeps a version from creeping back in.
+const statusPath = 'docs/status.md'
+const statusSource = await text(statusPath)
+const releaseClaims = [...statusSource.matchAll(/v?\d+\.\d+\.\d+/g)].map((m) => m[0])
+check(
+  releaseClaims.length === 0,
+  `${statusPath} names no release version — the packages and the latest Release are that answer`,
+  releaseClaims.join(', '),
+)
 
 // SECURITY.md — 없는 채널을 있다고 적지 않는다
 const security = await text('SECURITY.md')
