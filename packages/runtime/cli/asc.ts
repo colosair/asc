@@ -121,6 +121,7 @@ import { Orchestrator, renderTick } from '../core/runtime/orchestrator.ts'
 import {
   LAST_RUN_KEY,
   RuntimeLease,
+  fileScope,
   readBackground,
   renderBackground,
   staleAfter,
@@ -3925,6 +3926,31 @@ async function runRuntimeService(
  * DORMANT 는 건너뛴다. 살아 있는 checkout 이 없는 자리를 대신해 외부에 묻지 않는다.
  */
 async function runRuntimeTickAll(values: Record<string, unknown>): Promise<number> {
+  // 기계 수준 lease. workspace lease 와 다른 소유 영역이다 (설계 §5.1) — 저쪽은 회차
+  // 하나를, 이쪽은 이 기계의 runtime 을 직렬화한다. 등록된 서비스와 사람이 친 명령이
+  // 겹치면 늦게 온 쪽이 조용히 물러난다 (C-12 불변식 ⑥).
+  const interval = serviceInterval(values) * 1000
+  const lease = new RuntimeLease({
+    scope: fileScope(join(ascHome(), 'runtime-lease.json')),
+    owner: `${process.pid}@${hostname()}`,
+    staleMs: staleAfter(interval),
+  })
+  if (!(await lease.acquire())) {
+    const held = await lease.read()
+    const detail = held.kind === 'HELD' ? ` (pid ${held.record.pid})` : ''
+    if (values.json) console.log(JSON.stringify({ ran: [], skipped: [], busy: true }, null, 2))
+    else console.log(`Another machine-wide pass is already running${detail} — leaving it to that one.`)
+    return 0
+  }
+
+  try {
+    return await tickAllWorkspaces(values, lease)
+  } finally {
+    await lease.release()
+  }
+}
+
+async function tickAllWorkspaces(values: Record<string, unknown>, lease: RuntimeLease): Promise<number> {
   const views = await machineWorkspaces()
   const due = dueWorkspaces(views)
   const skipped = views.filter((view) => view.health !== 'ACTIVE')
@@ -3937,6 +3963,9 @@ async function runRuntimeTickAll(values: Record<string, unknown>): Promise<numbe
       env: process.env,
     })
     results.push({ workspaceId: workspace.workspaceId, code: child.status ?? 1 })
+    // 회차가 길어져도 이 기계의 lease 는 살아 있어야 한다 — 갱신하지 않으면 도는 중에
+    // 죽은 것으로 보이고 두 번째 프로세스가 끼어든다.
+    await lease.renew()
   }
 
   if (values.json) {

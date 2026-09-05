@@ -6,6 +6,9 @@
 //   "안 돌고 있다"와 "돌았는데 변화가 없다"를 합치지 않는다 (불변식 ⑫)
 
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
@@ -13,6 +16,7 @@ import {
   MIN_STALE_MS,
   RUNTIME_LEASE_KEY,
   RuntimeLease,
+  fileScope,
   readBackground,
   renderBackground,
   staleAfter,
@@ -190,5 +194,42 @@ describe('background status — 안 돌고 있음과 변화 없음을 합치지 
     await scope.set(LAST_RUN_KEY, '{ broken')
     const status = await readBackground(scope, MIN_STALE_MS)
     assert.deepEqual(status.lastRun, {})
+  })
+})
+
+// 설계 §5.1 — 서비스 lease 와 workspace lease 는 다른 소유 영역이다.
+describe('기계 수준 lease — 파일 하나 위에 선다', () => {
+  it('없거나 깨진 파일을 빈 것으로 읽되, 쓰면 원자적으로 남는다', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'asc-lease-'))
+    try {
+      const path = join(dir, 'nested', 'runtime-lease.json')
+      const scope = fileScope(path)
+      assert.equal(await scope.get(RUNTIME_LEASE_KEY), null)
+
+      const first = new RuntimeLease({ scope, owner: 'first', pid: 1 })
+      assert.equal(await first.acquire(), true)
+      // 다른 프로세스가 같은 파일을 본다
+      const second = new RuntimeLease({ scope: fileScope(path), owner: 'second', pid: 2 })
+      assert.equal(await second.acquire(), false)
+
+      const state = await second.read()
+      assert.equal(state.kind === 'HELD' && state.record.pid, 1)
+
+      await first.release()
+      assert.equal(await second.acquire(), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('깨진 파일이 lease 를 영영 막지 않는다', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'asc-lease-'))
+    try {
+      const path = join(dir, 'runtime-lease.json')
+      await writeFile(path, 'not json', 'utf8')
+      assert.equal(await new RuntimeLease({ scope: fileScope(path), owner: 'fresh' }).acquire(), true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
