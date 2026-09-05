@@ -634,7 +634,17 @@ export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime')
     console.log(RELEASE_VERSION)
     return 0
   }
-  return runParsedCommand(values, positionals, entry, argv)
+  try {
+    return await runParsedCommand(values, positionals, entry, argv)
+  } finally {
+    // **어느 명령이든** 자기가 띄운 도구 자식을 닫는다 (JAM MCP 서버 등).
+    //
+    // 예전에는 `proceed` 한 곳에서만 닫았다. 감시 경로가 JAM 통로를 열게 되자
+    // `monitor scan` 과 `runtime tick` 이 할 일을 다 하고도 종료하지 못했고, 등록된
+    // 서비스가 회차마다 그 프로세스를 하나씩 남겼다 — 실측에서 10분 넘게 살아 있었다.
+    // 닫는 자리를 명령마다 두면 언젠가 또 빠진다. 나가는 문은 하나다.
+    await closeToolClients()
+  }
 }
 
 function parseArgsOrThrow(argv: string[]) {
