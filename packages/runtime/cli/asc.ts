@@ -76,7 +76,7 @@ import type { ContextComment, ResourceSnapshot } from '../ports/resource-context
 import { statusIndicatesDone } from '../adapters/jam/ports.ts'
 import { ProgressService } from '../core/operator/progress.ts'
 import { composeBindings, defaultAdapters } from '../composition/registry.ts'
-import { buildRuntimePorts, closeToolClients, rolesFor } from '../composition/runtime.ts'
+import { buildObservationChannels, buildRuntimePorts, closeToolClients, rolesFor } from '../composition/runtime.ts'
 import { proposeBindings } from '../composition/propose.ts'
 import { buildEventObservation } from '../composition/observe.ts'
 import { availableProfiles, planBootstrap, renderPlan, type PolicyId } from '../core/attach/bootstrap.ts'
@@ -409,17 +409,64 @@ const ACTIVE_SOURCE_KEY = 'active-source'
  * digest처럼 조립을 하지 않는 명령도 같은 자리를 읽어야 하는데, 그걸 알아내려고 discovery와
  * probe를 다시 돌리면 화면 하나 그리자고 외부를 친다. 그래서 monitor가 돌 때 적어 둔다.
  */
-async function rememberMonitorSource(store: MarkdownStateStore, sourceId: string): Promise<void> {
-  await store.scope('monitor').set(ACTIVE_SOURCE_KEY, sourceId)
+async function rememberMonitorSources(store: MarkdownStateStore, sourceIds: readonly string[]): Promise<void> {
+  await store.scope('monitor').set(ACTIVE_SOURCE_KEY, JSON.stringify([...sourceIds]))
 }
 
 /**
- * 마지막으로 붙었던 통로의 scope. 기록이 없으면 예전 이름으로 본다 —
- * 이전 설치의 shadow 기록이 이름이 바뀌었다는 이유로 사라진 것처럼 보이면 안 된다.
+ * 마지막으로 붙었던 통로들.
+ *
+ * 예전에는 문자열 하나였다 — 통로가 하나뿐이라는 전제였고, 코드와 작업 항목이 다른 곳에
+ * 있는 프로젝트에서 그 전제가 깨졌다. 옛 기록(문자열 하나)도 그대로 읽는다: 형식이
+ * 바뀌었다는 이유로 이전 설치의 shadow 기록이 사라진 것처럼 보이면 안 된다.
  */
+async function activeMonitorSources(store: MarkdownStateStore): Promise<string[]> {
+  const raw = await store.scope('monitor').get(ACTIVE_SOURCE_KEY)
+  if (!raw) return ['github-poll']
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (Array.isArray(parsed) && parsed.every((id) => typeof id === 'string')) {
+      return parsed.length > 0 ? (parsed as string[]) : ['github-poll']
+    }
+  } catch {
+    // 옛 형식이다 — 문자열 하나
+  }
+  return [raw]
+}
+
+/** 통로별 scope. 기록이 하나뿐이던 시절의 호출부는 첫 통로를 본다. */
+async function activeMonitorScopes(store: MarkdownStateStore): Promise<string[]> {
+  return (await activeMonitorSources(store)).map(monitorScope)
+}
+
 async function activeMonitorScope(store: MarkdownStateStore): Promise<string> {
-  const sourceId = await store.scope('monitor').get(ACTIVE_SOURCE_KEY)
-  return monitorScope(sourceId ?? 'github-poll')
+  return (await activeMonitorScopes(store))[0]!
+}
+
+/**
+ * JAM 을 부르는 방법. **한 곳에서만 정한다** — 감시와 작업 조사가 서로 다른 방법으로
+ * JAM 을 부르면 한쪽만 되는 상태가 생긴다(실제로 그랬다: 감시 경로는 이 값을 아예 넘기지
+ * 않아 선언된 JAM binding 이 통로를 만들지 못했다).
+ */
+const jamLauncher = (): { command: string; args: string[] } =>
+  process.env.ASC_JAM_PATH
+    ? { command: process.env.ASC_JAM_PATH, args: [] }
+    : { command: 'npx', args: ['--yes', '@jam-mcp/launcher'] }
+
+/** 조립 입력에 실을 JAM 갈래. */
+const jamComposition = (projectRoot: string) => {
+  const launcher = jamLauncher()
+  return { jam: { command: launcher.command, args: [...launcher.args, 'serve'], cwd: projectRoot } }
+}
+
+/** 이 빌드가 아는 adapter 들. 감시와 작업 조사가 같은 목록을 본다. */
+const monitorAdapters = (): Adapter[] => {
+  const launcher = jamLauncher()
+  return [
+    new GitHubAdapter(),
+    new GitLabAdapter(),
+    new JamAdapter(process.env.ASC_JAM_PATH ? {} : { command: launcher.command, args: launcher.args }),
+  ]
 }
 
 /** user-owned ASC home. */
@@ -2357,13 +2404,7 @@ async function buildWorkIngress(
   resolved?: ResolvedRuntime,
 ): Promise<WorkIngress | undefined> {
   const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  // JAM 은 아직 `jam` 바이너리를 깔지 않는 설치가 기본이다 — 그 경우 launcher 를 통해 부른다.
-  const jamCommand = process.env.ASC_JAM_PATH ? undefined : { command: 'npx', args: ['--yes', '@jam-mcp/launcher'] }
-  const adapters = [
-    new GitHubAdapter(),
-    new GitLabAdapter(),
-    new JamAdapter(jamCommand ?? {}),
-  ]
+  const adapters = monitorAdapters()
   const declared = resolved?.layers.profile.bindings ?? []
   const plan = await composeBindings({
     context: { projectRoot, env: process.env },
@@ -2382,7 +2423,7 @@ async function buildWorkIngress(
     // capability 해석은 후보가 유일할 때 이미 스스로 풀린다.
     roles: rolesFor(plan, declared),
     perPage: 30,
-    jam: { command: jamCommand?.command ?? 'jam', args: [...(jamCommand?.args ?? []), 'serve'], cwd: projectRoot },
+    ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
   })
 
@@ -3428,20 +3469,20 @@ function parseEnumArg<T extends string>(
 
 /** 한 회차 감지. 읽기만 하고, 무엇을 할지는 사람이 정한다. */
 /**
- * 감시 엔진을 세운다. **조립과 출력을 나눈다** — 상시 Runtime(C-12)이 같은 엔진을
- * 주기적으로 부르려면 조립이 명령 출력 안에 갇혀 있으면 안 된다.
+ * 이 workspace 의 관측 통로들을 만든다 (설계 §8).
+ *
+ * **한 개가 아니라 N 개다.** 코드가 GitLab 에 있고 작업 항목이 Jira 에 있으면 둘 다 봐야
+ * 하고, 그것은 모호함이 아니라 선언이다. 채널마다 Engine 을 하나씩 세우므로 cursor·
+ * coverage·observation ledger·lease 가 채널별로 갈라지고, Monitor Core 는 예전 그대로
+ * 통로 하나만 아는 물건으로 남는다 — Core 에 provider 분기가 생기지 않는다.
  */
-async function buildMonitorEngine(
+type MonitorChannel = { engine: MonitorEngine; sourceId: string; label: string }
+
+async function buildMonitorEngines(
   values: Record<string, unknown>,
   store: MarkdownStateStore,
   resolved: ResolvedRuntime,
-): Promise<{ ok: true; engine: MonitorEngine; sourceId: string; repo: string } | { ok: false; code: number }> {
-  const token = await discoverToken()
-  if (!token) {
-    console.error('No GitHub token found. Set ASC_GITHUB_TOKEN, or run `gh auth login`.')
-    return { ok: false, code: 2 }
-  }
-
+): Promise<{ ok: true; channels: MonitorChannel[]; repo: string } | { ok: false; code: number }> {
   // 감시 대상도, 누가 나인지도, 누가 승인자인지도 전부 설정에서 온다.
   // 명령줄로 받던 값들은 각자 제자리(Profile·Override)를 찾았다.
   const repo = resolved.layers.profile.project.repository
@@ -3458,81 +3499,99 @@ async function buildMonitorEngine(
   // provider를 CLI가 고르지 않는다. 선언된 요구와 실제 remote에서 Binding이 풀리고,
   // 갈리면 고르지 않고 말한다 — silent substitution 0 (C-11 §7).
   const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const adapters = defaultAdapters()
+  const adapters = monitorAdapters()
   const declared = resolved.layers.profile.bindings ?? []
   const plan = await composeBindings({
     context: { projectRoot, env: process.env },
     adapters,
     roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
   })
-  const ports = await buildRuntimePorts({
+  const built = await buildObservationChannels({
+    plan,
+    perPage: 30,
+    ...jamComposition(projectRoot),
+    endpointFor: (binding) => endpointOf(adapters, binding),
+  })
+  // canonical.read 처럼 한 곳이어야 의미가 서는 것은 예전 경로 그대로 역할로 고른다.
+  const singular = await buildRuntimePorts({
     plan,
     roles: rolesFor(plan, declared),
     perPage: 30,
+    ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
   })
-  if (!ports.eventSource) {
+
+  if (built.channels.length === 0) {
     console.error('No monitoring channel could be built:')
-    for (const reason of ports.unavailable) console.error(`  - ${reason}`)
+    for (const reason of built.unavailable) console.error(`  - ${reason}`)
     console.error('\nDeclare which provider takes which role in the Profile bindings.')
     return { ok: false, code: 2 }
   }
 
   const canonicalPaths = resolved.layers.profile.canonical.sources.flatMap((source) => source.paths)
   const myRoles = resolved.layers.override?.monitor.roles ?? []
-  const changeContext = ports.changeContext
-  const engine = new MonitorEngine({
-    store,
-    source: ports.eventSource,
-    ...(ports.scm ? { scm: ports.scm } : {}),
-    ...(ports.inventory ? { inventory: ports.inventory } : {}),
-    // 밖에서 알아 온 사실을 실제로 공급한다 (C-07 §2~§4). 이것이 없으면 Relevance·
-    // Shadow·Material Change가 코드에만 있고 실행 경로에는 없다.
-    ...(changeContext
-      ? {
-          observe: buildEventObservation({
-            change: changeContext,
-            ...(resolved.ownership ? { ownership: resolved.ownership } : {}),
-            ...(myRoles.length ? { myRoles } : {}),
-            ...(canonicalPaths.length ? { canonicalPaths } : {}),
-          }),
-        }
-      : {}),
-    // scope는 실제로 붙은 source가 정한다 — provider 이름을 CLI가 박지 않는다.
-    observations: new ObservationLedger(store.scope(monitorScope(ports.eventSource.id))),
-    // 조사 단계가 요청하는 통로들. 없는 것은 그 단계가 판정 불성립으로 남는다 (C-07 §6.2).
-    // 없는 것을 있는 척하지 않는다.
-    investigation: {
-      ...(ports.resourceContext ? { resource: ports.resourceContext } : {}),
-      ...(changeContext ? { change: changeContext } : {}),
-    },
-    // Core는 Profile을 모른다 — 조사에 필요한 프로젝트 사실을 Surface가 꺼내 준다.
-    investigationContext: () => ({
-      ...(resolved.ownership ? { ownership: resolved.ownership } : {}),
-      canonicalPaths,
-    }),
-    config: resolved.monitor,
-    authorizedApprover: approver,
-    canonicalSources: resolved.canonicalSources,
-    // 처음 돌 때 과거를 통째로 긁으면 사람이 읽을 수 없다 (OM §18)
-    ...(values.backfill ? {} : { startFrom: new Date().toISOString() }),
+
+  const channels: MonitorChannel[] = built.channels.map((channel) => {
+    const changeContext = channel.changeContext
+    const engine = new MonitorEngine({
+      store,
+      source: channel.eventSource,
+      // 정본 대조는 채널이 아니라 프로젝트의 사실이다 — 역할로 고른 하나를 함께 쓴다.
+      ...(singular.scm ? { scm: singular.scm } : {}),
+      ...(channel.inventory ? { inventory: channel.inventory } : {}),
+      // 밖에서 알아 온 사실을 실제로 공급한다 (C-07 §2~§4). 이것이 없으면 Relevance·
+      // Shadow·Material Change가 코드에만 있고 실행 경로에는 없다.
+      ...(changeContext
+        ? {
+            observe: buildEventObservation({
+              change: changeContext,
+              ...(resolved.ownership ? { ownership: resolved.ownership } : {}),
+              ...(myRoles.length ? { myRoles } : {}),
+              ...(canonicalPaths.length ? { canonicalPaths } : {}),
+            }),
+          }
+        : {}),
+      // scope는 실제로 붙은 source가 정한다 — 채널이 둘이면 기록도 둘로 갈린다.
+      observations: new ObservationLedger(store.scope(monitorScope(channel.eventSource.id))),
+      // 조사 단계가 요청하는 통로들. 없는 것은 그 단계가 판정 불성립으로 남는다 (C-07 §6.2).
+      // 없는 것을 있는 척하지 않는다.
+      investigation: {
+        ...(channel.resourceContext ? { resource: channel.resourceContext } : {}),
+        ...(changeContext ? { change: changeContext } : {}),
+      },
+      // Core는 Profile을 모른다 — 조사에 필요한 프로젝트 사실을 Surface가 꺼내 준다.
+      investigationContext: () => ({
+        ...(resolved.ownership ? { ownership: resolved.ownership } : {}),
+        canonicalPaths,
+      }),
+      config: resolved.monitor,
+      authorizedApprover: approver,
+      canonicalSources: resolved.canonicalSources,
+      // 처음 돌 때 과거를 통째로 긁으면 사람이 읽을 수 없다 (OM §18)
+      ...(values.backfill ? {} : { startFrom: new Date().toISOString() }),
+    })
+    return {
+      engine,
+      sourceId: channel.eventSource.id,
+      label: `${channel.role ?? '(undeclared)'} · ${channel.adapterId}:${channel.resource}`,
+    }
   })
 
-  await rememberMonitorSource(store, ports.eventSource.id)
+  await rememberMonitorSources(store, channels.map((channel) => channel.sourceId))
 
   // **밀려난 후보를 말한다.** 실 프로젝트 관측에서 나온 것이다: primary가 자격 없음으로
   // 빠지고 mirror에 조용히 붙으면 "감시가 도는데 아무것도 안 잡히는" 상태가 된다.
   // 고르는 것 자체는 막지 않되, 무엇이 밀렸는지 모르게 두지 않는다 (C-11 §7).
   const skipped = plan.bindings.filter((b) => b.state !== 'AVAILABLE' && b.state !== 'DEGRADED')
   if (skipped.length > 0) {
-    console.error(`Monitoring runs on ${ports.eventSource.id}. Some candidates could not be used:`)
+    console.error('Some candidates could not be used:')
     for (const binding of skipped) {
       console.error(`  - ${binding.adapterId}:${binding.resource} — ${binding.state}${binding.detail ? ` (${binding.detail})` : ''}`)
     }
   }
-  for (const reason of ports.unavailable) console.error(`  - ${reason}`)
+  for (const reason of built.unavailable) console.error(`  - ${reason}`)
 
-  return { ok: true, engine, sourceId: ports.eventSource.id, repo }
+  return { ok: true, channels, repo }
 }
 
 /**
@@ -3557,9 +3616,9 @@ async function runRuntime(
     return 2
   }
 
-  const built = await buildMonitorEngine(values, store, resolved)
+  const built = await buildMonitorEngines(values, store, resolved)
   if (!built.ok) return built.code
-  const { engine } = built
+  const { channels } = built
 
   const minutes = (value: unknown, fallback: number): number =>
     value === undefined ? fallback * 60_000 : Number(value) * 60_000
@@ -3587,22 +3646,35 @@ async function runRuntime(
       },
     },
     actions: {
+      // 채널마다 돈다. 한 채널이 터져도 나머지는 계속한다 — 자격 하나가 상했다고
+      // 다른 통로까지 조용해지면 그것이 "변경 없음"으로 읽힌다 (C-12 불변식 ⑫).
       delta: async () => {
-        const outcome = await engine.scan()
-        if (outcome.skipped) return
-        console.log(`  detected ${outcome.detected} · logged ${outcome.logged} · packets ${outcome.packets.length}`)
+        for (const channel of channels) {
+          const outcome = await channel.engine.scan().catch((error: unknown) => {
+            console.error(`  [${channel.label}] scan failed — ${String(error)}`)
+            return null
+          })
+          if (!outcome || outcome.skipped) continue
+          console.log(`  [${channel.label}] detected ${outcome.detected} · logged ${outcome.logged} · packets ${outcome.packets.length}`)
+        }
       },
       reconcile: async () => {
-        const sweep = await engine.reconcile()
-        if (!sweep.skipped && !sweep.complete) {
-          // 못 본 것을 "변경 없음"으로 읽지 않는다 (C-12 불변식 ⑫)
-          console.error(`  Reconcile did not complete${sweep.detail ? ` — ${sweep.detail}` : ''}`)
+        for (const channel of channels) {
+          const sweep = await channel.engine.reconcile().catch((error: unknown) => {
+            console.error(`  [${channel.label}] reconcile failed — ${String(error)}`)
+            return null
+          })
+          if (sweep && !sweep.skipped && !sweep.complete) {
+            console.error(`  [${channel.label}] reconcile did not complete${sweep.detail ? ` — ${sweep.detail}` : ''}`)
+          }
         }
       },
       census: async () => {
-        const sweep = await engine.census()
-        if (!sweep.skipped && sweep.missing.length > 0) {
-          console.log(`  ${sweep.missing.length} known items absent from this listing`)
+        for (const channel of channels) {
+          const sweep = await channel.engine.census().catch(() => null)
+          if (sweep && !sweep.skipped && sweep.missing.length > 0) {
+            console.log(`  [${channel.label}] ${sweep.missing.length} known items absent from this listing`)
+          }
         }
       },
       digest: async () => {
@@ -4015,56 +4087,75 @@ async function runMonitor(
     return 2
   }
 
-  const built = await buildMonitorEngine(values, store, resolved)
+  const built = await buildMonitorEngines(values, store, resolved)
   if (!built.ok) return built.code
-  const { engine, repo } = built
+  const { channels, repo } = built
+
+  // 채널마다 자기 회차를 돈다. **한 채널의 실패가 다른 채널을 세우지 않는다** — 코드 쪽이
+  // 자격을 잃었다고 작업 항목 쪽까지 못 보게 되면, 그것이 곧 "변화 없음"으로 읽힌다.
+  let worst = 0
 
   // 어디까지 확인했는지 보여주기만 한다. 판정하지도, 무엇을 고치지도 않는다.
   if (command === 'status') {
-    const health = await engine.health()
-    console.log(values.json ? JSON.stringify(health, null, 2) : renderHealth(repo, health).join('\n'))
+    if (values.json) {
+      const perChannel = []
+      for (const channel of channels) {
+        perChannel.push({ channel: channel.label, source: channel.sourceId, health: await channel.engine.health() })
+      }
+      console.log(JSON.stringify({ repo, channels: perChannel }, null, 2))
+      return 0
+    }
+    for (const channel of channels) {
+      console.log(`[${channel.label}]`)
+      console.log(renderHealth(repo, await channel.engine.health()).join('\n'))
+    }
     return 0
   }
 
   if (command === 'reconcile' || command === 'census') {
-    const sweep = command === 'reconcile' ? await engine.reconcile() : await engine.census()
-    if (sweep.skipped) {
-      console.log('Another run is in progress. The next pass will pick it up.')
-      return 0
+    for (const channel of channels) {
+      const sweep = command === 'reconcile' ? await channel.engine.reconcile() : await channel.engine.census()
+      if (sweep.skipped) {
+        console.log(`[${channel.label}] another run is in progress. The next pass will pick it up.`)
+        continue
+      }
+      if (values.json) {
+        console.log(JSON.stringify({ channel: channel.label, ...sweep }, null, 2))
+      } else {
+        console.log(`[${channel.label}] ${sweep.kind}: ${sweep.seen} listed · ${sweep.changed} changed · ${sweep.packets.length} packets`)
+        if (sweep.missing.length > 0) {
+          console.log(`  ${sweep.missing.length} known items absent from this listing: ${sweep.missing.join(', ')}`)
+          console.log('  (whether that is deletion, permissions, visibility or a query error is not judged here — a person looks)')
+        }
+      }
+      if (!sweep.complete) {
+        // 완주하지 못한 회차를 성공으로 보이면 "확인했다"는 거짓말이 된다
+        console.error(`[${channel.label}] the listing did not complete${sweep.detail ? ` — ${sweep.detail}` : ''}. This pass makes no judgement about disappearances.`)
+        worst = 1
+      }
     }
-    if (values.json) {
-      console.log(JSON.stringify(sweep, null, 2))
-      return sweep.complete ? 0 : 1
-    }
-    console.log(`${sweep.kind}: ${sweep.seen} listed · ${sweep.changed} changed · ${sweep.packets.length} packets`)
-    if (sweep.missing.length > 0) {
-      console.log(`${sweep.missing.length} known items absent from this listing: ${sweep.missing.join(', ')}`)
-      console.log('  (whether that is deletion, permissions, visibility or a query error is not judged here — a person looks)')
-    }
-    if (!sweep.complete) {
-      // 완주하지 못한 회차를 성공으로 보이면 "확인했다"는 거짓말이 된다
-      console.error(`The listing did not complete${sweep.detail ? ` — ${sweep.detail}` : ''}. This pass makes no judgement about disappearances.`)
-      return 1
-    }
-    return 0
+    return worst
   }
 
-  const outcome = await engine.scan()
-
-  if (outcome.skipped) {
-    console.log('Another scan is in progress. The next pass will pick it up.')
-    return 0
+  let packets = 0
+  for (const channel of channels) {
+    const outcome = await channel.engine.scan()
+    if (outcome.skipped) {
+      console.log(`[${channel.label}] another scan is in progress. The next pass will pick it up.`)
+      continue
+    }
+    console.log(
+      `[${channel.label}] 감지 ${outcome.detected} · 중복 ${outcome.duplicates} · 기록 ${outcome.logged} · ` +
+        `보고서 ${outcome.packets.length} · 재시도 ${outcome.retries.length}`,
+    )
+    packets += outcome.packets.length
   }
-  console.log(
-    `감지 ${outcome.detected} · 중복 ${outcome.duplicates} · 기록 ${outcome.logged} · ` +
-      `보고서 ${outcome.packets.length} · 재시도 ${outcome.retries.length}`,
-  )
-  if (outcome.packets.length > 0) {
+  if (packets > 0) {
     const operator = new LocalOperator({ store })
     console.log()
     console.log(renderer.renderList(await operator.list()).text)
   }
-  return 0
+  return worst
 }
 
 /**
