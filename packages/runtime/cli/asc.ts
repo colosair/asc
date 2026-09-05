@@ -1525,6 +1525,30 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
 }
 
 /**
+ * 지금 도는 것이 **설치된 패키지인가.**
+ *
+ * 등록물은 지금 도는 진입점의 절대 경로를 박는다. checkout 이나 일회용 prefix 에서
+ * 등록하면 사라질 경로를 기계에 남기는 일이 된다 — 등록은 이 기계에 오래 남을 설치본이
+ * 스스로 할 때만 의미가 있다.
+ */
+function runningFromInstalledPackage(): boolean {
+  return fileURLToPath(import.meta.url).replace(/\\/g, '/').includes('/node_modules/@asc-agent/runtime/')
+}
+
+/**
+ * 지금 이 실행에서 기계 등록을 다뤄도 되는가.
+ *
+ * **기계 서비스는 HOME 으로 격리되지 않는다.** ASC_HOME 을 옮겨도 launchd·Task
+ * Scheduler·systemd 는 같은 기계 하나를 본다 — 그래서 격리된 환경에서 setup 을 통째로
+ * 돌려 보는 검증에는 이 축을 끄는 길이 필요하다. 그 길이 없으면 검증이 실행한 기계에
+ * 진짜 서비스를 남긴다.
+ */
+function serviceRegistrationAllowed(): boolean {
+  if (process.env.ASC_SERVICE === 'off') return false
+  return runningFromInstalledPackage()
+}
+
+/**
  * 이 기계에 ASC runtime 이 등록돼 있는가 (설계 §6, Gate 7).
  *
  * 물어볼 수 없으면 이 축을 그리지 않는다 — 모르는 것을 "해야 한다"로 적으면 설치되지
@@ -1533,6 +1557,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
 async function persistentRuntimeState(
   values: Record<string, unknown>,
 ): Promise<Pick<SetupState, 'persistentRuntime'>> {
+  if (!serviceRegistrationAllowed()) return {}
   const adapter = serviceAdapter()
   if (!adapter) return {}
   const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values))).catch(() => null)
@@ -1809,8 +1834,15 @@ async function runSetupLifecycle(
       registerPersistentRuntime: async () => {
         const adapter = serviceAdapter()
         if (!adapter) return
-        await adapter.install(serviceCommand(serviceInterval(values)))
-        console.log(`Persistent runtime registered with ${adapter.id}.`)
+        try {
+          await adapter.install(serviceCommand(serviceInterval(values)))
+          console.log(`Persistent runtime registered with ${adapter.id}.`)
+        } catch (error) {
+          // **등록 실패는 attach 실패가 아니다.** 기계 등록은 이 프로젝트가 붙는 것과
+          // 다른 축이고, 서비스 관리자가 없거나 거절하는 환경은 흔하다. 조용히 넘기지도
+          // 않는다 — 무엇이 안 됐는지 말하고, 상태는 `runtime status` 가 계속 답한다.
+          console.error(`Persistent runtime could not be registered with ${adapter.id}: ${String(error)}`)
+        }
       },
       // 그 도구의 공식 setup 을 부른다. ASC 가 그 설정을 손으로 조립하지 않는다.
       setupWorkBinding: async (change) => {

@@ -5,6 +5,7 @@
 //   못 하는 것을 "할 일"로 적지 않는다
 
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { describe, it } from 'node:test'
 
 import { applySetupPlan, computeSetupPlan, renderSetupPlan } from '../core/attach/setup-plan.ts'
@@ -82,5 +83,33 @@ describe('setup — 지속 등록은 같은 계획에 든다', () => {
       },
     })
     assert.equal(registered, 1)
+  })
+})
+
+// 등록은 기계 하나를 바꾼다 — 아무 실행에서나 하지 않는다.
+describe('등록을 시도해도 되는 실행인가', () => {
+  it('checkout 에서 도는 실행은 이 축을 그리지 않는다', async () => {
+    // 등록물은 지금 도는 진입점의 절대 경로를 박는다. checkout 경로를 기계에 박으면
+    // 그 경로가 사라진 뒤에도 서비스가 남는다.
+    const source = await readFile(new URL('../cli/asc.ts', import.meta.url), 'utf8')
+    assert.match(source, /runningFromInstalledPackage/)
+    assert.match(source, /node_modules\/@asc-agent\/runtime\//)
+    // setup 판정이 그 문을 먼저 지난다
+    assert.match(source, /if \(!serviceRegistrationAllowed\(\)\) return \{\}/)
+  })
+
+  it('격리 검증이 이 축을 끌 수 있다 — HOME 으로는 격리되지 않기 때문이다', async () => {
+    const source = await readFile(new URL('../cli/asc.ts', import.meta.url), 'utf8')
+    assert.match(source, /ASC_SERVICE === 'off'/)
+    const smoke = await readFile(new URL('../../../scripts/tarball-smoke.mjs', import.meta.url), 'utf8')
+    assert.match(smoke, /ASC_SERVICE: 'off'/)
+  })
+
+  it('등록 실패가 attach 실패가 되지 않는다', async () => {
+    const source = await readFile(new URL('../cli/asc.ts', import.meta.url), 'utf8')
+    const block = source.slice(source.indexOf('registerPersistentRuntime: async'))
+    // 던지면 프로젝트가 붙는 것까지 같이 실패한다 — 다른 축이다
+    assert.match(block.slice(0, 700), /catch \(error\)/)
+    assert.doesNotMatch(block.slice(0, 700), /throw new Error/)
   })
 })

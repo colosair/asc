@@ -94,8 +94,10 @@ describe('Persistent Runtime Port — 계획과 실행을 나눈다', () => {
 
 describe('macOS LaunchAgent', () => {
   it('사용자 자리에 산다 — root daemon 이 아니다', () => {
-    assert.match(plistPath('/Users/me'), /^\/Users\/me\/Library\/LaunchAgents\//)
-    assert.doesNotMatch(plistPath('/Users/me'), /^\/Library\/LaunchDaemons/)
+    // 구분자는 OS 가 정한다 — 이 테스트가 보는 것은 "사용자 홈 아래인가"이지 구분자가 아니다
+    const path = plistPath('/Users/me').replaceAll('\\', '/')
+    assert.match(path, /^\/Users\/me\/Library\/LaunchAgents\//)
+    assert.doesNotMatch(path, /^\/Library\/LaunchDaemons/)
   })
 
   it('한 회차만 도는 명령을 주기와 함께 등록한다', () => {
@@ -170,7 +172,7 @@ describe('Windows Scheduled Task', () => {
 
 describe('Linux systemd --user', () => {
   it('사용자 자리에 산다', () => {
-    assert.match(unitDir('/home/me'), /^\/home\/me\/\.config\/systemd\/user$/)
+    assert.match(unitDir('/home/me').replaceAll('\\', '/'), /^\/home\/me\/\.config\/systemd\/user$/)
   })
 
   it('lingering 을 조용히 켜지 않는다 — 로그아웃 뒤 동작은 사람의 결정이다', async () => {
