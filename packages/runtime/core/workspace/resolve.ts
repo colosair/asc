@@ -237,7 +237,7 @@ async function findProjectLocal(
     const candidate = join(dir, ASC_DIR)
     // 정지선이 홈이어도 **다른 홈**의 `.asc` 는 걸러지지 않는다. Windows는 temp
     // 디렉터리가 사용자 프로필 아래라, temp의 프로젝트에서 위로 걷다 실사용자
-    // `~/.asc` 를 프로젝트 상태로 오인했다 (SSAFESTA 실측 — setup status가
+    // `~/.asc` 를 프로젝트 상태로 오인했다 (실 프로젝트 실측 — setup status가
     // UNATTACHED 대신 BROKEN을 답한 원인). user runtime은 내용으로 알아본다:
     // workspaces/·profiles/·runtime.json 은 홈에만 생긴다.
     if ((await exists(candidate)) && !(await looksLikeUserRuntime(candidate, exists))) return dir
@@ -274,3 +274,4 @@ export function resolutionLine(resolution: Resolution): string {
       return `no runtime — ${resolution.detail}`
   }
 }
+

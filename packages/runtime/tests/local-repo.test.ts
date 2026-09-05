@@ -5,7 +5,7 @@ import { describe, it } from 'node:test'
 
 import { LocalRepoAdapter, type GitRunner } from '../adapters/local/repo.ts'
 
-const REFS = ['front', 'feat/S15P21A604-87-booth-slot-real-api', 'origin/develop', 'origin/front'].join('\n')
+const REFS = ['front', 'feat/ABC-87-booth-slot-real-api', 'origin/develop', 'origin/front'].join('\n')
 
 const gitWith = (over: Record<string, string | null> = {}, merged = true): GitRunner => {
   const calls: string[] = []
@@ -14,7 +14,7 @@ const gitWith = (over: Record<string, string | null> = {}, merged = true): GitRu
     calls.push(key)
     if (key in over) return over[key]!
     if (args[0] === 'rev-parse') return 'front\n'
-    if (args[0] === 'remote') return 'origin\thttps://lab.ssafy.com/g/p.git (fetch)\norigin\thttps://lab.ssafy.com/g/p.git (push)\n'
+    if (args[0] === 'remote') return 'origin\thttps://git.example.com/g/p.git (fetch)\norigin\thttps://git.example.com/g/p.git (push)\n'
     if (args[0] === 'for-each-ref') return REFS
     if (args[0] === 'merge-base') return merged ? '' : null
     if (args[0] === 'cat-file') return merged ? '' : null
@@ -28,22 +28,22 @@ describe('P0-E — 로컬 저장소 관측', () => {
   it('작업 항목 키로 ref 를 찾고 정본 병합 여부를 읽는다', async () => {
     const repo = new LocalRepoAdapter({ cwd: '/x', git: gitWith(), exists: async () => true })
     const seen = await repo.observe({
-      refHint: 'S15P21A604-87',
+      refHint: 'ABC-87',
       canonicalRef: 'origin/develop',
       paths: ['fe/src/SlotListPage.tsx'],
     })
 
     assert.equal(seen.branch, 'front')
-    assert.deepEqual(seen.refs, ['feat/S15P21A604-87-booth-slot-real-api'])
+    assert.deepEqual(seen.refs, ['feat/ABC-87-booth-slot-real-api'])
     assert.equal(seen.mergedIntoCanonical, true)
     assert.equal(seen.pathsExist['fe/src/SlotListPage.tsx'], true)
     assert.equal(seen.pathsOnCanonical?.['fe/src/SlotListPage.tsx'], true)
-    assert.deepEqual(seen.remotes, [{ name: 'origin', url: 'https://lab.ssafy.com/g/p.git' }])
+    assert.deepEqual(seen.remotes, [{ name: 'origin', url: 'https://git.example.com/g/p.git' }])
   })
 
   it('병합되지 않은 가지는 병합됨으로 읽지 않는다', async () => {
     const repo = new LocalRepoAdapter({ cwd: '/x', git: gitWith({}, false), exists: async () => false })
-    const seen = await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'origin/develop', paths: ['a.ts'] })
+    const seen = await repo.observe({ refHint: 'ABC-87', canonicalRef: 'origin/develop', paths: ['a.ts'] })
 
     assert.equal(seen.mergedIntoCanonical, false)
     assert.equal(seen.pathsExist['a.ts'], false)
@@ -61,7 +61,7 @@ describe('P0-E — 로컬 저장소 관측', () => {
 
   it('정본 ref 를 주지 않으면 병합 여부를 지어내지 않는다', async () => {
     const repo = new LocalRepoAdapter({ cwd: '/x', git: gitWith() })
-    const seen = await repo.observe({ refHint: 'S15P21A604-87' })
+    const seen = await repo.observe({ refHint: 'ABC-87' })
 
     assert.equal(seen.mergedIntoCanonical, undefined)
     assert.equal(seen.canonicalRef, undefined)
@@ -154,7 +154,7 @@ describe('P0-2 — 언급 커밋이 남긴 것이 지금도 있는가', () => {
   })
 })
 
-// ── A1/A3 회귀 (0.3.1) — SSAFESTA 실전 사고 고정 ──────────────────────────────
+// ── A1/A3 회귀 (0.3.1) — 실전 사고 고정 ──────────────────────────────
 //
 // 사고: fetch 없는 관측이 로컬 브랜치를 정본처럼 읽어, 원격에 이미 병합된 작업을
 // "구현 증거 없음"으로 오판했다. 신선도는 관측의 속성으로 명시돼야 한다.
@@ -164,7 +164,7 @@ describe('A1 — 정본 신선도 (Freshness Gate)', () => {
     const git = gitWith({ 'fetch origin develop': '' })
     const repo = new LocalRepoAdapter({ cwd: '/x', git, exists: async () => false })
 
-    const seen = await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'develop', remote: 'origin' })
+    const seen = await repo.observe({ refHint: 'ABC-87', canonicalRef: 'develop', remote: 'origin' })
 
     assert.equal(seen.freshness?.state, 'FRESH')
     assert.equal(seen.canonicalRef, 'origin/develop')
@@ -175,7 +175,7 @@ describe('A1 — 정본 신선도 (Freshness Gate)', () => {
     const git = gitWith({ 'fetch origin develop': null, 'rev-parse --verify --quiet origin/develop': '' })
     const repo = new LocalRepoAdapter({ cwd: '/x', git, exists: async () => false })
 
-    const seen = await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'develop', remote: 'origin' })
+    const seen = await repo.observe({ refHint: 'ABC-87', canonicalRef: 'develop', remote: 'origin' })
 
     assert.equal(seen.freshness?.state, 'FETCH_FAILED')
     // 당기지 못했어도 원격 추적 ref 가 로컬 브랜치보다 정본에 가깝다.
@@ -186,7 +186,7 @@ describe('A1 — 정본 신선도 (Freshness Gate)', () => {
   it('remote 미선언이면 UNKNOWN — 신선하다고 말하지 않는다', async () => {
     const repo = new LocalRepoAdapter({ cwd: '/x', git: gitWith(), exists: async () => false })
 
-    const seen = await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'origin/develop' })
+    const seen = await repo.observe({ refHint: 'ABC-87', canonicalRef: 'origin/develop' })
 
     assert.equal(seen.freshness?.state, 'UNKNOWN')
   })
@@ -194,20 +194,20 @@ describe('A1 — 정본 신선도 (Freshness Gate)', () => {
 
 describe('A3 — 내용 등가 (rebase·squash 로 SHA 가 갈린 경우)', () => {
   it('같은 patch 다른 SHA — cherry 가 전부 - 면 정본 반영으로 관측한다', async () => {
-    const git = gitWith({ 'cherry origin/develop feat/S15P21A604-87-booth-slot-real-api': '- abc123\n- def456\n' }, false)
+    const git = gitWith({ 'cherry origin/develop feat/ABC-87-booth-slot-real-api': '- abc123\n- def456\n' }, false)
     const repo = new LocalRepoAdapter({ cwd: '/x', git, exists: async () => false })
 
-    const seen = await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'origin/develop' })
+    const seen = await repo.observe({ refHint: 'ABC-87', canonicalRef: 'origin/develop' })
 
     assert.equal(seen.mergedIntoCanonical, false)
     assert.equal(seen.contentEquivalent, true)
   })
 
   it('진짜 다른 patch(+ 존재)를 반영됐다고 오판하지 않는다', async () => {
-    const git = gitWith({ 'cherry origin/develop feat/S15P21A604-87-booth-slot-real-api': '- abc123\n+ eee999\n' }, false)
+    const git = gitWith({ 'cherry origin/develop feat/ABC-87-booth-slot-real-api': '- abc123\n+ eee999\n' }, false)
     const repo = new LocalRepoAdapter({ cwd: '/x', git, exists: async () => false })
 
-    const seen = await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'origin/develop' })
+    const seen = await repo.observe({ refHint: 'ABC-87', canonicalRef: 'origin/develop' })
 
     assert.equal(seen.contentEquivalent, false)
   })
@@ -215,7 +215,7 @@ describe('A3 — 내용 등가 (rebase·squash 로 SHA 가 갈린 경우)', () =
   it('cherry 를 읽지 못하면 모른다고 한다 — undefined', async () => {
     const repo = new LocalRepoAdapter({ cwd: '/x', git: gitWith({}, false), exists: async () => false })
 
-    const seen = await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'origin/develop' })
+    const seen = await repo.observe({ refHint: 'ABC-87', canonicalRef: 'origin/develop' })
 
     assert.equal(seen.contentEquivalent, undefined)
   })
@@ -224,7 +224,7 @@ describe('A3 — 내용 등가 (rebase·squash 로 SHA 가 갈린 경우)', () =
     const git = gitWith()
     const repo = new LocalRepoAdapter({ cwd: '/x', git, exists: async () => false })
 
-    await repo.observe({ refHint: 'S15P21A604-87', canonicalRef: 'origin/develop' })
+    await repo.observe({ refHint: 'ABC-87', canonicalRef: 'origin/develop' })
 
     assert.ok(!(git as GitRunner & { calls: string[] }).calls.some((c) => c.startsWith('cherry')))
   })
