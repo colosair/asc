@@ -224,7 +224,7 @@ describe('B-69 Gate — agent 표면 (C-14 §7, 불변식 ⑫)', () => {
   })
 })
 
-describe('ASC-2 — 붙이다 만 상태는 붙일 것이 남은 상태다 (SSAFESTA Windows 실측)', () => {
+describe('ASC-2 — 붙이다 만 상태는 붙일 것이 남은 상태다 (Windows 실전 실측)', () => {
   it('BROKEN attachment는 repair(attach-workspace)를 계획에 싣는다', () => {
     const plan = computeSetupPlan(
       state({ ascRoot: '/w', attachmentBroken: true, requestedProfile: 'pilot-local' }),
