@@ -30,7 +30,9 @@ async function snapshot(repo: string): Promise<Snapshot> {
       const rel = relative(repo, full).split(sep).join('/')
       if (rel.startsWith('.git/') || rel === '.git') {
         if (entry.isDirectory()) await walk(full)
-        else gitFiles.push(rel)
+        // git 자체가 잠깐 만드는 잠금 파일(`objects/maintenance.lock` 등)은 우리 발자국이
+        // 아니다 — CI 에서 자동 유지보수와 겹쳐 이 검사가 거짓 실패했다.
+        else if (!entry.name.endsWith('.lock')) gitFiles.push(rel)
         continue
       }
       if (entry.isDirectory()) await walk(full)
