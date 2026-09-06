@@ -67,6 +67,8 @@ import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
 import { evaluateHealth, healthAlertLines } from '../core/monitor/health-alerts.ts'
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
+import type { ScmPort } from '../ports/scm.ts'
+import { LocalCanonicalReader } from '../adapters/local/canonical.ts'
 import { LocalRepoAdapter } from '../adapters/local/repo.ts'
 import { GitHubAdapter } from '../adapters/github/adapter.ts'
 import { GitLabAdapter } from '../adapters/gitlab/adapter.ts'
@@ -2161,13 +2163,26 @@ async function runProfile(command: string | undefined, values: Record<string, un
  * Profile이 정의한 정본을 실제로 읽을 통로. 토큰이 없으면 만들지 않는다 —
  * 그 경우 baseline 기록·대조는 건너뛰고, 건너뛰었다는 사실이 계약에 빈 snapshot으로 남는다.
  */
-async function scmFor(resolved?: ResolvedRuntime): Promise<GitHubScm | undefined> {
+async function scmFor(resolved?: ResolvedRuntime): Promise<ScmPort | undefined> {
   if (!resolved) return undefined
+
+  const sources = resolved.layers.profile.canonical.sources
+  // Profile 은 갈래마다 provider 를 적는다. `git` 이라고 적힌 것은 이 checkout 이 이미
+  // 들고 있는 사실이므로 원격 API 로 가지 않는다 — 갈 수 있다는 보장도 없다.
+  if (sources.length > 0 && sources.every((source) => source.provider === 'git')) {
+    const { root } = await discoverProjectRoot(process.cwd())
+    const refs: Record<string, { ref: string; remote?: string }> = {}
+    for (const source of sources) {
+      if (source.ref) refs[source.id] = { ref: source.ref, ...(source.remote ? { remote: source.remote } : {}) }
+    }
+    return new LocalCanonicalReader({ cwd: root, sourceRefs: refs })
+  }
+
   const token = await discoverToken()
   if (!token) return undefined
 
   const sourceRefs: Record<string, { ref: string }> = {}
-  for (const source of resolved.layers.profile.canonical.sources) {
+  for (const source of sources) {
     if (source.ref) sourceRefs[source.id] = { ref: source.ref }
   }
   return new GitHubScm({
