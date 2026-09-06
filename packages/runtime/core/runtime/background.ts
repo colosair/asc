@@ -21,6 +21,18 @@ import type { TickKind } from './orchestrator.ts'
 export const RUNTIME_LEASE_KEY = 'runtime-lease'
 /** 마지막 회차 시각이 사는 열쇠. Orchestrator가 쓰고 status가 읽는다. */
 export const LAST_RUN_KEY = 'last-run'
+/**
+ * 마지막 기계 회차가 이 workspace 에서 **어떻게 끝났는가** (0.7.0 / Phase J).
+ *
+ * 실측 하나가 이 열쇠의 출처다. 이 기계의 workspace 세 개 중 둘이 여러 릴리스 동안
+ * 회차를 한 번도 통과하지 못했는데, 화면 어디에도 그 말이 없었다 — 붙어 있고, 등록물도
+ * 서 있고, 그래서 건강해 보였다. 실패는 `service.log` 에만 흘러갔고 아무도 그것을 읽지
+ * 않는다.
+ *
+ * 새 상태 저장소가 아니다. 이미 회차가 쓰고 status 가 읽는 같은 scope 의 기록 하나이며,
+ * 판정도 하지 않는다 — 무슨 일이 있었는지만 적는다.
+ */
+export const LAST_PASS_KEY = 'last-pass'
 
 /**
  * lease가 죽은 것으로 보이기까지의 최소 시간.
@@ -157,12 +169,65 @@ export class RuntimeLease {
   }
 }
 
+/** 마지막 기계 회차가 이 workspace 에서 어떻게 끝났는가. */
+export type PassRecord = {
+  at: string
+  /** 회차 프로세스의 종료 코드. 0 이 아니면 그 회차는 이 workspace 를 돌지 못했다. */
+  code: number
+  /** 연속 실패 횟수. 한 번 삐끗한 것과 계속 안 되는 것은 다른 사실이다. */
+  consecutiveFailures: number
+  /** 마지막으로 통과한 시각. 한 번도 없으면 비어 있다. */
+  lastOkAt?: string
+}
+
 export type BackgroundStatus = {
   lease: LeaseState
   /** 갈래별 마지막 실행 시각. 없는 갈래는 한 번도 돌지 않았다. */
   lastRun: Partial<Record<TickKind, string>>
+  /** 마지막 기계 회차의 결말. 한 번도 돌지 않았으면 없다. */
+  lastPass?: PassRecord
   /** 회수 기준. 사람이 "얼마나 조용하면 죽은 것인가"를 알아야 판단할 수 있다. */
   staleMs: number
+}
+
+/**
+ * 회차 결말을 적는다. **판정하지 않는다** — 코드와 연속 실패 수를 세어 둘 뿐이다.
+ *
+ * 이전 기록을 읽어 이어 세므로, 성공 한 번이 실패의 역사를 지운다. 그것이 맞다:
+ * 지금 돌고 있다면 사람이 볼 것은 지금이다.
+ */
+export async function recordPass(
+  scope: ScopedStore,
+  code: number,
+  at: string = new Date().toISOString(),
+): Promise<PassRecord> {
+  let previous: PassRecord | undefined
+  const raw = await scope.get(LAST_PASS_KEY)
+  if (raw) {
+    try {
+      previous = JSON.parse(raw) as PassRecord
+    } catch {
+      // 못 읽는 기록은 없는 것으로 본다 — 이 값 때문에 회차가 멈추면 안 된다
+    }
+  }
+  const record: PassRecord = {
+    at,
+    code,
+    consecutiveFailures: code === 0 ? 0 : (previous?.consecutiveFailures ?? 0) + 1,
+    ...(code === 0 ? { lastOkAt: at } : previous?.lastOkAt ? { lastOkAt: previous.lastOkAt } : {}),
+  }
+  await scope.set(LAST_PASS_KEY, JSON.stringify(record))
+  return record
+}
+
+/** 붙어 있다는 것과 돌고 있다는 것은 다른 사실이다. 무엇이 어긋났는지 한 줄로 말한다. */
+export function passLine(record: PassRecord | undefined): string | null {
+  if (!record || record.code === 0) return null
+  const since = record.lastOkAt ? `last good pass ${record.lastOkAt}` : 'no pass has ever succeeded here'
+  return (
+    `Background runtime: DEGRADED — the last machine pass exited ${record.code} ` +
+    `(${record.consecutiveFailures} in a row, ${since}). Attached is not the same as observed.`
+  )
 }
 
 /** 상태를 모은다. **읽기만 한다** — 보는 것이 상태를 바꾸면 아무도 못 본다. */
@@ -177,7 +242,16 @@ export async function readBackground(scope: ScopedStore, staleMs: number, now: (
       // 깨진 기록은 없는 것으로 본다 — 아래 렌더가 "한 번도 돌지 않았다"로 말한다
     }
   }
-  return { lease, lastRun, staleMs }
+  let lastPass: PassRecord | undefined
+  const passRaw = await scope.get(LAST_PASS_KEY)
+  if (passRaw) {
+    try {
+      lastPass = JSON.parse(passRaw) as PassRecord
+    } catch {
+      // 깨진 기록은 없는 것으로 본다
+    }
+  }
+  return { lease, lastRun, ...(lastPass ? { lastPass } : {}), staleMs }
 }
 
 const ORDER: TickKind[] = ['delta', 'reconcile', 'census', 'digest']
@@ -190,9 +264,20 @@ const ORDER: TickKind[] = ['delta', 'reconcile', 'census', 'digest']
  */
 export function renderBackground(status: BackgroundStatus): string[] {
   const lines: string[] = []
+  // 회차가 서 있는 것과 그 회차가 이 자리를 실제로 돌았는지는 다른 사실이다.
+  // 어긋나 있으면 lease 상태보다 먼저 말한다 — 아래 줄들은 "돌고 있다" 로 읽힌다.
+  const degraded = passLine(status.lastPass)
+  if (degraded) lines.push(degraded)
   switch (status.lease.kind) {
     case 'FREE':
-      lines.push('Background runtime: not running — `asc runtime start --detach` keeps it observing')
+      // **정상 경로는 기계 등록물이다** (0.4.0 이 그렇게 정했다: "those surfaces exist for
+      // development and recovery, not for the normal path"). 그런데 이 줄은 사람에게
+      // 개발용 명령을 정상 경로로 안내하고 있었다 — 화면이 결정과 어긋나 있으면 사람은
+      // 화면을 따른다.
+      lines.push(
+        'Background runtime: not running — this machine observes through its registration ' +
+          '(`asc runtime service status` shows it)',
+      )
       break
     case 'HELD':
       lines.push(

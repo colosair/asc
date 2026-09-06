@@ -21,6 +21,7 @@ import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
 import { GitHubEventSource } from '../adapters/github/event-source.ts'
 import { GitHubScm } from '../adapters/github/scm.ts'
+import { GitLabScm } from '../adapters/gitlab/scm.ts'
 import {
   GitLabClient,
   GlabApiClient,
@@ -71,6 +72,8 @@ export type BuildInput = {
   }
   /** canonical source id → ref. Profile이 준다. */
   sourceRefs?: Readonly<Record<string, { ref: string }>>
+  /** 이 결합이 가리키는 저장소가 이 기계 어디에 있는가. 원격에 올리는 행위에만 쓴다. */
+  repoRoot?: string
   /** 이벤트 조회 페이지 크기. */
   perPage?: number
   /** 자격 조회 통로 주입점(테스트용). adapter id를 받아 그 adapter의 자격을 돌려준다. */
@@ -98,6 +101,15 @@ const FACTORIES: Record<string, Factory> = {
       // 조율 표면. 토큰 통로일 때만 쓰기가 가능하다 — 도구를 통로로 쓰는 경우도 POST 를
       // 대신 보내 준다. 둘 다 아니면 create 가 그 사실을 그대로 말한다.
       coordinationSurface: new GitLabCoordinationSurface({ reader: client, writer: client, project }),
+      // 승인된 외부 write 의 통로. 관측은 진작 provider-neutral 이었는데 실행만 한 갈래에
+      // 묶여 있어, 승인이 끝난 뒤에야 "실행할 통로가 없다" 가 드러나던 자리다.
+      scm: new GitLabScm({
+        reader: client,
+        writer: client,
+        defaultProject: project,
+        sourceRefs: input.sourceRefs ?? {},
+        ...(input.repoRoot ? { repoRoot: input.repoRoot } : {}),
+      }),
       // canonical 통로는 아직 없다. 없는 것을 있는 척하지 않는다.
     }
   },

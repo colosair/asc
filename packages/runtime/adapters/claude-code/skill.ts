@@ -167,6 +167,35 @@ report as one.
    Finishing: \`asc session done <ID> --verified "<what the self-check covered>" --next "<next>"\`.
    Updating state is the Controller's job — point the person at \`asc controller collect\`.
 
+## "Publish it" — what a session produced, going out
+
+The person says *publish it* · *open the MR* · *get it onto develop*. That sentence is the
+approval, and it is not asked for twice. It is also not wider than itself: **"open the MR"
+is not "approve the merge"**.
+
+Nothing reaches an external system except through a grant. That is one command, then the
+act:
+
+\`\`\`text
+asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>
+asc grant run <G-ID>
+\`\`\`
+
+The action key is the provider's (\`gitlab.mr.create\`, \`gitlab.note.create\`, \`git.push\`,
+\`coordination.publish\`, \`github.issue_comment.create\`). If nothing bound to this
+workspace can carry out that action, issuing **fails there** rather than after the person
+approved — read the message and fix the binding, do not look for another way out.
+
+The body comes from a file because it has to be the thing the person is agreeing to. Do
+not compose it after the fact and do not widen \`--target\`.
+
+Publishing a coordination question is the same shape — \`asc coordination publish --grant
+<G-ID> --query <X-ID> …\`. Reading (\`coordination status\`, \`coordination observe\`) needs
+no grant.
+
+**Never** reach for \`git push\`, \`glab\`, or \`gh\` directly. The guard stops those, and
+being stopped is not a puzzle to solve — it means the act belongs in a grant.
+
 ## Progress reporting
 
 From outside, a person can see nothing while work runs. Leave one line at each of the

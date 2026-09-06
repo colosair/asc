@@ -7,7 +7,7 @@
 // 승인 즉시 자동 발급하지 않는 이유도 같다. 두 행위를 붙여 놓으면 "승인했으니 나갔겠지"가
 // 되고, 무엇이 언제 나갔는지 사람이 따로 붙잡을 지점이 사라진다.
 
-import { ExecutionGrant } from '../model/entities.ts'
+import { ExecutionGrant, type CanonicalSnapshot } from '../model/entities.ts'
 import type { IdentityBinding } from '../../ports/approval.ts'
 import type { StateStore } from '../../ports/state-store.ts'
 
@@ -27,12 +27,44 @@ export type IssueGrantInput = {
   issuedAt: string
 }
 
+/**
+ * 세션이 만든 결과를 내보내는 경우의 입력 (0.7.0).
+ *
+ * 초기 모델에는 이 자리가 없었다. Grant 는 `Monitor → Request → Approval` 을 위해
+ * 생겼고, 정작 **계약 안에서 일한 세션이 만든 결과**가 밖으로 나갈 자리는 없었다.
+ * 그래서 실제 작업은 관계없는 판단 요청을 하나 지어내 그 위에 얹혀야 했고, 지어낸
+ * 요청은 승인 기록을 흐린다.
+ *
+ * 여기서 승인은 **사람이 지금 그렇게 하라고 말한 것**이다. 그 말과 함께 온 내용이
+ * payload 이고, 호출자가 지어내지 않는다. 범위는 넓히지 않는다 — 승인된 것은 이
+ * 행위 하나이며 `allowedWrites` 가 그 경계다.
+ */
+export type IssueForSessionInput = {
+  grantId: string
+  sessionId: string
+  /** 발급자. 승인 권한자로 매핑돼 있어야 한다 — 임의 문자열로는 발급되지 않는다. */
+  issuedBy: string
+  channel: string
+  action: string
+  target: string
+  /** 사람이 내보내라고 한 내용 그대로. */
+  payload: string
+  expiresAt?: string
+  allowedWrites?: string[]
+  issuedAt: string
+  /** 게시 직전 대조할 기준 (OM §11.9). 없으면 대조하지 않는다. */
+  snapshot?: CanonicalSnapshot[]
+}
+
 export type IssueFailure =
   | { kind: 'REQUEST_NOT_FOUND' }
   | { kind: 'NOT_APPROVED'; status: string }
   | { kind: 'FORBIDDEN_ISSUER' }
   | { kind: 'NO_PAYLOAD' }
   | { kind: 'GRANT_EXISTS' }
+  | { kind: 'SESSION_NOT_FOUND' }
+  /** 아직 일하지 않은 세션의 결과는 없다. */
+  | { kind: 'SESSION_NOT_RUNNABLE'; status: string }
 
 export type IssueResult = { ok: true; grant: ExecutionGrant } | { ok: false; failure: IssueFailure }
 
@@ -105,6 +137,67 @@ export class GrantService {
       kind: 'grant_issued',
       ref: grant.id,
       detail: `${grant.action} → ${grant.target} (request ${grant.requestId})`,
+    })
+    return { ok: true, grant: created.entity }
+  }
+
+  /**
+   * 세션이 만든 결과를 내보낼 계약. 근거는 그 세션이고, 승인은 사람이 지금 한 말이다.
+   *
+   * 검증은 두 가지다: 그 세션이 실제로 있고 일한 적이 있는가, 그리고 이 사람이 승인
+   * 권한자인가. 뒤엣것은 요청 경로와 같은 통로를 쓴다 — 발급이 열려 있으면 승인 이후
+   * 구간이 통째로 무방비가 되고, 그것은 근거가 요청이든 세션이든 같다.
+   */
+  async issueForSession(input: IssueForSessionInput): Promise<IssueResult> {
+    const session = await this.#store.get('session', input.sessionId)
+    if (!session) return { ok: false, failure: { kind: 'SESSION_NOT_FOUND' } }
+    // 아직 시작하지 않은 계약에는 내보낼 결과가 없다.
+    if (session.status === 'READY') {
+      return { ok: false, failure: { kind: 'SESSION_NOT_RUNNABLE', status: session.status } }
+    }
+    if (input.payload.length === 0) return { ok: false, failure: { kind: 'NO_PAYLOAD' } }
+
+    const authorized = await this.#identity.verify({
+      channel: input.channel,
+      actor: input.issuedBy,
+      authorizedApprover: input.issuedBy,
+    })
+    if (!authorized) {
+      await this.#store.appendHistory({
+        at: input.issuedAt,
+        actor: input.issuedBy,
+        kind: 'grant_rejected',
+        ref: input.sessionId,
+        detail: `unauthorized issuer via ${input.channel} (${input.action})`,
+      })
+      return { ok: false, failure: { kind: 'FORBIDDEN_ISSUER' } }
+    }
+
+    const grant = ExecutionGrant.parse({
+      id: input.grantId,
+      version: 0,
+      sessionId: session.id,
+      status: 'READY',
+      issuedBy: input.issuedBy,
+      issuedAt: input.issuedAt,
+      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+      singleUse: true,
+      action: input.action,
+      target: input.target,
+      payload: input.payload,
+      snapshot: input.snapshot ?? [],
+      allowedWrites: input.allowedWrites ?? [input.action],
+    })
+
+    const created = await this.#store.create('grant', grant)
+    if (!created.ok) return { ok: false, failure: { kind: 'GRANT_EXISTS' } }
+
+    await this.#store.appendHistory({
+      at: input.issuedAt,
+      actor: input.issuedBy,
+      kind: 'grant_issued',
+      ref: grant.id,
+      detail: `${grant.action} → ${grant.target} (session ${session.id})`,
     })
     return { ok: true, grant: created.entity }
   }

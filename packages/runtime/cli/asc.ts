@@ -35,6 +35,8 @@ import { IDENTITY_FILE } from './identity-config.ts'
 import { TextRenderer } from '../adapters/text/renderer.ts'
 import { ApprovalService } from '../core/approval/service.ts'
 import { Executor } from '../core/execution/executor.ts'
+import { transitionGrant } from '../core/model/transitions.ts'
+import { applyTransition } from '../core/runtime/store-ops.ts'
 import { GrantService } from '../core/execution/grant.ts'
 import { DecisionKind } from '../core/model/entities.ts'
 import { discoverProjectRoot, excludeFromGit, identitiesTemplate, overrideTemplate, writeIfAbsent } from '../core/attach/init.ts'
@@ -140,6 +142,7 @@ import {
   RuntimeLease,
   fileScope,
   readBackground,
+  recordPass,
   renderBackground,
   staleAfter,
 } from '../core/runtime/background.ts'
@@ -198,6 +201,8 @@ const USAGE = `asc — Agent Session Control
 
   asc grant issue <REQUEST_ID> --action <key> --target <ref> --as <actor>
                   [--grant-id <id>] [--expires <iso>]
+  asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>
+                        # what a session produced, sent out because a person said so
   asc grant run   <GRANT_ID> [--run-id <id>]
 
   asc monitor scan      [--backfill] [--as <controller>]   # fast path
@@ -210,7 +215,8 @@ const USAGE = `asc — Agent Session Control
 
   asc runtime start [--detach] [--interval-min <n>] [--delta-min <n>]
                     [--reconcile-min <n>] [--census-min <n>] [--digest-min <n>]
-                        # --detach: keep observing after this terminal closes
+                        # development and recovery only — the machine's registration is
+                        # what observes on the normal path (asc runtime service)
   asc runtime tick [--all]                 # --all: every workspace this machine knows
   asc runtime list [--json]                # every workspace, without visiting each one
   asc runtime service [status] [--json]    # the machine's persistent registration
@@ -287,8 +293,9 @@ const USAGE = `asc — Agent Session Control
   asc query list   [--json]
 
   asc coordination [status] [--json]   # what was asked outside, and whether it reached anyone
-  asc coordination publish --query <ID> --title <text> --body-file <path>
+  asc coordination publish --grant <G-ID> --query <ID> --title <text> --body-file <path>
                    [--audience <who>] [--known <objectId>] [--work <ref>] [--json]
+                        # publishing is an outward write — it goes through an approved grant
   asc coordination observe [--json]    # did anything come back on what we published
 
   asc progress show   [<S-ID>]
@@ -914,7 +921,7 @@ async function runParsedCommand(
   if (group === 'query') return runQuery(command, target, values, store, guard.runtime)
   if (group === 'progress') return runProgress(command, target, values, store)
   if (group === 'preflight') return runPreflight(values, store, guard.runtime)
-  if (group === 'grant') return runGrant(command, target, values, store, root)
+  if (group === 'grant') return runGrant(command, target, values, store, root, guard.runtime)
   if (group === 'monitor') return runMonitor(command, values, store, renderer, guard.runtime)
 
   if (group === 'runtime') return runRuntime(command, values, store, renderer, guard.runtime)
@@ -2688,6 +2695,15 @@ async function runHost(
         return 0
       }
 
+      // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
+      // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
+      // 여기이고, 사람이 따로 기억해야 하는 정리 절차는 결국 안 돌아간다.
+      for (const dead of await bindings.stale()) {
+        if (await bindings.forget(dead.logicalSessionId)) {
+          console.error(`(stale binding cleared: ${dead.logicalSessionId} ← ${dead.physicalSessionId})`)
+        }
+      }
+
       if (!values.physical) {
         console.error('--physical <Claude session id> is required.')
         return 2
@@ -2703,8 +2719,19 @@ async function runHost(
         const released = await bindings.release(target, physical)
         // 소유권은 사라져도 그 실행이 있었다는 사실은 남는다 (C-10 §1.3)
         if (released) for (const evidence of running) await audit.endExecution(evidence.executionId, 'RELEASED', at)
-        console.log(released ? `${target} ownership released` : 'Release failed — you are not the owner')
-        return released ? 0 : 1
+        if (!released) {
+          console.error('Release failed — you are not the owner')
+          return 1
+        }
+        // **놓았다고 말하기 전에 확인한다.** guard 는 이 파일 하나로 관리 대상을 정하므로,
+        // 지워지지 않은 채 "released" 라고 적으면 그 세션의 외부 write 가 계속 막힌다.
+        const after = await bindings.get(target)
+        if (after) {
+          console.error(`Release did not take — ${target} is still bound to ${after.physicalSessionId}.`)
+          return 1
+        }
+        console.log(`${target} ownership released`)
+        return 0
       }
 
       const spec = {
@@ -3654,7 +3681,7 @@ async function runController(
     // 누가 거뒀는지 모르면 History에 'controller' 라는 익명이 남는다 (C-10 §2.4)
     ...(reclaimedBy ? { reclaimedBy } : {}),
   })
-  console.log(renderCollect(outcome, await store.list('session')))
+  console.log(renderCollect(outcome))
 
   // 거둔 세션의 live 진행 표시는 여기서 정리한다 — 종결 보고(terminal)는 남는다
   const cleared = await progressService(store).collect(outcome.collected)
@@ -4673,7 +4700,12 @@ async function tickAllWorkspaces(values: Record<string, unknown>, lease: Runtime
       stdio: values.json ? 'ignore' : 'inherit',
       env: process.env,
     })
-    results.push({ workspaceId: workspace.workspaceId, code: child.status ?? 1 })
+    const code = child.status ?? 1
+    results.push({ workspaceId: workspace.workspaceId, code })
+    // **회차가 어떻게 끝났는지 그 자리에 적는다** (Phase J). 이것이 없으면 실패는
+    // service.log 로만 흘러가고, 붙어 있는 workspace 가 여러 릴리스 동안 한 번도 돌지
+    // 못한 채 건강해 보인다 — 실측에서 셋 중 둘이 그 상태였다.
+    await recordPass(new MarkdownStateStore(workspace.root).scope('runtime'), code).catch(() => undefined)
     // 회차가 길어져도 이 기계의 lease 는 살아 있어야 한다 — 갱신하지 않으면 도는 중에
     // 죽은 것으로 보이고 두 번째 프로세스가 끼어든다.
     await lease.renew()
@@ -5296,6 +5328,40 @@ async function runCoordinationPublish(
     return 2
   }
 
+  // **밖으로 나가는 쓰기는 승인된 계약을 지난다** (OM §11.5, 0.7.0 / Phase H).
+  //
+  // 조율 게시는 오래 이 규칙 밖에 있었다. 근거는 adapter 주석 하나였다 — "물어본 것이
+  // 밖에 실제로 있게 하는 행위이지 승인된 단일 행동이 아니다". 그 구분은 뜻이 있지만,
+  // 계약을 대체할 결정으로 어디에도 기록되지 않았고 실제로 하는 일은 남의 저장소에
+  // 글을 만드는 것이다. 살아 있는 불변식을 따른다.
+  //
+  // 읽기(status·observe)는 그대로다. 계약을 요구하는 것은 실제로 나가는 이 한 번뿐이다.
+  const grantId = typeof values.grant === 'string' ? values.grant : undefined
+  if (!grantId) {
+    console.error('밖으로 나가는 게시는 승인된 계약을 지난다 — --grant <G-ID> 가 필요하다.')
+    console.error('세션이 만든 결과라면:')
+    console.error('  asc grant issue --session <S-ID> --action coordination.publish \\')
+    console.error('       --target <query-id> --body-file <path> --as <actor>')
+    return 2
+  }
+  const grant = await store.get('grant', grantId)
+  if (!grant) {
+    console.error(`${grantId} 를 찾지 못했다.`)
+    return 1
+  }
+  if (grant.status !== 'READY') {
+    console.error(`${grantId} 는 지금 ${grant.status} 다 — 한 번 쓴 계약은 다시 쓰지 않는다.`)
+    return 1
+  }
+  if (grant.action !== 'coordination.publish') {
+    console.error(`${grantId} 가 승인한 것은 '${grant.action}' 이지 게시가 아니다.`)
+    return 1
+  }
+  if (grant.target !== queryId) {
+    console.error(`${grantId} 가 승인한 대상은 ${grant.target} 인데 지금 게시하려는 것은 ${queryId} 다.`)
+    return 1
+  }
+
   const { surface, unavailable } = await coordinationSurfaceFor(resolved)
   if (!surface) {
     console.error('No coordination surface is bound to this workspace — nothing was published.')
@@ -5323,6 +5389,20 @@ async function runCoordinationPublish(
   )
 
   if (outcome.ok) {
+    // 한 번 쓴 계약은 다시 쓰이지 않는다 (OM §11.5 single_use). 게시가 실제로 나간
+    // 뒤에 옮긴다 — 먼저 옮기면 실패한 게시가 계약만 태운다.
+    const consumedAt = new Date().toISOString()
+    const claimed = await applyTransition(store, 'grant', grantId, (g) =>
+      transitionGrant(g, 'CLAIMED', 'executor', { claimedBy: `cli-${process.pid}` }),
+    )
+    if (claimed.ok) {
+      await applyTransition(store, 'grant', grantId, (g) =>
+        transitionGrant(g, 'EXECUTED', 'executor', {
+          resultRef: outcome.identity.objectId,
+          consumedAt,
+        }),
+      )
+    }
     const recorded = await recordPublication(coordinationLedger(store), outcome)
     if (values.json) {
       console.log(JSON.stringify({ publish: outcome, recorded: recorded.ok }, null, 2))
@@ -5589,15 +5669,74 @@ async function runGrant(
   values: Record<string, unknown>,
   store: MarkdownStateStore,
   root: string,
+  runtime?: ResolvedRuntime,
 ): Promise<number> {
   switch (command) {
     case 'issue': {
-      if (!target || !values.action || !values.target || !values.as) {
+      // 근거는 둘 중 하나다 — 밖에서 들어온 판단 요청, 또는 계약 안에서 일한 세션.
+      const fromSession = (values.session as string | undefined) ?? undefined
+      if ((!target && !fromSession) || !values.action || !values.target || !values.as) {
         console.error('Usage: asc grant issue REQ-0042 --action <key> --target <ref> --as <actor>')
+        console.error('   or: asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>')
         return 2
       }
+      // **할 수 없는 일을 승인시키지 않는다** (0.7.0 / F-3).
+      //
+      // 예전에는 아무 action 으로나 Grant 가 발급되고, 사람이 승인한 **뒤에** 실행에서
+      // "unsupported action" 이 나왔다. 승인의 의미가 그 자리에서 무너진다 — 사람은
+      // 나갈 것에 동의했는데 나갈 수 없는 것이었다.
+      const outward = await externalWritePort(runtime)
+      if (!outward) {
+        console.error('밖으로 내보낼 통로가 없다 — 이 행위를 수행할 결합이 Profile 에 없다.')
+        console.error('지금 무엇이 풀리는지: asc setup status')
+        return 2
+      }
+      if (outward.supports && !outward.supports(values.action as string)) {
+        console.error(`'${String(values.action)}' 를 수행할 수 있는 통로가 없다 (${outward.id}).`)
+        console.error('승인 뒤에 실패하는 것보다 지금 멈추는 편이 낫다 — 발급하지 않았다.')
+        return 2
+      }
+
       // 발급도 승인 권한자만 할 수 있다 — 외부로 나가는 권한이 여기서 만들어지기 때문이다
       const grants = new GrantService(store, new LocalIdentityBinding(await loadIdentityMap(root)))
+
+      if (fromSession) {
+        // 사람이 지금 내보내라고 한 것이 승인이다. 그 말과 함께 온 내용이 payload 이고,
+        // 여기서 지어내지 않는다 — 사람이 본 적 없는 글이 사람의 이름을 달고 나가면 안 된다.
+        const bodyFile = values['body-file'] as string | undefined
+        if (!bodyFile) {
+          console.error('--body-file <path> 가 필요하다 — 내보낼 내용은 사람이 준 것이어야 한다.')
+          return 2
+        }
+        const payload = await readFile(bodyFile, 'utf8').catch(() => null)
+        if (payload === null) {
+          console.error(`내용을 읽지 못했다: ${bodyFile}`)
+          return 2
+        }
+        const forSession = await grants.issueForSession({
+          grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
+          sessionId: fromSession,
+          issuedBy: values.as as string,
+          channel: 'local',
+          action: values.action as string,
+          target: values.target as string,
+          payload,
+          ...(values.expires ? { expiresAt: values.expires as string } : {}),
+          issuedAt: new Date().toISOString(),
+        })
+        if (!forSession.ok) {
+          console.error(GRANT_ERROR[forSession.failure.kind] ?? forSession.failure.kind)
+          return 1
+        }
+        console.log(`${forSession.grant.id} READY — ${forSession.grant.action} → ${forSession.grant.target}`)
+        console.log('The target state is checked again before execution. If it changed in the meantime, nothing runs.')
+        return 0
+      }
+
+      if (!target) {
+        console.error('요청 근거가 없다 — REQUEST_ID 를 주거나 --session <S-ID> 를 쓰라.')
+        return 2
+      }
       const issued = await grants.issue({
         grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
         requestId: target,
@@ -5622,19 +5761,24 @@ async function runGrant(
         console.error('Usage: asc grant run G-0001')
         return 2
       }
-      const token = await discoverToken()
-      if (!token) {
-        console.error('No GitHub token found. Set ASC_GITHUB_TOKEN, or run `gh auth login`.')
-        return 2
-      }
       const grant = await store.get('grant', target)
       if (!grant) {
         console.error(`${target} was not found.`)
         return 1
       }
-      // 이 한 번이 실제로 밖에 나간다. 계약이 지정한 대상·내용 그대로이며,
-      // 직전에 대상 상태를 다시 확인한다.
-      const scm = new GitHubScm({ client: new GitHubClient({ token }), defaultRepo: repoOf(grant.target) })
+      // **어느 provider 로 나갈지는 여기서 고르지 않는다** (C-09 · B-49).
+      //
+      // 예전에는 이 자리에서 GitHub client 를 직접 만들었다. 관측 경로는 진작 결합으로
+      // 풀리고 있었는데 실행 경로만 한 갈래에 묶여 있어서, 코드가 다른 곳에 있는
+      // 프로젝트에서는 승인이 끝난 **뒤에야** 실행할 통로가 없다는 것이 드러났다.
+      const scm = await externalWritePort(runtime)
+      if (!scm) {
+        console.error(
+          '밖으로 내보낼 통로가 없다 — Profile bindings 에 외부 쓰기를 제공하는 결합이 필요하다.',
+        )
+        console.error('지금 무엇이 풀리는지: asc setup status')
+        return 2
+      }
       const outcome = await new Executor({
         store,
         scm,
@@ -5655,6 +5799,39 @@ async function runGrant(
   }
 }
 
+/**
+ * 승인된 행위가 실제로 나갈 통로 (C-09 · OM §11.5).
+ *
+ * 조립은 Composition 의 몫이다 — 이 자리에서 provider 를 알면 provider 교체가 다시 CLI
+ * 수술이 된다. 없으면 `null` 이고, 없는 것을 있는 척하지 않는다.
+ */
+async function externalWritePort(runtime?: ResolvedRuntime): Promise<ScmPort | null> {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const adapters = monitorAdapters()
+  const declared = runtime?.layers.profile.bindings ?? []
+  const plan = await composeBindings({
+    context: { projectRoot, env: process.env },
+    adapters,
+    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+  })
+  const ports = await buildRuntimePorts({
+    plan,
+    roles: rolesFor(plan, declared),
+    repoRoot: projectRoot,
+    ...(runtime?.layers.profile.canonical.sources
+      ? {
+          sourceRefs: Object.fromEntries(
+            runtime.layers.profile.canonical.sources
+              .filter((source): source is typeof source & { ref: string } => typeof source.ref === 'string')
+              .map((source) => [source.id, { ref: source.ref }]),
+          ),
+        }
+      : {}),
+    endpointFor: (binding) => endpointOf(adapters, binding),
+  })
+  return ports.scm ?? null
+}
+
 /** `owner/repo#19` 에서 저장소만. 짧은 참조를 풀 때 쓴다. */
 function repoOf(target: string): string | undefined {
   const match = /^([^/\s]+\/[^#\s]+)#\d+$/.exec(target)
@@ -5668,6 +5845,8 @@ const GRANT_ERROR: Record<string, string> = {
     '계약을 발급할 권한이 없다. .asc/identities.json 에 `"이름": ["local:계정"]` 형태로 매핑을 추가하라 ' +
     '(현재 상태는 `asc setup status`).',
   NO_PAYLOAD: '내보낼 내용이 없다.',
+  SESSION_NOT_FOUND: '그 세션을 찾지 못했다.',
+  SESSION_NOT_RUNNABLE: '아직 시작하지 않은 세션이다 — 내보낼 결과가 없다.',
   GRANT_EXISTS: '같은 id의 계약이 이미 있다.',
 }
 

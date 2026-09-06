@@ -194,7 +194,7 @@ describe('Controller 회수', () => {
     const store = new MemoryStateStore()
     await withSessions(store)
     const outcome = await collectSessions(store, NOW)
-    const text = renderCollect(outcome, await store.list('session'))
+    const text = renderCollect(outcome)
 
     assert.match(text, /활성 세션: S-20260823-02/)
     assert.match(text, /거둔 세션:/)
@@ -204,8 +204,8 @@ describe('Controller 회수', () => {
   it('거둘 것이 없으면 조용하다', async () => {
     const store = new MemoryStateStore()
     const outcome = await collectSessions(store, NOW)
-    assert.deepEqual(outcome, { active: [], collected: [], awaiting: [], occupancy: [] })
-    assert.equal(renderCollect(outcome, []), '활성 세션: 없음')
+    assert.deepEqual(outcome, { active: [], collected: [], handoffs: [], awaiting: [], occupancy: [] })
+    assert.equal(renderCollect(outcome), '활성 세션: 없음')
   })
 })
 

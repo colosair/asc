@@ -402,11 +402,21 @@ function handout(session: Session): Handout {
   }
 }
 
-/** 세션을 내지 않을 때, 대신 무엇을 하면 되는가. 실행하지 않고 말만 한다. */
+/**
+ * 세션을 내지 않을 때, 대신 무엇을 하면 되는가. 실행하지 않고 말만 한다.
+ *
+ * **행동은 결론보다, 결론은 증거보다 강할 수 없다** (0.7.0 / C-4). 판정이 기울기만
+ * 남겼는데 행동을 확정형으로 적으면, 못 본 것이 있다고 적어 놓고 "할 일은 이것뿐" 이라고
+ * 말하는 결과가 된다 — 사람은 뒤 문장을 읽는다.
+ */
 function nextActionFor(result: WorkStateResult, workRef: string): string {
-  switch (result.state === 'DECIDABLE_WITH_LIMITATION' ? (result.leaning ?? 'UNDECIDABLE') : result.state) {
+  const tentative = result.state === 'DECIDABLE_WITH_LIMITATION'
+  switch (tentative ? (result.leaning ?? 'UNDECIDABLE') : result.state) {
     case 'IMPLEMENTED_STALE_TRACKER':
-      return `구현은 정본에 있다 — 할 일은 구현이 아니라 ${workRef} 상태 정리다. 추적 시스템 반영은 외부 쓰기이므로 승인 경로(Grant)를 지난다`
+      return tentative
+        ? `구현이 정본에 있는 것으로 보인다. 다만 확인하지 못한 것이 있다 — ${result.limitations.join(' / ')}. ` +
+          `그것부터 확인하고, 그 뒤에도 남는 것이 상태뿐이면 ${workRef} 상태 정리로 간다`
+        : `구현은 정본에 있다 — 할 일은 구현이 아니라 ${workRef} 상태 정리다. 추적 시스템 반영은 외부 쓰기이므로 승인 경로(Grant)를 지난다`
     case 'IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION':
       return '구현은 끝났고 검증이 막혀 있다 — 막힌 것을 먼저 풀어라. 새 구현 세션은 필요 없다'
     case 'BLOCKED_DEPENDENCY':

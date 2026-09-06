@@ -15,6 +15,14 @@ export type CollectOutcome = {
   active: string[]
   /** 이번에 거둔 세션들. Handoff를 읽었다는 뜻이다. */
   collected: string[]
+  /**
+   * 거둔 세션 그 자체 (0.7.0).
+   *
+   * 회수는 세션을 보관소로 옮기고 끝난다. 그 뒤에 다시 목록을 물으면 방금 거둔 것은
+   * 거기 없다 — 화면이 `(다음 작업 없음)` 을 적던 자리가 정확히 여기였다. 인계를 읽은
+   * 것은 회수이므로, 읽은 것을 그대로 넘긴다.
+   */
+  handoffs: Session[]
   /** 사람이 판단할 것 — 미결과 막힌 세션. */
   awaiting: string[]
   occupancy: { sessionId: string; paths: string[] }[]
@@ -134,11 +142,11 @@ export async function collectSessions(
     await store.archive('session', session.id)
   }
 
-  return { active, collected: finished.map((s) => s.id), awaiting, occupancy }
+  return { active, collected: finished.map((s) => s.id), handoffs: finished, awaiting, occupancy }
 }
 
 /** 사람이 읽는 회수 결과. 다음에 무엇을 할지가 맨 아래 오도록 짠다. */
-export function renderCollect(outcome: CollectOutcome, sessions: readonly Session[]): string {
+export function renderCollect(outcome: CollectOutcome): string {
   const lines: string[] = []
   lines.push(`활성 세션: ${outcome.active.join(', ') || '없음'}`)
 
@@ -149,11 +157,11 @@ export function renderCollect(outcome: CollectOutcome, sessions: readonly Sessio
 
   if (outcome.collected.length > 0) {
     lines.push('', '거둔 세션:')
-    for (const id of outcome.collected) {
-      const session = sessions.find((s) => s.id === id)
-      lines.push(`  ${id} — ${session?.handoff?.next ?? '(다음 작업 없음)'}`)
-      for (const done of session?.handoff?.done ?? []) lines.push(`    완료: ${done}`)
-      if (session?.handoff?.verified) lines.push(`    검증: ${session.handoff.verified}`)
+    for (const session of outcome.handoffs) {
+      lines.push(`  ${session.id} — ${session.handoff?.next ?? '(다음 작업 없음)'}`)
+      for (const done of session.handoff?.done ?? []) lines.push(`    완료: ${done}`)
+      if (session.handoff?.verified) lines.push(`    검증: ${session.handoff.verified}`)
+      for (const changed of session.handoff?.changed ?? []) lines.push(`    바꾼 것: ${changed}`)
     }
   }
 

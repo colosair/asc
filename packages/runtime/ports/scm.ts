@@ -34,6 +34,15 @@ export type ExternalActionResult =
 export interface ScmPort {
   readonly id: string // 'github' | 'gitlab' ...
 
+  /**
+   * 이 통로가 그 행위를 수행할 수 있는가.
+   *
+   * 발급 시점에 묻기 위한 것이다. 예전에는 아무 action 으로나 Grant 가 발급됐고, 사람이
+   * 승인한 **뒤에** 실행에서 "unsupported" 가 나왔다 — 승인의 의미가 그 자리에서 무너진다.
+   * 두지 않아도 되며, 그때는 호출자가 확인하지 못했다는 사실을 그대로 다룬다.
+   */
+  supports?(action: string): boolean
+
   getThread(reference: string): Promise<ThreadSnapshot>
   getBaselines(queries: readonly BaselineQuery[]): Promise<CanonicalSnapshot[]>
 

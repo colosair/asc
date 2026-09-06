@@ -3,7 +3,7 @@
 // 스키마가 곧 타입의 정본이며 (z.infer로 타입 도출) 이중 정본을 두지 않는다.
 
 import { z } from 'zod'
-import { BlockId, EventKey, GrantId, QueueItemId, RequestId, SessionId, Timestamp, Version } from './ids.ts'
+import { BlockId, EventKey, GrantId, RequestId, SessionId, Timestamp, Version } from './ids.ts'
 
 // ── 공통 ────────────────────────────────────────────────────────────────────
 
@@ -227,7 +227,16 @@ export type GrantStatus = z.infer<typeof GrantStatus>
 export const ExecutionGrant = z.object({
   id: GrantId,
   version: Version,
-  requestId: RequestId,
+  /**
+   * 이 계약의 근거. **둘 중 하나는 반드시 있다.**
+   *
+   * `requestId` 는 밖에서 들어온 판단 요청을 사람이 승인한 경우다 (OM §11.8 의 경로).
+   * `sessionId` 는 계약 안에서 일한 세션이 만든 결과를 사람이 내보내라고 한 경우다 —
+   * 초기 모델에는 이 자리가 없었고, 그래서 실제 작업이 밖으로 나갈 때마다 관계없는
+   * 판단 요청을 하나 지어내야 했다. 지어낸 요청은 승인 기록을 흐린다.
+   */
+  requestId: RequestId.optional(),
+  sessionId: SessionId.optional(),
   status: GrantStatus,
   issuedBy: z.string().min(1),
   issuedAt: Timestamp,
@@ -244,24 +253,19 @@ export const ExecutionGrant = z.object({
   consumedAt: Timestamp.optional(),
   resultRef: z.string().optional(),
 })
+  .refine((grant) => Boolean(grant.requestId) !== Boolean(grant.sessionId), {
+    message: 'a grant stands on exactly one basis — an approved request or a session',
+  })
 export type ExecutionGrant = z.infer<typeof ExecutionGrant>
 
-// ── QueueItem / MonitorEvent / State ────────────────────────────────────────
+// ── MonitorEvent / State ────────────────────────────────────────────────────
+//
+// 여기 있던 `QueueItem` 은 0.7.0 에서 지웠다. OM §1 원칙 10 이 나눈 "승인된 작업" 의
+// 자리는 지금 `ApprovalRequest.QUEUED` 와 `asc proceed` 가 나눠 진다 — 전자가 사람이
+// 하기로 한 사실을 들고, 후자가 그것을 세션으로 만든다. QueueItem 은 schema·layout·
+// serializer 만 있고 만드는 코드도 읽는 코드도 없는 채 남아 있었고, 같은 사실을 두 곳에
+// 두는 자리는 언젠가 갈린다.
 
-export const QueueState = z.enum(['READY', 'ACTIVE', 'BLOCKED', 'DONE'])
-export type QueueState = z.infer<typeof QueueState>
-
-/** 승인되어 수행하기로 한 작업 (OM §4.8). inbox = 판단 대기, queue = 승인된 작업. */
-export const QueueItem = z.object({
-  id: QueueItemId,
-  version: Version,
-  state: QueueState,
-  title: z.string().min(1),
-  sourceRequestId: RequestId.optional(),
-  blockId: BlockId.optional(),
-  sessionId: SessionId.optional(),
-})
-export type QueueItem = z.infer<typeof QueueItem>
 
 /** Phase B 처리 결과 — 부분 실패해도 cursor는 전진하고 실패분만 재시도한다 (OM §10.5). */
 export const EventProcessing = z.enum(['LOGGED', 'PROCESSED', 'PENDING_RETRY'])

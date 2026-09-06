@@ -228,7 +228,8 @@ describe('여러 workspace 를 하나가 돌본다 (설계 §6·§7)', () => {
 
   it('DORMANT 는 이번 회차에서 빠진다 — 없는 자리를 대신해 밖을 치지 않는다', () => {
     const due = dueWorkspaces(viewWorkspaces(workspaces, exists))
-    assert.deepEqual(due, [{ workspaceId: 'W-a', cwd: '/w/a' }])
+    // root 도 함께 온다 — 회차가 어떻게 끝났는지 그 workspace 자리에 적어야 한다 (Phase J)
+    assert.deepEqual(due, [{ workspaceId: 'W-a', cwd: '/w/a', root: '/home/me/.asc/workspaces/W-a' }])
   })
 
   it('사라진 checkout 을 지우지 않는다 — 돌아올 수 있다', () => {

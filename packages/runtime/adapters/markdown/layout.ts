@@ -10,7 +10,6 @@ const ENTITY_DIR: Record<EntityKind, string> = {
   session: 'sessions/active',
   request: 'monitor/inbox',
   grant: 'monitor/grants',
-  queueItem: 'monitor/queue',
   event: 'monitor/events',
 }
 
@@ -40,7 +39,6 @@ const ARCHIVE_DIR: Record<EntityKind, string> = {
   session: 'sessions/archive',
   request: 'monitor/archive/inbox',
   grant: 'monitor/archive/grants',
-  queueItem: 'monitor/archive/queue',
   event: 'monitor/archive/events',
 }
 

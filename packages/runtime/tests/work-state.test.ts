@@ -44,15 +44,20 @@ describe('P0-B — 실제 작업 상태 판정', () => {
       }),
     })
 
-    assert.equal(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    // 0.7.0 — 구현이 정본에 살아 있다는 것까지는 이 증거로 말할 수 있다. 그러나 그것이
+    // 받아들여졌는지는 다른 질문이고, 그것을 모른 채 "상태 정리만 하면 된다" 고 확정하지
+    // 않는다. 기울기는 그대로 남는다.
+    assert.equal(result.state, 'DECIDABLE_WITH_LIMITATION')
+    assert.equal(result.leaning, 'IMPLEMENTED_STALE_TRACKER')
     assert.ok(result.evidence.some((line) => line.includes('병합')))
   })
 
-  it('B. 구현 존재 + 검증 경로 차단 → IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', () => {
+  it('B. 구현이 정본에 있고 검증 경로가 막혔다 → IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', () => {
+    // 병합 흔적은 있는데 그 산출물이 지금도 남아 있는지 읽지 못한 자리다.
     const result = judge({
       trackerDone: false,
       change: 'UNAVAILABLE',
-      repo: repo({ refs: ['feat/PROJ-90-auth'], mergedIntoCanonical: false, pathsExist: { 'fe/auth.ts': true } }),
+      repo: repo({ refs: ['feat/PROJ-90-auth'], contentEquivalent: true }),
     })
 
     assert.equal(result.state, 'DECIDABLE_WITH_LIMITATION')
@@ -159,11 +164,12 @@ describe('P0-2 — 병합 흔적만으로 stale tracker 를 확정하지 않는�
       }),
     })
 
-    assert.equal(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.equal(result.state, 'DECIDABLE_WITH_LIMITATION')
+    assert.equal(result.leaning, 'IMPLEMENTED_STALE_TRACKER')
     assert.ok(result.evidence.some((line) => line.includes('생존 증거')))
     assert.ok(
-      result.limitations.some((line) => line.includes('인수 조건')),
-      '인수 조건 충족을 확인했다고 말해 버렸다',
+      result.limitations.some((line) => line.includes('받아들여졌는지')),
+      '인수 여부를 확인했다고 말해 버렸다',
     )
   })
 
@@ -224,7 +230,7 @@ describe('P0-2 — 병합 흔적만으로 stale tracker 를 확정하지 않는�
     assert.equal(result.state, 'ACTIONABLE')
   })
 
-  it('가지가 정본의 조상이면 산출물 확인 없이도 확정한다 — 그 자체가 생존 증거다', () => {
+  it('가지가 정본의 조상이면 산출물 확인 없이도 그쪽으로 기운다 — 그 자체가 생존 증거다', () => {
     const result = judge({
       trackerDone: false,
       repo: repo({
@@ -234,7 +240,7 @@ describe('P0-2 — 병합 흔적만으로 stale tracker 를 확정하지 않는�
       }),
     })
 
-    assert.equal(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.equal(result.leaning ?? result.state, 'IMPLEMENTED_STALE_TRACKER')
   })
 })
 
@@ -303,12 +309,27 @@ describe('A2 — 증거 등급과 표현', () => {
     assert.equal(result.evidenceGrade, 'direct')
   })
 
-  it('언급·작업 트리 잔재는 proxy 다', () => {
+  it('살아남은 언급은 proxy 다 — 키를 경유한 추정이다', () => {
+    const result = judge({
+      trackerDone: false,
+      repo: repo({
+        mentionedOnCanonical: ['abc feat: PROJ-87 구현'],
+        mentionedOnlyReverts: false,
+        mentionedArtifactsPresent: true,
+      }),
+    })
+    assert.equal(result.evidenceGrade, 'proxy')
+  })
+
+  it('작업 트리에 파일이 있다는 것만으로는 등급이 서지 않는다 (0.7.0)', () => {
+    // 예전에는 이것도 proxy 였다. 구현 증거가 아닌 것을 약한 구현 증거로 세면
+    // 같은 오판이 한 칸 낮은 자리에서 다시 난다.
     const result = judge({
       trackerDone: false,
       repo: repo({ pathsExist: { 'fe/a.ts': true } }),
     })
-    assert.equal(result.evidenceGrade, 'proxy')
+    assert.equal(result.evidenceGrade, 'none')
+    assert.equal(result.state, 'ACTIONABLE')
   })
 })
 
@@ -342,5 +363,98 @@ describe('A2 보강 — 측정된 반증은 언급-생존 확정을 내린다 (F
     assert.equal(result.state, 'DECIDABLE_WITH_LIMITATION')
     assert.equal(result.leaning, 'IMPLEMENTED_STALE_TRACKER')
     assert.ok(result.limitations.some((l) => l.includes('반영되지 않은 커밋')))
+  })
+})
+
+
+// ── 0.7.0 / D-01 — 파일이 있다는 것과 이 요구가 구현됐다는 것 ─────────────────
+//
+// 실측에서 나온 세 현실을 그대로 fixture 로 둔다. 셋은 서로 다른 답을 받아야 한다.
+
+describe('D-01 — 세 현실이 서로 다른 답을 받는다', () => {
+  const hud = 'festa-frontend/src/features/world/ui/WorldHud.tsx'
+
+  it('① 파일은 이미 있고 이번 요구는 그 안의 변경이다 → ACTIONABLE', () => {
+    // 실측 그대로다. 작업 항목이 WorldHud.tsx 를 가리키고 그 파일은 정본에도 작업
+    // 트리에도 있다. 그런데 요구된 4항(Shift·Space·우클릭 드래그·Alt+클릭)은 하나도
+    // 없다. 예전에는 이 자리에서 "구현하지 말고 tracker 만 정리하라" 가 나왔다.
+    const result = judge({
+      trackerDone: false,
+      repo: repo({
+        refs: [],
+        mergedIntoCanonical: false,
+        pathsExist: { [hud]: true },
+        pathsOnCanonical: { [hud]: true },
+      }),
+    })
+
+    assert.equal(result.state, 'ACTIONABLE')
+    assert.notEqual(result.leaning, 'IMPLEMENTED_STALE_TRACKER')
+    assert.equal(result.evidenceGrade, 'none', '파일 존재는 구현 증거가 아니다')
+    // 그 파일이 있다는 사실 자체는 숨기지 않는다 — 다만 무엇의 증거인지 분명히 말한다.
+    assert.ok(result.evidence.some((line) => line.includes('이 요구가 반영됐다는 증거는 아니다')))
+  })
+
+  it('② 요구는 정본에 도달했고 인수가 남았다 → tracker 를 닫으라고 권하지 않는다', () => {
+    const result = judge({
+      trackerDone: false,
+      change: 'UNAVAILABLE',
+      repo: repo({
+        refs: ['feat/PROJ-460'],
+        mergedIntoCanonical: true,
+        pathsOnCanonical: { [hud]: true },
+      }),
+    })
+
+    assert.notEqual(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.ok(
+      result.limitations.some((line) => line.includes('받아들여졌는지')),
+      '인수 여부를 모른다는 사실이 남아야 한다',
+    )
+  })
+
+  it('③ 요구도 도달했고 검토도 끝났는데 tracker 만 뒤처졌다 → IMPLEMENTED_STALE_TRACKER', () => {
+    const result = judge({
+      trackerDone: false,
+      change: {
+        reference: 'PROJ-460',
+        changedPaths: [hud],
+        revisionMarker: 'r9',
+        reviewState: 'MERGED',
+      },
+      repo: repo({
+        refs: ['feat/PROJ-460'],
+        mergedIntoCanonical: true,
+        pathsOnCanonical: { [hud]: true },
+      }),
+    })
+
+    assert.equal(result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.ok(result.evidence.some((line) => line.includes('검토가 끝났다고')))
+  })
+})
+
+describe('C-4 — 결론은 근거보다 강할 수 없다', () => {
+  it('인수를 확인하지 못했다고 적으면서 상태 정리만 남았다고 말하지 않는다', () => {
+    for (const observation of [
+      repo({ refs: [], mergedIntoCanonical: true }),
+      repo({ refs: [], contentEquivalent: true }),
+      repo({
+        refs: [],
+        mentionedOnCanonical: ['abc feat: PROJ-87'],
+        mentionedOnlyReverts: false,
+        mentionedArtifactsPresent: true,
+      }),
+    ]) {
+      const result = judge({ trackerDone: false, repo: observation })
+      const unverified = result.limitations.some((line) => line.includes('받아들여졌는지'))
+      if (unverified) {
+        assert.notEqual(
+          result.state,
+          'IMPLEMENTED_STALE_TRACKER',
+          '모른다고 적어 놓고 확정하는 결과가 나왔다',
+        )
+      }
+    }
   })
 })

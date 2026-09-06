@@ -97,12 +97,6 @@ function renderBody<K extends EntityKind>(kind: K, entity: EntityMap[K]): string
       if (g.resultRef) lines.push(`Result: ${g.resultRef}`)
       break
     }
-    case 'queueItem': {
-      const q = entity as EntityMap['queueItem']
-      lines.push(`# ${q.id} — ${q.title}`, '', `State: ${q.state} (v${q.version})`)
-      if (q.sessionId) lines.push(`Session: ${q.sessionId}`)
-      break
-    }
     case 'event': {
       const e = entity as EntityMap['event']
       lines.push(

@@ -133,8 +133,10 @@ describe('P0-D — proceed 작업 항목 유입', () => {
 
     assert.equal(outcome.kind, 'WORK_STATE')
     if (outcome.kind !== 'WORK_STATE') return
-    assert.equal(outcome.result.state, 'IMPLEMENTED_STALE_TRACKER')
-    assert.match(outcome.nextAction, /상태 정리/)
+    // 0.7.0 — 인수 여부를 모르면 확정하지 않는다. 기울기는 그대로이고, 행동도
+    // 그 기울기만큼만 말한다.
+    assert.equal(outcome.result.leaning ?? outcome.result.state, 'IMPLEMENTED_STALE_TRACKER')
+    assert.match(outcome.nextAction, /확인하지 못한 것이 있다/)
     assert.equal((await h.store.list('session')).length, 0, '세션이 생겼다')
     assert.equal(h.calls.derive, 0, '계약을 도출하려 들었다')
   })

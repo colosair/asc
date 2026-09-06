@@ -333,10 +333,12 @@ describe('B-17 Gate — staleness와 lifecycle', () => {
 
   it('collect는 live projection만 지우고 terminal view는 남긴다', async () => {
     const s = setup()
+    // 한 Physical Run 은 한 세션만 잡는다 (0.7.0) — 두 세션이므로 Run 도 둘이다.
+    const other = 'phys-other'
     await s.bindings.claim({ logicalSessionId: 'S-20260823-02', provider: 'test-host', physicalSessionId: OWNER }, NOW)
-    await s.bindings.claim({ logicalSessionId: 'S-20260823-03', provider: 'test-host', physicalSessionId: OWNER }, NOW)
+    await s.bindings.claim({ logicalSessionId: 'S-20260823-03', provider: 'test-host', physicalSessionId: other }, NOW)
     await s.service.report('S-20260823-02', OWNER, { phase: '진행 중이던 표시' })
-    await s.service.report('S-20260823-03', OWNER, { phase: '마쳤습니다', terminal: true })
+    await s.service.report('S-20260823-03', other, { phase: '마쳤습니다', terminal: true })
 
     const removed = await s.service.collect(['S-20260823-02', 'S-20260823-03'])
 

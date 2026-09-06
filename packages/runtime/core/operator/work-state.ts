@@ -112,8 +112,16 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   // 언급은 그 자체로 증거가 아니다. 되돌리기만 있는 이력도 이 작업을 "언급"하고, 뒤이어
   // 걷혀 나간 변경도 그렇다. 살아남은 것이 있어야 정본에 있다고 말할 수 있다.
   const mentionSurvives = mentioned.length > 0 && repo.mentionedOnlyReverts !== true && repo.mentionedArtifactsPresent === true
-  const directEvidence =
-    repo.mergedIntoCanonical === true || onCanonical.length > 0 || repo.contentEquivalent === true
+  // **파일이 있다는 것은 이 요구가 구현됐다는 뜻이 아니다** (0.7.0 / D-01).
+  //
+  // 경로는 작업 항목 본문에서 뽑아 온다. 그런데 그 경로가 가리키는 파일은 대개 이미
+  // 있던 것이고, 이번 요구는 그 **안에** 무언가를 더하는 일이다. 실측에서 그 구분이
+  // 없어 "WorldHud.tsx 가 정본에 있다" 가 "요구 4항이 구현됐다" 로 읽혔고, 아직 한 줄도
+  // 쓰지 않은 작업에 "구현하지 말고 tracker 만 정리하라" 는 추천이 나갔다.
+  //
+  // 그래서 경로 존재는 **보강 증거**다 — 정본이 이 작업의 변경을 실제로 담고 있다는 것을
+  // 다른 근거가 말할 때 그 옆에 선다. 혼자서는 아무 결론도 만들지 않는다.
+  const directEvidence = repo.mergedIntoCanonical === true || repo.contentEquivalent === true
   const merged = directEvidence || mentionSurvives
   const hasBranch = repo.refs.length > 0
   const artifacts = Object.entries(repo.pathsExist).filter(([, exists]) => exists)
@@ -124,8 +132,14 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   if (repo.contentEquivalent === true) {
     evidence.push('작업 가지의 내용이 전부 정본에 반영돼 있다 (조상은 아니다 — rebase·squash 등가)')
   }
-  if (onCanonical.length > 0) evidence.push(`정본에 산출물이 있다: ${onCanonical.map(([p]) => p).join(', ')}`)
-  if (artifacts.length > 0) evidence.push(`작업 트리 산출물: ${artifacts.map(([p]) => p).join(', ')}`)
+  if (onCanonical.length > 0) {
+    evidence.push(
+      `정본에 관련 파일이 있다: ${onCanonical.map(([p]) => p).join(', ')} (그 파일이 있다는 사실이지, 이 요구가 반영됐다는 증거는 아니다)`,
+    )
+  }
+  if (artifacts.length > 0) {
+    evidence.push(`작업 트리에 관련 파일이 있다: ${artifacts.map(([p]) => p).join(', ')}`)
+  }
   if (mentioned.length > 0) evidence.push(`정본 이력이 이 작업을 언급한다: ${mentioned.join(' / ')}`)
   if (repo.mentionedOnlyReverts === true) {
     evidence.push('그 언급은 전부 되돌리기다 — 구현이 정본에 남아 있다는 증거가 아니다')
@@ -149,10 +163,14 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
     limitations.push(`선행 작업 상태를 확인하지 못했다: ${unknownDependencies.map((d) => d.reference).join(', ')}`)
   }
 
-  const implemented = merged || artifacts.length > 0
+  // 구현이 있다고 말할 수 있는 근거는 정본이 이 작업의 변경을 담고 있다는 것뿐이다.
+  // 파일의 존재(정본이든 작업 트리든)는 여기 들어오지 않는다 — 위 주석의 이유다.
+  const implemented = merged
+  // 파일이 있다는 사실은 등급에도 들어가지 않는다 — 구현 증거가 아닌 것을 약한 구현
+  // 증거로 세면 결국 같은 오판이 한 칸 낮은 자리에서 다시 난다.
   const evidenceGrade: WorkStateResult['evidenceGrade'] = directEvidence
     ? 'direct'
-    : mentionSurvives || artifacts.length > 0
+    : mentionSurvives
       ? 'proxy'
       : 'none'
 
@@ -162,26 +180,31 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   //    되돌리기를 가려낼 수 없다. 확인하지 못했으면 확정하지 않는다.
   //    가지가 정본의 조상이라는 것은 그 커밋들이 지금 정본 이력에 그대로 있다는 뜻이라
   //    그 자체가 생존 증거다. 언급(grep)만 있는 경우와 다르다.
-  const artifactSurvives =
-    repo.mergedIntoCanonical === true || onCanonical.length > 0 || repo.mentionedArtifactsPresent === true
+  const artifactSurvives = repo.mergedIntoCanonical === true || repo.mentionedArtifactsPresent === true
   if (merged && input.trackerDone === false && artifactSurvives && repo.mentionedOnlyReverts !== true) {
-    limitations.push('인수 조건 전체가 지금도 충족되는지는 확인하지 않았다 — 여기서 말하는 것은 구현의 생존까지다')
+    // **이 결론이 시키는 일은 "구현하지 말고 상태만 정리하라" 다.** 그러니 근거도 그만큼
+    // 무거워야 한다 (0.7.0 / C-4). 구현이 정본에 살아 있다는 것까지는 위에서 봤고,
+    // 남은 질문은 하나다 — 그 구현이 **받아들여졌는가**.
+    //
+    // 팀에 따라 코드가 정본에 있어도 tracker 를 일부러 열어 둔다(실 acceptance 가 남아서).
+    // 그런 자리에 "상태 정리만 하면 된다" 고 말하면 규약을 어기게 만든다. 그래서 검토가
+    // 끝났다고 말해 주는 근거가 없으면 확정하지 않고 기울기만 남긴다.
+    const accepted = acceptedByReview(input.change)
+    if (!accepted) {
+      limitations.push('구현이 받아들여졌는지 확인하지 못했다 — 인수가 남아 있다면 지금 할 일은 상태 정리가 아니다')
+    }
     // 측정된 반증은 언급-생존보다 무겁다: cherry 가 "가지에 정본 미반영 커밋이 남아
     // 있다"고 말했으면, 언급 grep 만으로 "할 일은 상태 정리"를 확정하지 않는다.
     if (repo.contentEquivalent === false) {
       limitations.push('작업 가지에 정본에 반영되지 않은 커밋이 남아 있다 (patch 대조) — 상태 정리만 남았다고 확정하지 않는다')
       return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: true, grade: evidenceGrade })
     }
-    return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: false, grade: evidenceGrade })
+    if (accepted) evidence.push(`검토가 끝났다고 표시돼 있다: ${accepted}`)
+    return decided('IMPLEMENTED_STALE_TRACKER', evidence, limitations, { demote: !accepted, grade: evidenceGrade })
   }
   if (merged && input.trackerDone === false) {
     // 병합 흔적은 있는데 생존을 확인하지 못했다 — 새 구현을 시키지도, 끝났다고 하지도 않는다.
     limitations.push('정본에 병합 흔적은 있으나 구현이 지금도 남아 있는지 확인하지 못했다')
-    return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true, grade: evidenceGrade })
-  }
-
-  // ② 구현 증거는 있는데 남은 검증 경로가 막혔다.
-  if (implemented && input.change === 'UNAVAILABLE' && !merged) {
     return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true, grade: evidenceGrade })
   }
 
@@ -221,6 +244,20 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
 
   // 구현 증거는 있는데 위 어디에도 안 걸린다 — 남은 것은 검증이고, 무엇이 막혔는지는 모른다.
   return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true, grade: evidenceGrade })
+}
+
+/**
+ * 검토가 끝났다고 말해 주는 표시가 있는가. 있으면 그 표시를 그대로 돌려준다.
+ *
+ * provider 어휘를 Core 가 읽는 자리는 최소로 둔다 — `requestsResponse` 가 이미 같은
+ * 방식으로 두 낱말을 보고 있고, 여기서 보는 것도 두 낱말뿐이다. 모르면 `null` 이며,
+ * 모른다는 것이 "받아들여졌다" 로 읽히지 않는 것이 이 함수의 요점이다.
+ */
+function acceptedByReview(change: WorkStateInput['change']): string | null {
+  if (!change || change === 'UNAVAILABLE' || change.missing) return null
+  const state = change.reviewState?.toUpperCase() ?? ''
+  if (state.includes('APPROVED') || state.includes('MERGED')) return change.reviewState!
+  return null
 }
 
 /** 검토가 응답을 요구하는가. provider 어휘를 해석하지 않고 두 가지 표시만 본다. */

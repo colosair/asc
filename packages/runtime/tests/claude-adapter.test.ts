@@ -153,10 +153,114 @@ describe('guard hook(3층) — 실행 직전 차단', () => {
       NOW,
     )
 
+    // 0.7.0 에서 이 자리의 판정이 바뀌었다. 예전에는 통과였다 — "사람 세션의 git push 까지
+    // 막으면 guard 가 아니라 방해다" 가 그 근거였다. 그런데 그 통과가 **결합이 사라졌을 때도**
+    // 열려 있었고, 그러면 관리 대상 세션의 외부 write 가 조용히 나간다. 이제 ASC 가 맡은
+    // workspace 에서는 밖으로 나가는 쓰기가 논리 세션 밖에서 성립하지 않는다.
     const outcome = await invokeHook(
       { tool_name: 'Bash', tool_input: { command: 'git push origin main' }, session_id: 'human-session', cwd: project },
     )
-    assert.equal(outcome.code, 0)
+    assert.equal(outcome.code, 2)
+    assert.match(outcome.stderr, /논리 세션 밖에서 나갈 수 없다/)
+    assert.match(outcome.stderr, /asc proceed/, '다음 걸음을 그대로 준다')
+  })
+
+  it('미등록 세션이라도 읽기는 막지 않는다', async () => {
+    const { project, store } = await attachedProject()
+    await claudeBindings(store).claim(
+      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
+      NOW,
+    )
+    for (const command of ['git status', 'git log --oneline -5', 'git fetch origin', 'npm test']) {
+      const outcome = await invokeHook(
+        { tool_name: 'Bash', tool_input: { command }, session_id: 'human-session', cwd: project },
+      )
+      assert.equal(outcome.code, 0, command)
+    }
+  })
+
+  // 0.7.0 — 따옴표 안은 인자이지 실행이 아니다 (D-04).
+  //
+  // 예전에는 명령 문자열 전체에 정규식을 걸어 `git commit -m "docs: push 관련"` 이
+  // `git push` 로 읽혔다. hook 이 받는 것이 문자열 하나뿐이라는 플랫폼 제약은 그대로이고,
+  // 인용부호와 제어 연산자를 구분하는 데까지가 이 층의 몫이다.
+  it('실행되지 않는 문장 안의 낱말을 명령으로 읽지 않는다', async () => {
+    const { project, store } = await attachedProject()
+    await claudeBindings(store).claim(
+      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
+      NOW,
+    )
+    const passes = [
+      'git commit -m "push later"',
+      'echo "git push later"',
+      'asc progress report --next "branch push 예정"',
+      "git commit -m 'chore: gh api 정리'",
+    ]
+    for (const command of passes) {
+      const outcome = await invokeHook(
+        { tool_name: 'Bash', tool_input: { command }, session_id: 'claude-abc', cwd: project },
+      )
+      assert.equal(outcome.code, 0, command)
+    }
+  })
+
+  it('조각으로 이어 붙여도, 문자열로 넘겨도 밖으로 나가는 쓰기는 막는다', async () => {
+    const { project, store } = await attachedProject()
+    await claudeBindings(store).claim(
+      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
+      NOW,
+    )
+    const blocks = [
+      'git push',
+      'git -C repo push',
+      'git commit -m "x" && git push',
+      'git add -A\ngit push origin main',
+      "sh -c 'git push'",
+      "eval 'git push'",
+      'glab mr create',
+    ]
+    for (const command of blocks) {
+      const outcome = await invokeHook(
+        { tool_name: 'Bash', tool_input: { command }, session_id: 'claude-abc', cwd: project },
+      )
+      assert.equal(outcome.code, 2, command)
+    }
+  })
+
+  // 0.7.0 / D-03 — 놓은 것이 guard 에 닿는다.
+  //
+  // 이 연결이 없어서 조사에서 못 잡았다. binding 단위 검사와 guard 단위 검사는 각각
+  // 있었는데, **release 뒤에 guard 가 무엇이라 답하는지**를 보는 것이 없었다.
+  it('release 하면 그 Run 은 더 이상 관리 대상이 아니다', async () => {
+    const { project, store } = await attachedProject()
+    const bindings = claudeBindings(store)
+    await bindings.claim(
+      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
+      NOW,
+    )
+
+    const blocked = await invokeHook({
+      tool_name: 'Bash',
+      tool_input: { command: 'git push origin main' },
+      session_id: 'claude-abc',
+      cwd: project,
+    })
+    assert.equal(blocked.code, 2, '계약 안에서는 승인 경로로만 나간다')
+    assert.match(blocked.stderr, /ASC-managed/)
+
+    assert.equal(await bindings.release('S-20260823-01', 'claude-abc'), true)
+
+    const after = await invokeHook({
+      tool_name: 'Bash',
+      tool_input: { command: 'git push origin main' },
+      session_id: 'claude-abc',
+      cwd: project,
+    })
+    // 계약 밖으로 나왔다. 그렇다고 열리지는 않는다 — ASC 가 맡은 자리이므로 여전히
+    // 막히되, 이유가 다르다: 관리 대상 세션의 금지가 아니라 세션 밖의 외부 write 다.
+    assert.equal(after.code, 2)
+    assert.match(after.stderr, /논리 세션 밖에서 나갈 수 없다/)
+    assert.doesNotMatch(after.stderr, /ASC-managed/, '놓은 계약의 이름으로 막지 않는다')
   })
 
   it('ASC 무관 프로젝트는 항상 통과한다', async () => {

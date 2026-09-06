@@ -4,7 +4,7 @@
 // 저장·동시성은 여기 없다 — 순수 함수로 다음 상태를 계산할 뿐이고, 실제 CAS는
 // State Store Port가 수행한다 (OM §7.0·§7.2).
 
-import type { ActorRole, ApprovalRequest, ExecutionGrant, MonitorEvent, QueueItem, Session } from './entities.ts'
+import type { ActorRole, ApprovalRequest, ExecutionGrant, MonitorEvent, Session } from './entities.ts'
 
 export type TransitionRule<S extends string> = {
   from: S
@@ -144,27 +144,6 @@ export function transitionGrant(
     throw new TransitionError('MISSING_REQUIREMENT', `${grant.id}: EXECUTED requires a result reference`)
   }
   return next
-}
-
-// ── QueueItem (OM §4.8) — Controller ONLY ───────────────────────────────────
-
-export const QUEUE_TRANSITIONS: readonly TransitionRule<QueueItem['state']>[] = [
-  { from: 'READY', to: 'ACTIVE', actors: ['controller'] },
-  { from: 'READY', to: 'BLOCKED', actors: ['controller'] },
-  { from: 'ACTIVE', to: 'BLOCKED', actors: ['controller'] },
-  { from: 'ACTIVE', to: 'DONE', actors: ['controller'] },
-  { from: 'BLOCKED', to: 'READY', actors: ['controller'] },
-  { from: 'BLOCKED', to: 'ACTIVE', actors: ['controller'] },
-]
-
-export function transitionQueueItem(
-  item: QueueItem,
-  to: QueueItem['state'],
-  actor: ActorRole,
-  patch: Partial<Pick<QueueItem, 'sessionId' | 'blockId'>> = {},
-): QueueItem {
-  resolve(QUEUE_TRANSITIONS, item.state, to, actor)
-  return { ...item, ...patch, state: to, version: item.version + 1 }
 }
 
 // ── MonitorEvent (OM §10.5) ─────────────────────────────────────────────────

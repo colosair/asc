@@ -129,12 +129,20 @@ export function withIdentity(
   const nextOverride = { ...override }
 
   if (input.controller) {
-    nextIdentities[input.name] = [input.actor]
+    // **한 사람이 여러 채널 identity 를 갖는다** (OM §11.6). schema 가 배열인 것이 그
+    // 뜻이고, 읽는 쪽(LocalIdentityBinding)도 배열 전체를 Set 으로 담아 대조한다.
+    // 그런데 여기서는 배열을 통째로 덮고 있었다 — 한 채널로 잡아 둔 identity 가 다음
+    // setup 에서 다른 채널 하나로 바뀌어 사라졌다. 더하고, 중복만 지운다.
+    const merged = (existing: unknown): string[] => [
+      ...new Set([
+        ...(Array.isArray(existing) ? existing.filter((v): v is string => typeof v === 'string') : []),
+        input.actor,
+      ]),
+    ]
+    nextIdentities[input.name] = merged(nextIdentities[input.name])
     const controller = { ...((nextOverride.controller as Record<string, unknown> | undefined) ?? {}) }
-    controller.identities = {
-      ...((controller.identities as Record<string, unknown> | undefined) ?? {}),
-      [input.name]: [input.actor],
-    }
+    const controllerIdentities = (controller.identities as Record<string, unknown> | undefined) ?? {}
+    controller.identities = { ...controllerIdentities, [input.name]: merged(controllerIdentities[input.name]) }
     nextOverride.controller = controller
   }
 

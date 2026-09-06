@@ -67,12 +67,14 @@ export function viewWorkspaces(
  * 대신해 무엇을 물어볼 자리도 없고, 없는 자리를 대신해 외부에 질문하면 그것은 관측이
  * 아니라 잡음이다.
  */
-export function dueWorkspaces(views: readonly WorkspaceView[]): { workspaceId: string; cwd: string }[] {
+export function dueWorkspaces(
+  views: readonly WorkspaceView[],
+): { workspaceId: string; cwd: string; root: string }[] {
   return views
     .filter((view) => view.health === 'ACTIVE')
     // 여러 checkout 이 있으면 아무 곳에서나 한 번이면 된다 — 관측 대상은 workspace 이지
     // checkout 이 아니다. 첫 번째를 쓰는 것은 안정적인 선택이다(목록 순서가 index 순서다).
-    .map((view) => ({ workspaceId: view.workspaceId, cwd: view.liveLocators[0]! }))
+    .map((view) => ({ workspaceId: view.workspaceId, cwd: view.liveLocators[0]!, root: view.root }))
 }
 
 /** 사람이 읽는 기계 전체 화면. `cd` 없이 지금 무엇이 도는지 보여야 한다 (설계 §13.2). */

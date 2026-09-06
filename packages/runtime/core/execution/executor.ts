@@ -103,10 +103,14 @@ export class Executor {
     )
     if (!executed.ok) return { ok: false, reason: 'CLAIMED_BY_OTHER' }
 
-    // 6. 요청을 닫는다. 외부에 무엇이 남았는지 요청에서 바로 따라갈 수 있어야 한다
-    await applyTransition(this.#store, 'request', claimed.entity.requestId, (r) =>
-      transitionRequest(r, 'DONE', 'executor', { resultRef: result.resultRef }),
-    )
+    // 6. 요청이 근거였다면 그 요청을 닫는다 — 외부에 무엇이 남았는지 요청에서 바로
+    //    따라갈 수 있어야 한다. 세션이 근거인 경우에는 닫을 요청이 없고, 그 자취는
+    //    아래 History 와 세션 자신의 기록에 남는다.
+    if (claimed.entity.requestId) {
+      await applyTransition(this.#store, 'request', claimed.entity.requestId, (r) =>
+        transitionRequest(r, 'DONE', 'executor', { resultRef: result.resultRef }),
+      )
+    }
     await this.#store.appendHistory({
       at: executedAt,
       actor: this.#runId,

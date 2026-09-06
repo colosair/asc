@@ -26,13 +26,20 @@ const keyOf = (logicalSessionId: string) => `runtime-binding:${logicalSessionId}
 const logKey = (logicalSessionId: string, seq: number) => `binding-log:${logicalSessionId}:${seq}`
 const logPrefix = (logicalSessionId: string) => `binding-log:${logicalSessionId}:`
 
-/** 내려놓음·승계의 흔적. 현재 view가 아니라 이력이다. */
+/**
+ * 집음·내려놓음·승계의 흔적. 현재 view가 아니라 이력이다.
+ *
+ * `CLAIMED` 가 여기 있는 이유는 실측이다. 내려놓음만 적으니 이력이 반쪽이 되어,
+ * "log 의 마지막이 RELEASED 인데 현재 binding 이 남아 있다" 를 stale 로 읽을 수 없었다 —
+ * 다시 집은 사실이 어디에도 없어서 정상 재결합과 지워지지 않은 묘비가 같은 모양이었다.
+ */
 export type BindingLogEntry = {
   logicalSessionId: string
   physicalSessionId: string
   provider: string
   workerId?: string
-  kind: 'RELEASED' | 'SUPERSEDED'
+  kind: 'CLAIMED' | 'RELEASED' | 'SUPERSEDED'
+  /** 집은 시각. CLAIMED 에서는 `endedAt` 과 같다 — 아직 끝나지 않았다. */
   claimedAt: string
   endedAt: string
 }
@@ -48,25 +55,59 @@ export class ScopedRuntimeBindings implements RuntimeBindings {
 
   async claim(binding: Omit<RuntimeBinding, 'updatedAt'>, at: string): Promise<ClaimOutcome> {
     const parsed = RuntimeBinding.parse({ ...binding, updatedAt: at })
+
+    // **한 Physical Run 은 한 번에 한 Logical Session 만 잡는다.**
+    //
+    // 지금까지 원자성은 Logical 쪽에서만 봤다 — 같은 physical 이 다른 세션을 하나 더
+    // 집는 것은 아무도 막지 않았고, 실측에서 그 겹침이 회차마다 나타났다
+    // (S-03 이 살아 있는 동안 S-04 가 같은 physical 로 집혔고, 그 뒤로도 계속).
+    // 그 상태에서는 guard 가 "이 physical 은 관리 대상" 이라고 답할 때 어느 계약을
+    // 말하는지 정해지지 않는다. 뺏지 않는다 — 그 결정은 사람의 것이다 (C-03 §3.2).
+    const held = await this.#currentOf(parsed.physicalSessionId)
+    if (held && held.logicalSessionId !== parsed.logicalSessionId) {
+      return { ok: false, reason: 'RUNTIME_CONFLICT', current: held }
+    }
+
     // setIfAbsent가 원자성을 진다 — 확인과 쓰기 사이에 다른 Physical Session이 끼지 못한다.
     if (await this.#scope.setIfAbsent(keyOf(parsed.logicalSessionId), JSON.stringify(parsed))) {
+      await this.#log(parsed, 'CLAIMED')
       return { ok: true, binding: parsed }
     }
     const current = await this.get(parsed.logicalSessionId)
     if (!current) {
       // 그 사이 owner가 내려놨다 — 한 번 더 집어 본다. 또 지면 진 것이다.
       if (await this.#scope.setIfAbsent(keyOf(parsed.logicalSessionId), JSON.stringify(parsed))) {
+        await this.#log(parsed, 'CLAIMED')
         return { ok: true, binding: parsed }
       }
       return { ok: false, reason: 'RUNTIME_CONFLICT', current: (await this.get(parsed.logicalSessionId))! }
     }
-    // 같은 Physical Session의 재-claim은 충돌이 아니라 이어 잡기다 (respawn 아님)
+    // 같은 Physical Session의 재-claim은 충돌이 아니라 이어 잡기다 (respawn 아님).
+    // 이력에 다시 적지 않는다 — 같은 결합이 이어진 것이지 새로 집은 것이 아니다.
     if (current.physicalSessionId === parsed.physicalSessionId) {
       const refreshed = { ...current, updatedAt: at }
       await this.#scope.set(keyOf(parsed.logicalSessionId), JSON.stringify(refreshed))
       return { ok: true, binding: refreshed }
     }
     return { ok: false, reason: 'RUNTIME_CONFLICT', current }
+  }
+
+  /** 이 Physical Run 이 지금 잡고 있는 결합. 없으면 `null`. */
+  async #currentOf(physicalSessionId: string): Promise<RuntimeBinding | null> {
+    for (const binding of await this.current()) {
+      if (binding.physicalSessionId === physicalSessionId) return binding
+    }
+    return null
+  }
+
+  /** 지금 살아 있는 결합 전부. 이력(log)은 여기 없다. */
+  async current(): Promise<RuntimeBinding[]> {
+    const out: RuntimeBinding[] = []
+    for (const key of await this.#scope.keys('runtime-binding:')) {
+      const raw = await this.#scope.get(key)
+      if (raw) out.push(RuntimeBinding.parse(JSON.parse(raw)))
+    }
+    return out
   }
 
   async observe(
@@ -106,7 +147,44 @@ export class ScopedRuntimeBindings implements RuntimeBindings {
     }
     const next = RuntimeBinding.parse({ ...binding, updatedAt: at })
     await this.#scope.set(keyOf(next.logicalSessionId), JSON.stringify(next))
+    if (!previous || previous.physicalSessionId !== next.physicalSessionId) {
+      await this.#log(next, 'CLAIMED')
+    }
     return next
+  }
+
+  /**
+   * 살아 있어야 할 이유가 없는 결합 (0.7.0).
+   *
+   * 판정은 이력과 시각으로만 한다: 이 세션의 마지막 사건이 **끝남**(RELEASED·SUPERSEDED)
+   * 인데 현재 결합이 그 시각보다 나중에 갱신되지 않았다면, 지워졌어야 할 것이 남은 것이다.
+   * 나중에 갱신됐으면 그것은 다시 집은 것이고 정상이다 — 그 구분이 없으면 정상 재결합을
+   * 죽은 것으로 읽는다.
+   *
+   * **아무것도 지우지 않는다.** 무엇이 그런 상태인지만 답하고, 치우는 것은 호출자가 한다.
+   */
+  async stale(): Promise<RuntimeBinding[]> {
+    const out: RuntimeBinding[] = []
+    for (const binding of await this.current()) {
+      const history = await this.history(binding.logicalSessionId)
+      const last = history.at(-1)
+      if (!last || last.kind === 'CLAIMED') continue
+      if (last.physicalSessionId !== binding.physicalSessionId) continue
+      // 끝남 이후에 갱신됐으면 다시 집은 것이다.
+      if (binding.updatedAt > last.endedAt) continue
+      out.push(binding)
+    }
+    return out
+  }
+
+  /**
+   * 그 결합을 치운다. **이력은 건드리지 않는다** — 있었던 일은 남는다.
+   * 이미 없으면 아무 일도 하지 않는다(멱등).
+   */
+  async forget(logicalSessionId: string): Promise<boolean> {
+    if (!(await this.get(logicalSessionId))) return false
+    await this.#scope.delete(keyOf(logicalSessionId))
+    return true
   }
 
   /** 이 세션을 거쳐 간 소유권 이력. 현재 owner는 여기 없다 — get()이 답한다. */
