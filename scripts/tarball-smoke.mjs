@@ -251,7 +251,7 @@ try {
   check(
     'the canonical entry answers with a plan, not a status rendering',
     initPlan !== null && Array.isArray(initPlan.changes),
-    `exit ${init.code} | stdout ${JSON.stringify((init.stdout ?? '').slice(0, 300))} | stderr ${JSON.stringify((init.stderr ?? '').slice(-600))}`,
+    `exit ${init.code} | stdout ${JSON.stringify((init.stdout ?? '').slice(0, 300))} | stderr ${JSON.stringify((init.stderr ?? '').slice(0, 800))}`,
   )
   // **한 번으로 끝난다.** 예전에는 여기서 profile 선택 벽에 멈춰 사람이 `profile adopt` 를
   // 따로 쳐야 했다. 이 저장소는 자기 remote 로 신원을 증명하므로 setup 이 그것으로 간다.

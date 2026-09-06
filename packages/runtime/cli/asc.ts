@@ -2153,6 +2153,13 @@ async function runSetupLifecycle(
         if (written) await relock(change.profile)
       },
     })
+  } catch (error) {
+    // **적용 실패는 stack trace 가 아니라 답이어야 한다.** agent 는 이 문서를 읽고 다음
+    // 행동을 정한다 — 예외가 그대로 나가면 stdout 이 비고 아무것도 판단할 수 없다.
+    console.log = speak
+    const detail = error instanceof Error ? error.message : String(error)
+    emit({ ...plan, status: 'apply_failed', changesApplied: false, detail })
+    return 1
   } finally {
     console.log = speak
   }
