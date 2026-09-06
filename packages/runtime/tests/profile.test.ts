@@ -430,11 +430,23 @@ describe('lock 보관과 Run 시작 guard', () => {
     await assert.rejects(() => readdir(join(ascRoot, 'archive', 'profile-locks')))
   })
 
-  it('Core 버전이 달라져도 잡는다', async () => {
+  it('Core 버전만 달라진 것은 멈추지 않고, 기록이 낡았다고만 말한다', async () => {
+    // lock 은 **사람이 바꾼 설정**을 잡는 파일이다. runtime 을 갈아 끼우면 판번호와
+    // 그것이 재료인 digest 가 함께 바뀌는데, 그때 멈추면 업데이트 한 번이 그 machine 의
+    // 모든 프로젝트를 세운다 — 실측에서 workspace 세 개가 그 한 가지 이유로 서 있었고,
+    // 둘은 여러 릴리스 동안 회차를 돌지 못했다.
     const { ascRoot } = await attached()
     const outcome = await guardOn(ascRoot, '0.2.0')
+    assert.ok(outcome.ok, '판번호 차이만으로 Run 이 막히면 안 된다')
+    assert.ok(outcome.staleLock?.some((d) => d.field === 'ascCore.version'), '낡았다는 사실은 남는다')
+  })
+
+  it('사람이 고친 설정은 판번호가 함께 움직여도 여전히 멈춘다', async () => {
+    const { ascRoot } = await attached()
+    await writeFile(join(ascRoot, 'override.json'), JSON.stringify({ schemaVersion: 1, monitorIdentities: ['x'] }), 'utf8')
+    const outcome = await guardOn(ascRoot, '0.2.0')
     assert.ok(!outcome.ok && outcome.reason === 'LOCK_DRIFT')
-    assert.ok(outcome.drifts.some((d) => d.field === 'ascCore.version'))
+    assert.ok(outcome.drifts.some((d) => d.field === 'override.digest'))
   })
 
   it('아직 붙이지 않았으면 막지 않는다 — 설정 없이 도는 경로가 있다', async () => {
