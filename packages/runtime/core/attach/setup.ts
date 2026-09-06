@@ -23,7 +23,7 @@ export type AttachmentState = 'READY' | 'UNATTACHED' | 'BROKEN' | 'LOCK_DRIFT'
 export type GateState = 'OPEN' | 'BLOCKED' | 'DEGRADED'
 
 export type SetupGate = {
-  id: 'approval' | 'monitor' | 'external-write'
+  id: 'approval' | 'monitor' | 'external-write' | 'canonical'
   label: string
   state: GateState
   /** 무엇이 없어서 막혔는지. */
@@ -44,6 +44,8 @@ export type SetupStatus = {
 }
 
 export type SetupInput = {
+  /** Profile 이 선언한 정본 갈래 수. 붙지 않았으면 알 수 없으므로 `undefined` 다. */
+  canonicalSources?: number
   attachment: AttachmentState
   /** 붙어 있는 Profile의 id와 출처. **Surface가 읽어 넘긴다** — Core는 경로를 모른다. */
   profile?: { id: string; origin: 'built-in' | 'external' }
@@ -78,7 +80,7 @@ export function assessSetup(input: SetupInput): SetupStatus {
     attachment: input.attachment,
     ...(input.profile ? { profile: input.profile } : {}),
     ready: [...ALWAYS_READY],
-    gates: [approvalGate(input), monitorGate(input), externalWriteGate(input)],
+    gates: [approvalGate(input), canonicalGate(input), monitorGate(input), externalWriteGate(input)],
   }
 }
 
@@ -95,6 +97,31 @@ function approvalGate(input: SetupInput): SetupGate {
     warnings: [],
     // 여기에 재고정을 적지 않는다 — 필요 없는 절차를 시키면 다음부터 안내를 안 믿는다
     howTo: ['open identities.json and add an approver in the $example form (no re-lock needed)'],
+  }
+}
+
+/**
+ * 정본 조회 (C-08 · C-11).
+ *
+ * 코드 결합은 선언돼 있는데 정본 갈래가 비어 있으면, 판정은 "확인 못 함" 으로만 나온다 —
+ * relevance 도 responsibility 도 정본을 딛고 서기 때문이다. 실기계에서 그 상태가 READY 로
+ * 보였고, 사람은 무엇이 빠졌는지 알 방법이 없었다. 없는 것을 없다고 말한다.
+ */
+function canonicalGate(input: SetupInput): SetupGate {
+  // 붙지 않았으면 이 축을 판정하지 않는다 — 아직 Profile 이 없다.
+  if (input.attachment !== 'READY' || input.canonicalSources === undefined) {
+    return { id: 'canonical', label: 'canonical evidence', state: 'OPEN', missing: [], warnings: [], howTo: [] }
+  }
+  if (input.canonicalSources > 0) {
+    return { id: 'canonical', label: 'canonical evidence', state: 'OPEN', missing: [], warnings: [], howTo: [] }
+  }
+  return {
+    id: 'canonical',
+    label: 'canonical evidence',
+    state: 'BLOCKED',
+    missing: ['the profile declares no canonical source, so nothing can be judged against a baseline'],
+    warnings: [],
+    howTo: [`declare one in the profile's canonical.sources — ${RESOLVE_AGAIN}`],
   }
 }
 

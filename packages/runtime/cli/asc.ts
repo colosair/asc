@@ -1663,6 +1663,61 @@ async function writeProfileBindings(
   return true
 }
 
+/**
+ * 이 checkout 이 증명하는 정본 갈래 (P0 F5).
+ *
+ * **remote 에게 물어본다.** 로컬 `origin/HEAD` 는 clone 시점에 고정돼 낡는다 — 이 저장소에서
+ * 그 값은 `main` 인데 remote 의 기본 branch 는 `develop` 이었다. 낡은 값을 정본으로 적으면
+ * 세션이 엉뚱한 baseline 을 딛는다. 물어보지 못하면 적지 않는다.
+ */
+async function canonicalProposalState(
+  projectRoot: string,
+  git: boolean,
+  profileId: string | undefined,
+  willCreate: boolean,
+): Promise<Pick<SetupState, 'canonicalProposal'>> {
+  if (!git || !profileId) return {}
+  const declared = await readProfileCanonical(profileId)
+  if (declared === null && !willCreate) return {}
+  if (declared !== null && declared > 0) return {}
+
+  const symref = await execText('git', ['-C', projectRoot, 'ls-remote', '--symref', 'origin', 'HEAD'])
+  const match = symref ? /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(symref) : null
+  const branch = match?.[1]
+  if (!branch) return {}
+  // provider 는 `git` 이다 — 이 값은 checkout 이 이미 들고 있는 사실이고, 그것을 읽는 통로가
+  // 선언된 provider 를 따른다 (canonical baseline 읽기).
+  return { canonicalProposal: { id: branch, provider: 'git', remote: 'origin', ref: branch } }
+}
+
+/** Profile 이 선언한 정본 갈래 수. 파일이 없으면 `null`. */
+async function readProfileCanonical(profileId: string): Promise<number | null> {
+  const path = join(externalProfileRoot(), profileId, 'profile.json')
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as { canonical?: { sources?: unknown } }
+    return Array.isArray(parsed.canonical?.sources) ? parsed.canonical.sources.length : 0
+  } catch {
+    return null
+  }
+}
+
+/**
+ * remote 가 말한 정본 갈래를 Profile 에 적는다. 이미 선언이 있으면 손대지 않는다.
+ */
+async function writeProfileCanonical(
+  profileId: string,
+  source: { id: string; provider: string; remote: string; ref: string },
+): Promise<boolean> {
+  const path = join(externalProfileRoot(), profileId, 'profile.json')
+  const profile = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+  const canonical = (profile.canonical ?? {}) as { sources?: unknown[] }
+  if (Array.isArray(canonical.sources) && canonical.sources.length > 0) return false
+  profile.canonical = { ...canonical, sources: [source] }
+  await writeFile(path, `${JSON.stringify(profile, null, 2)}\n`, 'utf8')
+  console.log(`canonical source declared in ${profileId}: ${source.remote}/${source.ref}`)
+  return true
+}
+
 /** Profile 이 이미 선언한 결합. 파일이 없으면 `null` — 없는 것과 비어 있는 것은 다르다. */
 async function readProfileBindings(
   profileId: string,
@@ -1703,6 +1758,12 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     ...adoptable,
     ...(await identityState(ascRoot, Boolean(ascRoot) || Boolean(targetProfile))),
     ...(await bindingProposalState(projectRoot, targetProfile, Boolean(adoptable.adoptable && !adoptable.adoptable.exists))),
+    ...(await canonicalProposalState(
+      projectRoot,
+      git,
+      targetProfile,
+      Boolean(adoptable.adoptable && !adoptable.adoptable.exists),
+    )),
     host: [{ id: 'claude', status: hostReport.status }],
     // Profile 이 작업 도구를 선언했으면 그 준비 상태까지 본다 (설계 §9.3).
     ...(await workBindingState(ascRoot, projectRoot)),
@@ -2015,6 +2076,12 @@ async function runSetupLifecycle(
   // stdout에 섞이면 JSON 문서 하나라는 계약이 깨진다 (C-14 §7) — 진단이므로 stderr로 보낸다.
   const speak = console.log
   if (asJson) console.log = console.error
+  const relock = async (profile: string): Promise<void> => {
+    const root = await discoverRoot(process.cwd(), values.root as string | undefined)
+    if (!root) return
+    const code = await runProfile('resolve', { ...values, profile, write: true }, root)
+    if (code !== 0) throw new Error(`profile re-lock 실패 (exit ${code})`)
+  }
   let outcome: ApplyResult
   try {
     outcome = await applySetupPlan(plan, {
@@ -2069,17 +2136,15 @@ async function runSetupLifecycle(
         if (code !== 0) throw new Error(`identity 결선 실패 (exit ${code})`)
       },
       // 발견이 증명한 결합을 Profile 에 적는다. 갈리는 것은 plan 에 들어오지 않는다.
+      declareCanonical: async (change) => {
+        const written = await writeProfileCanonical(change.profile, change.source)
+        if (written) await relock(change.profile)
+      },
       declareBindings: async (change) => {
         const written = await writeProfileBindings(change.profile, change.bindings)
         // Profile 을 고쳤으면 lock 이 어긋난다 — 다음 명령이 그 drift 앞에서 멈춘다.
         // 고친 쪽이 닫는다 (setup identity 가 하는 것과 같다).
-        if (written) {
-          const root = await discoverRoot(process.cwd(), values.root as string | undefined)
-          if (root) {
-            const code = await runProfile('resolve', { ...values, profile: change.profile, write: true }, root)
-            if (code !== 0) throw new Error(`profile re-lock 실패 (exit ${code})`)
-          }
-        }
+        if (written) await relock(change.profile)
       },
     })
   } finally {
@@ -2123,6 +2188,7 @@ async function inspectSetup(root: string): Promise<SetupStatus> {
     ...(runtime
       ? { profile: { id: runtime.layers.profile.id, origin: runtime.layers.profileOrigin } }
       : {}),
+    ...(runtime ? { canonicalSources: runtime.layers.profile.canonical.sources.length } : {}),
     hasApprovers: Object.keys(await loadIdentityMap(root)).length > 0,
     hasControllerIdentities: Object.keys(runtime?.controllerIdentities ?? {}).length > 0,
     hasMonitorIdentities: (runtime?.monitor.identities?.length ?? 0) > 0,

@@ -215,3 +215,71 @@ describe('P0 fresh onboarding — 되묻지 않고, 순서를 지킨다', () => 
     assert.equal(plan.changes.some((change) => change.target === 'persistent-runtime'), false)
   })
 })
+
+describe('F5 — 정본 갈래까지 결선한다', () => {
+  const attaching: SetupState = {
+    entry: 'bootstrap',
+    projectRoot: '/work/project',
+    git: true,
+    profileCandidates: ['PROJ'],
+    scope: 'local',
+    host: [{ id: 'claude', status: 'INSTALLED_CURRENT' }],
+    adoptable: { id: 'PROJ', exists: true },
+  }
+
+  it('C1 — remote 가 말한 기본 branch 가 정본 갈래로 계획에 든다', () => {
+    const plan = computeSetupPlan({
+      ...attaching,
+      canonicalProposal: { id: 'develop', provider: 'git', remote: 'origin', ref: 'develop' },
+    })
+    const change = plan.changes.find((c) => c.target === 'profile-canonical')
+    assert.ok(change)
+    assert.deepEqual(change.target === 'profile-canonical' && change.source, {
+      id: 'develop',
+      provider: 'git',
+      remote: 'origin',
+      ref: 'develop',
+    })
+    assert.match(renderSetupPlan(plan).join('\n'), /declare canonical source in PROJ: origin\/develop/)
+  })
+
+  it('알 수 없으면 지어내지 않는다 — 세션이 못 읽는 정본을 딛게 하지 않는다', () => {
+    const plan = computeSetupPlan(attaching)
+    assert.equal(plan.changes.some((c) => c.target === 'profile-canonical'), false)
+  })
+
+  it('C4 — work 결합과 정본 갈래는 다른 축이다', () => {
+    const plan = computeSetupPlan({
+      ...attaching,
+      bindingProposal: [
+        { role: 'code-primary', adapter: 'gitlab', resource: 'group/project' },
+        { role: 'work', adapter: 'jam', resource: 'PROJ' },
+      ],
+      canonicalProposal: { id: 'develop', provider: 'git', remote: 'origin', ref: 'develop' },
+    })
+    const canonical = plan.changes.find((c) => c.target === 'profile-canonical')
+    // 정본은 코드 쪽 사실이다 — 작업 도구가 여기 오면 안 된다.
+    assert.equal(canonical?.target === 'profile-canonical' && canonical.source.provider, 'git')
+    const bindings = plan.changes.find((c) => c.target === 'profile-bindings')
+    assert.equal(
+      bindings?.target === 'profile-bindings' && bindings.bindings.some((b) => b.role === 'work' && b.adapter === 'jam'),
+      true,
+    )
+  })
+
+  it('결합과 정본을 적은 뒤에 등록한다 — 순서가 곧 계약이다', () => {
+    const plan = computeSetupPlan({
+      ...attaching,
+      adoptable: { id: 'PROJ', exists: false },
+      profileCandidates: [],
+      identity: { wired: false, actor: 'gitlab:me' },
+      bindingProposal: [{ role: 'code-primary', adapter: 'gitlab', resource: 'group/project' }],
+      canonicalProposal: { id: 'develop', provider: 'git', remote: 'origin', ref: 'develop' },
+      persistentRuntime: { action: 'install', adapter: 'launchd' },
+    })
+    assert.deepEqual(
+      plan.changes.map((c) => c.target),
+      ['adopt-profile', 'attach-workspace', 'identity', 'profile-bindings', 'profile-canonical', 'persistent-runtime'],
+    )
+  })
+})

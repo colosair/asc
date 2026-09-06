@@ -84,6 +84,12 @@ export type SetupState = {
    * 갈리면 비어 있다 — 고르는 것은 사람이다 (C-09 §4.2).
    */
   bindingProposal?: readonly { role: string; adapter: string; resource: string }[]
+  /**
+   * 이 checkout 이 증명하는 정본 갈래. remote 가 스스로 말한 기본 branch 하나이며,
+   * Profile 에 정본 선언이 비어 있을 때만 관측한다. 알 수 없으면 없다 — 지어내면 세션이
+   * 읽지 못하는 정본을 딛고 서게 된다.
+   */
+  canonicalProposal?: { id: string; provider: string; remote: string; ref: string }
   workBinding?: {
     adapter: string
     resource: string
@@ -126,6 +132,14 @@ export type SetupChange =
    * fresh onboarding 에서 실제로 필요했던 단계다.
    */
   | { target: 'profile-bindings'; profile: string; bindings: readonly { role: string; adapter: string; resource: string }[] }
+  /**
+   * Profile 에 정본 갈래를 적는다.
+   *
+   * 이것이 비어 있으면 판정이 전부 "확인 못 함" 으로 나온다 — relevance 도
+   * responsibility 도 정본을 딛고 서기 때문이다. 근거는 remote 가 스스로 말한 기본
+   * branch 이고, 그 값을 얻지 못하면 이 변경은 계획에 들지 않는다.
+   */
+  | { target: 'profile-canonical'; profile: string; source: { id: string; provider: string; remote: string; ref: string } }
   /** Host 설치물을 지금 source에 맞춘다. 왜 필요한지까지 든다. */
   | { target: 'host-install'; host: string; from: string }
   /**
@@ -389,9 +403,14 @@ function pushWorkspaceChanges(
     changes.push({ target: 'identity', actor: state.identity.actor })
   }
   const profile = attachingProfile ?? state.attachedProfile
-  if (profile && state.bindingProposal && state.bindingProposal.length > 0) {
+  if (!profile) return
+  if (state.bindingProposal && state.bindingProposal.length > 0) {
     evidence.push(`bindings proposed=${state.bindingProposal.map((b) => `${b.role}:${b.adapter}`).join(', ')}`)
     changes.push({ target: 'profile-bindings', profile, bindings: state.bindingProposal })
+  }
+  if (state.canonicalProposal) {
+    evidence.push(`canonical proposed=${state.canonicalProposal.remote}/${state.canonicalProposal.ref}`)
+    changes.push({ target: 'profile-canonical', profile, source: state.canonicalProposal })
   }
 }
 
@@ -462,6 +481,8 @@ export type SetupEffects = {
   wireIdentity?(change: Extract<SetupChange, { target: 'identity' }>): Promise<void>
   /** 발견이 증명한 결합을 Profile 에 적는다. */
   declareBindings?(change: Extract<SetupChange, { target: 'profile-bindings' }>): Promise<void>
+  /** remote 가 말한 정본 갈래를 Profile 에 적는다. */
+  declareCanonical?(change: Extract<SetupChange, { target: 'profile-canonical' }>): Promise<void>
 }
 
 export type ApplyResult = {
@@ -488,9 +509,10 @@ const CHANGE_ORDER: Record<SetupChange['target'], number> = {
   'attach-workspace': 2,
   identity: 3,
   'profile-bindings': 4,
-  'work-binding-setup': 5,
-  'host-install': 6,
-  'persistent-runtime': 7,
+  'profile-canonical': 5,
+  'work-binding-setup': 6,
+  'host-install': 7,
+  'persistent-runtime': 8,
 }
 
 /**
@@ -540,6 +562,10 @@ export async function applySetupPlan(plan: SetupPlan, effects: SetupEffects): Pr
         if (!effects.declareBindings) continue
         await effects.declareBindings(change)
         break
+      case 'profile-canonical':
+        if (!effects.declareCanonical) continue
+        await effects.declareCanonical(change)
+        break
     }
     applied.push(change)
   }
@@ -580,5 +606,7 @@ function changeLine(change: SetupChange): string {
       return `  declare bindings in ${change.profile}: ${change.bindings
         .map((b) => `${b.role}=${b.adapter}:${b.resource}`)
         .join(', ')}`
+    case 'profile-canonical':
+      return `  declare canonical source in ${change.profile}: ${change.source.remote}/${change.source.ref}`
   }
 }

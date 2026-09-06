@@ -70,10 +70,25 @@ describe('B-21 Gate — 서식 예시가 파서를 오염시키지 않는다', (
 describe('B-21 Gate — 판정 정확성', () => {
   it('아무것도 없으면 세 경로가 다 막힌다', () => {
     const status = assessSetup(nothing)
+    // 정본 축은 붙지 않은 상태에서 판정하지 않는다 — 아직 Profile 이 없다.
     assert.deepEqual(
-      status.gates.map((g) => g.state),
+      status.gates.filter((g) => g.id !== 'canonical').map((g) => g.state),
       ['BLOCKED', 'BLOCKED', 'BLOCKED'],
     )
+  })
+
+  it('붙었는데 정본 갈래가 없으면 READY 라고 하지 않는다 (C2)', () => {
+    const attached = { ...nothing, attachment: 'READY' as const, hasApprovers: true }
+    assert.equal(
+      assessSetup({ ...attached, canonicalSources: 0 }).gates.find((g) => g.id === 'canonical')?.state,
+      'BLOCKED',
+    )
+    assert.equal(
+      assessSetup({ ...attached, canonicalSources: 1 }).gates.find((g) => g.id === 'canonical')?.state,
+      'OPEN',
+    )
+    // 붙지 않았으면 이 축으로 막지 않는다 — 판정할 Profile 이 없다.
+    assert.equal(assessSetup(attached).gates.find((g) => g.id === 'canonical')?.state, 'OPEN')
   })
 
   it('identities만 채우면 승인 결정만 열린다', () => {
