@@ -90,7 +90,7 @@ describe('B-46 Gate — guard가 역색인으로 workspace를 찾는다 (C-11 §
     }
   })
 
-  it('관리 대상이 아닌 세션은 등록된 workspace 안이어도 통과한다', async () => {
+  it('관리 대상이 아닌 세션의 읽기는 등록된 workspace 안이어도 통과한다', async () => {
     const { home, project, hook, cleanup } = await scratch()
     try {
       const id = newWorkspaceId()
@@ -106,8 +106,17 @@ describe('B-46 Gate — guard가 역색인으로 workspace를 찾는다 (C-11 §
         }),
       )
 
+      // 0.7.0 — 읽기는 그대로 통과한다. 밖으로 나가는 쓰기만 논리 세션을 요구한다.
+      const read = runGuard(hook, home, {
+        tool_name: 'Bash',
+        tool_input: { command: 'git status' },
+        session_id: 'someone-elses-session',
+        cwd: project,
+      })
+      assert.equal(read.code, 0, '조사까지 막으면 guard 가 아니라 방해다')
+
       const result = runGuard(hook, home, push(project, 'someone-elses-session'))
-      assert.equal(result.code, 0, '사람의 일반 세션까지 막지 않는다')
+      assert.equal(result.code, 2, 'ASC 가 맡은 자리에서 밖으로 나가는 쓰기는 계약 안에서만 나간다')
     } finally {
       await cleanup()
     }

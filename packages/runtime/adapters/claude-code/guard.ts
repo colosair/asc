@@ -86,11 +86,120 @@ export function workerSettings(): string {
   )}\n`
 }
 
-export function isForbiddenCommand(command: string): { forbidden: boolean; label?: string } {
-  for (const { pattern, label } of FORBIDDEN_COMMAND_PATTERNS) {
-    if (pattern.test(command)) return { forbidden: true, label }
+/**
+ * 한 줄의 명령을 **실제로 실행되는 조각들**로 가른다 (0.7.0).
+ *
+ * 이 함수가 있는 이유는 실측이다. 예전에는 명령 문자열 전체에 정규식을 걸었고,
+ * `git commit -m "docs: push 관련"` 이 `git push` 로 읽혔다. 따옴표 안은 인자이지
+ * 실행이 아니다.
+ *
+ * 가르는 기준은 **따옴표 밖의** 제어 연산자와 개행뿐이다: `;` `&&` `||` `|` `\n`.
+ * 각 조각은 두 부분으로 나온다 —
+ *
+ * ```text
+ * bare    따옴표를 걷어낸 나머지. 판정은 여기서만 한다.
+ * quoted  따옴표 안에 있던 것들. 보통은 인자이지만, `sh -c` 처럼 그 자체가 명령이
+ *         되는 자리가 있어 호출자가 다시 볼 수 있게 함께 준다.
+ * ```
+ *
+ * **범용 shell 파서가 아니다.** 치환·here-doc·중첩 따옴표의 모든 경우를 풀지 않는다.
+ * hook 이 받는 것이 문자열 하나뿐이라는 플랫폼 제약 위에서, 인용부호를 구분하는 데까지가
+ * 이 함수의 몫이다.
+ *
+ * **hook 스크립트가 이 함수의 소스를 그대로 실어 나른다** — 그래서 자기 완결적이어야 하고,
+ * 바깥 식별자를 참조하면 안 된다.
+ */
+export function segmentsOf(command: string): { bare: string; quoted: string[] }[] {
+  const segments: { bare: string; quoted: string[] }[] = []
+  let bare = ''
+  let quoted: string[] = []
+  let buffer = ''
+  let quote: string | null = null
+
+  const flush = () => {
+    if (bare.trim().length > 0 || quoted.length > 0) segments.push({ bare, quoted })
+    bare = ''
+    quoted = []
   }
-  return { forbidden: false }
+
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i]!
+    if (quote) {
+      if (char === '\\' && quote === '"' && i + 1 < command.length) {
+        buffer += command[i + 1]
+        i += 1
+        continue
+      }
+      if (char === quote) {
+        quoted.push(buffer)
+        buffer = ''
+        quote = null
+        // 따옴표가 있던 자리는 공백으로 남긴다 — 앞뒤 토큰이 붙어 버리면 안 된다.
+        bare += ' '
+        continue
+      }
+      buffer += char
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === '\\' && i + 1 < command.length) {
+      // 이스케이프된 문자는 그대로 인자다. 연산자로 읽히지 않게 한다.
+      bare += command[i + 1] === '\n' ? ' ' : command[i + 1]
+      i += 1
+      continue
+    }
+    if (char === '\n' || char === ';' || char === '|' || char === '&') {
+      // `&&` `||` 는 두 글자다 — 한 번만 자른다.
+      if ((char === '|' || char === '&') && command[i + 1] === char) i += 1
+      flush()
+      continue
+    }
+    bare += char
+  }
+  if (quote) {
+    // 닫히지 않은 따옴표. 그 안의 것을 인자로 단정하지 않는다 — 판정 대상에 남긴다.
+    bare += ' ' + buffer
+  }
+  flush()
+  return segments
+}
+
+/** 이 조각이 다른 명령을 문자열로 받아 실행하는 자리인가. */
+function runsGivenText(bare: string): boolean {
+  return /(^|\s)(?:sh|bash|zsh|dash|ksh)\s+(?:-[a-zA-Z]*\s+)*-c(\s|$)/.test(bare) || /(^|\s)eval(\s|$)/.test(bare)
+}
+
+/**
+ * 금지된 외부 write 가 이 명령 안에 있는가.
+ *
+ * 따옴표 밖에서만 판정하고, `sh -c '…'` · `eval '…'` 처럼 따옴표 안이 곧 명령인 자리에서는
+ * 그 안을 한 번 더 본다. 그 밖의 우회(치환·파일 경유 실행 등)는 이 층이 잡지 못한다 —
+ * 그것은 알려진 한계이며 C-03 §5.3 의 3층 방어가 그 자리를 나눠 진다.
+ */
+export function forbiddenIn(
+  command: string,
+  patterns: readonly { pattern: RegExp; label: string }[],
+): string | null {
+  for (const segment of segmentsOf(command)) {
+    for (const { pattern, label } of patterns) {
+      if (pattern.test(segment.bare)) return label
+    }
+    if (runsGivenText(segment.bare)) {
+      for (const inner of segment.quoted) {
+        const nested = forbiddenIn(inner, patterns)
+        if (nested) return nested
+      }
+    }
+  }
+  return null
+}
+
+export function isForbiddenCommand(command: string): { forbidden: boolean; label?: string } {
+  const label = forbiddenIn(command, FORBIDDEN_COMMAND_PATTERNS)
+  return label ? { forbidden: true, label } : { forbidden: false }
 }
 
 /** 1층 — worker에게 주입하는 계약문. 지침이지 enforcement가 아니라고 전제한다. */
@@ -144,6 +253,14 @@ export function hookScript(): string {
     list.map((p) => `  { pattern: ${p.pattern.toString()}, label: ${JSON.stringify(p.label)} },`).join('\n')
   const patterns = asSource(FORBIDDEN_COMMAND_PATTERNS)
   const offlinePatterns = asSource(OFFLINE_COMMAND_PATTERNS)
+  // **판정 로직을 두 번 쓰지 않는다.** 위 함수들의 소스를 그대로 실어 나른다 — 손으로
+  // 옮겨 적으면 언젠가 hook 과 단위 검사가 서로 다른 것을 막는다. 그래서 저 함수들은
+  // 바깥 식별자를 참조하지 않는다.
+  const logic = [segmentsOf, runsGivenText, forbiddenIn]
+    .map((fn) => fn.toString())
+    .join('\n\n')
+    .replace(/`/g, '\\`')
+    .replace(/\$\{/g, '\\${')
   return `#!/usr/bin/env node
 // ASC external-write guard (PreToolUse) — 설치·갱신은 \`asc host claude install\` 로만.
 // 관리 대상(ASC RuntimeBinding에 등록된) Claude 세션의 외부 write를 실행 직전에 막는다.
@@ -164,6 +281,8 @@ ${patterns}
 const OFFLINE_ONLY = [
 ${offlinePatterns}
 ]
+
+${logic}
 
 /**
  * 원격이 얼어 있는가. 얼어 있으면 완전 오프라인인지까지 본다.
@@ -268,14 +387,13 @@ const registered = lookupWorkspace(cwd)
 if (registered === 'MISSING') {
   // **조건부 fail-closed** (C-11 §4). 이 경로는 ASC가 맡은 곳인데 runtime을 읽지 못했다.
   // 그대로 통과시키면 관리 대상 세션의 외부 write가 조용히 열린다 — 그게 가장 나쁘다.
-  for (const { pattern, label } of FORBIDDEN) {
-    if (pattern.test(command)) {
-      console.error(
-        \`[ASC guard] 이 경로는 ASC workspace로 등록돼 있는데 runtime을 읽지 못했다. \` +
-        \`'\${label}' 를 막는다 — asc setup status 로 확인하라.\`,
-      )
-      process.exit(2)
-    }
+  const blocked = forbiddenIn(command, FORBIDDEN)
+  if (blocked) {
+    console.error(
+      \`[ASC guard] 이 경로는 ASC workspace로 등록돼 있는데 runtime을 읽지 못했다. \` +
+      \`'\${blocked}' 를 막는다 — asc setup status 로 확인하라.\`,
+    )
+    process.exit(2)
   }
   process.exit(0)
 }
@@ -303,7 +421,28 @@ if (isMutation && !managed) {
   process.exit(2)
 }
 
-if (!managed) process.exit(0)
+// **관리 대상 workspace 인데 이 Run 이 어느 계약에도 들어 있지 않다** (0.7.0 B-1).
+//
+// 지금까지 여기서 통과시켰다. 그래서 결합이 사라지거나 아직 생기지 않은 상태의 세션은
+// 계약 밖에서 밖으로 쓸 수 있었다 — guard 가 있는데 열려 있는 상태이고, 그것이 가장 나쁘다.
+// 읽기는 그대로 통과한다. 막는 것은 밖으로 나가는 쓰기뿐이다.
+if (!managed) {
+  const outward = forbiddenIn(command, FORBIDDEN)
+  if (outward) {
+    const id = observedSessionId || '<this session id>'
+    console.error(
+      [
+        \`[ASC guard] 이 workspace 는 ASC 가 관리한다. '\${outward}' 는 논리 세션 밖에서 나갈 수 없다.\`,
+        '  asc proceed --work <WORK-KEY> --json     # 작업 항목이 있으면',
+        '  asc proceed --json                       # 이어갈 세션을 고르거나 계약을 제안받는다',
+        '  asc host claude bind <S-ID> --physical ' + id,
+        '읽기·조회는 막지 않는다 — 막는 것은 밖으로 나가는 쓰기뿐이다.',
+      ].join('\\n'),
+    )
+    process.exit(2)
+  }
+  process.exit(0)
+}
 
 // 관찰은 여기서 끝난다 — 아래 차단 판정은 이 호출의 성패를 보지 않는다
 try {
@@ -313,27 +452,25 @@ try {
 // 변경 도구는 여기까지다 — 아래 목록은 Bash 명령에 대한 것이다.
 if (isMutation) process.exit(0)
 
-for (const { pattern, label } of FORBIDDEN) {
-  if (pattern.test(command)) {
-    console.error(
-      \`[ASC guard] '\${label}' 는 ASC-managed 세션에서 금지다. \` +
-      \`외부 반영은 승인된 Execution Grant(asc grant run)로만 나간다.\`,
-    )
-    process.exit(2) // exit 2 = 도구 실행 차단
-  }
+const forbidden = forbiddenIn(command, FORBIDDEN)
+if (forbidden) {
+  console.error(
+    \`[ASC guard] '\${forbidden}' 는 ASC-managed 세션에서 금지다. \` +
+    \`외부 반영은 승인된 Execution Grant(asc grant run)로만 나간다.\`,
+  )
+  process.exit(2) // exit 2 = 도구 실행 차단
 }
 
 // 완전 오프라인 선언이 있을 때만 읽기까지 막는다. 로컬 작업은 얼리지 않는다.
 const freeze = freezePolicy(ascRoot)
 if (freeze && freeze.frozen && freeze.denyRemoteRead) {
-  for (const { pattern, label } of OFFLINE_ONLY) {
-    if (pattern.test(command)) {
-      console.error(
-        \`[ASC guard] 완전 오프라인이다\${freeze.reason ? ' (' + freeze.reason + ')' : ''} — '\${label}' 를 막는다. \` +
-        \`로컬 작업은 그대로 된다. 녹이려면 asc thaw.\`,
-      )
-      process.exit(2)
-    }
+  const offline = forbiddenIn(command, OFFLINE_ONLY)
+  if (offline) {
+    console.error(
+      \`[ASC guard] 완전 오프라인이다\${freeze.reason ? ' (' + freeze.reason + ')' : ''} — '\${offline}' 를 막는다. \` +
+      \`로컬 작업은 그대로 된다. 녹이려면 asc thaw.\`,
+    )
+    process.exit(2)
   }
 }
 
