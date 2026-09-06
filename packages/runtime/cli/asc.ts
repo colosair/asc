@@ -926,10 +926,11 @@ async function runParsedCommand(
   // 첫 진단 표면. 붙지 않은 자리에서도 답해야 한다.
   if (group === 'status') return runStatus(values)
 
-  // `asc init` 은 `asc setup` 이 됐다. 옛 이름은 두 minor 동안 그대로 답한다 (§58).
-  if (group === 'init') {
-    return withDeprecation('asc setup', values, () => runSetup('apply', { ...values, agent: values.json ? true : values.agent }, entry))
-  }
+  // `asc init` 의 자리는 `asc setup` 이 이어받았다. 옛 이름은 두 minor 동안 그대로 답한다 —
+  // **하던 일을 그대로 하면서** 새 이름을 말한다 (§58). 같은 이름에 다른 동작을 넣으면
+  // 그것은 alias 가 아니라 조용한 계약 변경이다: `asc init --profile <id>` 는 이 저장소를
+  // 붙이는 명령이고, `asc setup` 은 기계까지 준비시키는 더 넓은 명령이다.
+  if (group === 'init') return runInit(values)
 
   // setup은 **붙기 전에도** 답을 줘야 한다. 아래 discoverRoot 실패는 exit 2로 끊는데,
   // 그러면 "아직 안 붙었다"를 확인하려고 부른 명령이 안 붙었다는 이유로 죽는다.

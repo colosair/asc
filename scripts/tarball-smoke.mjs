@@ -101,7 +101,7 @@ try {
   console.log('\nRunning the installed bin — the repository sources are not used')
 
   const help = run('asc', ['--help'])
-  check('asc --help', help.code === 0 && help.stdout.includes('asc proceed'))
+  check('asc --help', help.code === 0 && help.stdout.includes('asc work start'))
 
   const runtime = run('asc', ['runtime', 'status'])
   check('asc runtime status', runtime.code === 0 && /package/.test(runtime.stdout))
@@ -417,7 +417,7 @@ try {
   const beforeGlobalHome = await treeOf(globalHome)
 
   const globalHelp = globalRun(['--help'])
-  check('the global asc answers --help', globalHelp.code === 0 && globalHelp.stdout.includes('asc proceed'))
+  check('the global asc answers --help', globalHelp.code === 0 && globalHelp.stdout.includes('asc work start'))
 
   // 진단이지 실패가 아니다 — exit code가 아니라 인쇄된 판정을 본다 (AGENTS.md §4).
   const globalStatus = globalRun(['setup', 'status'])
