@@ -638,7 +638,13 @@ function reportNodeRuntime(check: Extract<NodeRuntimeCheck, { ok: false }>, asJs
   for (const action of actions) console.error(`  ${action.node.version} at ${action.node.path}\n    ${action.display}`)
 }
 
+/** 재실행을 가로질러 진입점을 나르는 자리. 값은 `bootstrap` 하나뿐이다. */
+export const ENTRY_ENV = 'ASC_ENTRY'
+
 export async function runAscCommand(argv: string[], entry: AscEntry = 'runtime'): Promise<number> {
+  // 호환 Node 로 다시 실행된 프로세스는 자기가 어느 문으로 들어왔는지 argv 로는 알 수 없다.
+  const inherited = process.env[ENTRY_ENV] === 'bootstrap' ? ('bootstrap' as const) : undefined
+  entry = inherited ?? entry
   let parsed: ReturnType<typeof parseArgsOrThrow>
   try {
     parsed = parseArgsOrThrow(argv)
@@ -805,7 +811,11 @@ async function runParsedCommand(
   if (!runnable.ok) {
     // 후보를 이미 찾았으면 처방 대신 실행한다 — 같은 명령, 같은 argv, 호환 Node (A6).
     const reexec = reexecWithCandidate(runnable, argv, {
-      env: process.env,
+      // **어느 문으로 들어왔는지가 재실행을 넘어가야 한다.** 이것이 없으면 bootstrap 으로
+      // 시작한 첫 설치가 재실행 뒤 자기를 설치된 runtime 이라고 말하고, 그러면 stable
+      // runtime 설치도 기계 등록도 계획에 들지 않는다 — 기본 Node 가 하한보다 낮은 기계에서
+      // 첫 설치가 조용히 절반만 끝나던 자리다.
+      env: { ...process.env, [ENTRY_ENV]: entry },
       entry: fileURLToPath(import.meta.url),
       spawn: (path, args, env) => {
         const child = spawnSync(path, args, { stdio: 'inherit', env: env as NodeJS.ProcessEnv })
