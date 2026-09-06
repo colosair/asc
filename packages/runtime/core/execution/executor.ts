@@ -16,7 +16,7 @@
 
 import type { ExecutionGrant } from '../model/entities.ts'
 import { transitionGrant, transitionRequest } from '../model/transitions.ts'
-import { reviewExternalAction, verifyAgainst, type ReviewOutcome } from './remote-review.ts'
+import { expectationOf, revalidate, verifyAgainst } from './remote-review.ts'
 import type { ScmPort } from '../../ports/scm.ts'
 import type { StateStore } from '../../ports/state-store.ts'
 import { applyTransition } from '../runtime/store-ops.ts'
@@ -32,10 +32,13 @@ export type ExecuteOutcome =
   | { ok: false; reason: 'FORBIDDEN_ACTION'; detail: string }
   /** 승인 이후 대상이 움직였다 — 실행하지 않고 되돌린다. */
   | { ok: false; reason: 'DRIFT'; detail: string }
-  /** 실행 직전 재검수가 "지금 이 행동은 성립하지 않는다" 로 답했다. 밖은 그대로다. */
-  | { ok: false; reason: 'NOT_EXECUTABLE'; detail: string; review: ReviewOutcome }
-  /** 사람이 봐야 하는 것이 남아 있다 — 범위 밖 대상·모호함. 밖은 그대로다. */
-  | { ok: false; reason: 'REVIEW_REQUIRED'; detail: string; review: ReviewOutcome }
+  /**
+   * 실행 직전 재확인이 "지금은 성립하지 않는다" 로 답했다. 밖은 그대로다.
+   *
+   * 여기서 사람에게 다시 묻지 않는다 — 무엇을 할지는 이미 결정됐고, 이 자리가 답하는
+   * 것은 그 결정이 딛고 선 사실이 아직 그대로인가 하나다.
+   */
+  | { ok: false; reason: 'NOT_EXECUTABLE'; detail: string }
   /** 밖에서 거절했다. 나간 것이 없다는 것이 확인된 실패다. */
   | { ok: false; reason: 'REJECTED'; detail: string }
   /**
@@ -121,31 +124,35 @@ export class Executor {
       payload: claimed.entity.payload,
     }
 
-    // 4. 실행 직전 재검수 (0.8.0 §D). 승인은 그때의 사실 위에서 났다 — 그 사실이 아직
-    //    그대로인지 **읽기만으로** 확인한다. 여기서 멈추면 밖은 하나도 바뀌지 않는다.
-    let review: ReviewOutcome | undefined
+    // 4. 실행 직전 재확인. 승인은 그때의 사실 위에서 났다 — **바뀔 수 있는 것만**
+    //    읽기로 다시 본다. 모호함·읽지 못한 사실은 결정 시점에 이미 사람이 넘어간 것이고,
+    //    여기서 다시 꺼내면 그것이 두 번째 승인 벽이 된다.
+    let expected: Record<string, string> | undefined
     if (this.#scm.review) {
       const facts = await this.#scm.review(action)
-      review = reviewExternalAction({
+      // 되돌려 읽을 수 없는 행위는 자율 실행에서 내보내지 않는다 — 나간 뒤에 아무도
+      // 확인할 수 없는 쓰기가 된다. 사람이 실행하는 자리에서는 그 판단이 사람의 것이다.
+      if (this.#requireVerification && facts.verifiable === false) {
+        const detail = `${facts.provider} cannot read back '${action.action}'`
+        await this.#close(grant.id, 'INVALIDATED', this.#now(), detail, 'NOT_EXECUTABLE')
+        return { ok: false, reason: 'NOT_EXECUTABLE', detail }
+      }
+      const moved = revalidate({
         action: action.action,
-        target: action.target,
         facts,
         ...(claimed.entity.basis ? { basis: claimed.entity.basis } : {}),
-        ...(this.#requireVerification ? { requireVerification: true } : {}),
       })
-      if (review.verdict !== 'READY') {
-        const detail = review.findings.map((finding) => `${finding.code}: ${finding.detail}`).join('; ')
+      if (moved) {
         await this.#close(
           grant.id,
           'INVALIDATED',
           this.#now(),
-          `재검수 ${review.verdict}: ${detail}`,
-          review.verdict === 'NOT_EXECUTABLE' ? 'NOT_EXECUTABLE' : 'REVIEW_REQUIRED',
+          `${moved.code}: ${moved.detail}`,
+          moved.code === 'DRIFT' ? 'DRIFT' : 'NOT_EXECUTABLE',
         )
-        return review.verdict === 'NOT_EXECUTABLE'
-          ? { ok: false, reason: 'NOT_EXECUTABLE', detail, review }
-          : { ok: false, reason: 'REVIEW_REQUIRED', detail, review }
+        return { ok: false, reason: moved.code === 'DRIFT' ? 'DRIFT' : 'NOT_EXECUTABLE', detail: moved.detail }
       }
+      expected = expectationOf({ action: action.action, target: action.target, facts, ...(claimed.entity.basis ? { basis: claimed.entity.basis } : {}) })
     }
 
     // 5. 외부 행위 1회. payload는 승인된 내용 그대로 나간다
@@ -178,15 +185,15 @@ export class Executor {
       return { ok: false, reason: 'REJECTED', detail: result.error }
     }
 
-    // 6. 되돌려 읽기 (0.8.0 §L·§M·§N). exit 0 은 성공이 아니다.
+    // 6. 되돌려 읽기. exit 0 은 성공이 아니다.
     let mismatches: string[] = []
-    if (this.#scm.verify && review) {
+    if (this.#scm.verify && expected) {
       const read = await this.#scm.verify(action, { resultRef: result.resultRef })
       if (!read.unsupported) {
-        const comparable = Object.keys(review.expected).filter(
+        const comparable = Object.keys(expected).filter(
           (key) => key !== 'action' && key !== 'target' && read.observed[key] !== undefined,
         )
-        const verified = verifyAgainst(review.expected, read.observed, comparable)
+        const verified = verifyAgainst(expected, read.observed, comparable)
         mismatches = comparable.length === 0 ? ['nothing could be read back to compare'] : verified.mismatches
       }
     }

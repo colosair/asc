@@ -93,27 +93,27 @@ const executorOn = (store: StateStore, scm: ReviewingScm, requireVerification = 
   new Executor({ store, scm, runId: 'run-1', now: () => NOW, requireVerification })
 
 describe('실행 직전 재검수 — 밖은 하나도 바뀌지 않는다', () => {
-  it('T-10 — 승인한 commit 이 아니면 나가지 않는다', async () => {
+  it('승인한 commit 이 아니면 나가지 않는다', async () => {
     const { store, scm } = await readyGrant({ sourceSha: 'abc123', resource: 'group/project' })
     scm.facts = { ...scm.facts, observed: { 'local.head': 'def456' } }
 
     const outcome = await executorOn(store, scm).run('G-0001')
-    assert.ok(!outcome.ok && outcome.reason === 'NOT_EXECUTABLE')
-    assert.match(outcome.detail, /DRIFT/)
+    assert.ok(!outcome.ok && outcome.reason === 'DRIFT')
+    assert.match(outcome.detail, /approved/)
     assert.equal(scm.executed.length, 0, '한 번도 나가지 않았다')
     assert.equal((await store.get('grant', 'G-0001'))!.status, 'INVALIDATED')
   })
 
-  it('T-06 / F-02 — 결합 밖의 대상이면 사람에게 올라가고, 밖은 그대로다', async () => {
+  it('결합 밖의 대상이면 나가지 않는다 — 승인된 범위가 계약에 박혀 있다', async () => {
     const { store, scm } = await readyGrant({ resource: 'group/project' })
     scm.facts = { ...scm.facts, resource: 'group/other' }
 
     const outcome = await executorOn(store, scm).run('G-0001')
-    assert.ok(!outcome.ok && outcome.reason === 'REVIEW_REQUIRED')
+    assert.ok(!outcome.ok && outcome.reason === 'NOT_EXECUTABLE')
     assert.equal(scm.executed.length, 0)
   })
 
-  it('F-01 — 같은 저장소 안의 다른 branch 는 그대로 나간다', async () => {
+  it('같은 저장소 안의 다른 branch 는 그대로 나간다 — branch 정책은 프로젝트의 것이다', async () => {
     // 프로젝트가 "front 를 최신화한다" 고 정했다면 그 판단은 프로젝트의 것이다.
     // 검수가 확인하는 것은 그 행위가 지금 이 원격 상태에서 성립하는가뿐이다.
     const { store, scm } = await readyGrant({ sourceSha: 'abc123', resource: 'group/project' })
@@ -126,7 +126,7 @@ describe('실행 직전 재검수 — 밖은 하나도 바뀌지 않는다', () 
 })
 
 describe('되돌려 읽기 — exit 0 은 성공이 아니다', () => {
-  it('T-11 / T-20 — 읽어 온 것이 다르면 EXECUTED 로 적지 않는다', async () => {
+  it('읽어 온 것이 다르면 EXECUTED 로 적지 않는다', async () => {
     const { store, scm } = await readyGrant({ sourceSha: 'abc123' })
     scm.facts = { ...scm.facts, observed: { 'local.head': 'abc123' } }
     // 밖은 다른 것을 들고 있다 — 명령은 0 으로 끝났는데도.
@@ -172,7 +172,7 @@ describe('되돌려 읽기 — exit 0 은 성공이 아니다', () => {
 })
 
 describe('T-12 — 나갔는지 모르는 실패', () => {
-  it('P1-1 — 결과를 모르면 terminal 로 닫되 이유가 UNCERTAIN 이다', async () => {
+  it('결과를 모르면 terminal 로 닫되 이유가 UNCERTAIN 이다', async () => {
     const { store, scm } = await readyGrant({ sourceSha: 'abc123' })
     scm.facts = { ...scm.facts, observed: { 'local.head': 'abc123' } }
     scm.result = { ok: false, error: 'connect ETIMEDOUT 10.0.0.1:443' }
@@ -191,14 +191,14 @@ describe('T-12 — 나갔는지 모르는 실패', () => {
     assert.equal(scm.executed.length, 1, '자동 재시도 0')
   })
 
-  it('T-23 — 되돌려 읽을 수 없는 행위는 자율 실행에서 나가지 않는다', async () => {
+  it('되돌려 읽을 수 없는 행위는 자율 실행에서 나가지 않는다', async () => {
     const { store, scm } = await readyGrant({ sourceSha: 'abc123' })
     scm.facts = { ...scm.facts, observed: { 'local.head': 'abc123' } }
     scm.verifiable = false
 
     const outcome = await executorOn(store, scm, true).run('G-0001')
     assert.ok(!outcome.ok && outcome.reason === 'NOT_EXECUTABLE')
-    assert.match(outcome.detail, /NO_VERIFY_PATH/)
+    assert.match(outcome.detail, /cannot read back/)
     assert.equal(scm.executed.length, 0, 'mutation 0')
 
     // 사람이 실행하는 자리에서는 같은 판단이 사람의 것이다 — 여기서 막지 않는다.
@@ -209,19 +209,19 @@ describe('T-12 — 나갔는지 모르는 실패', () => {
     assert.ok((await executorOn(manualStore, manualScm, false).run('G-0001')).ok)
   })
 
-  it('T-24 / P1-3 — 행위 승인만으로 결합 밖으로 나가지 않는다', async () => {
+  it('행위 승인만으로 결합 밖으로 나가지 않는다', async () => {
     // Grant 는 "이 행위를 해도 된다" 는 승인이지 "범위를 project B 까지 넓힌다" 는 결정이
     // 아니다. 실행 직전 재검수가 계약에 박힌 범위와 지금의 대상을 견준다.
     const { store, scm } = await readyGrant({ resource: 'group/project' })
     scm.facts = { ...scm.facts, resource: 'group/other', observed: { 'local.head': 'abc123' } }
 
     const outcome = await executorOn(store, scm, true).run('G-0001')
-    assert.ok(!outcome.ok && outcome.reason === 'REVIEW_REQUIRED')
+    assert.ok(!outcome.ok && outcome.reason === 'NOT_EXECUTABLE')
     assert.equal(scm.executed.length, 0)
-    assert.equal((await store.get('grant', 'G-0001'))!.resolution, 'REVIEW_REQUIRED')
+    assert.equal((await store.get('grant', 'G-0001'))!.resolution, 'NOT_EXECUTABLE')
   })
 
-  it('T-25 — 범위가 그 대상까지로 정해진 계약이면 통과한다', async () => {
+  it('범위가 그 대상까지로 정해진 계약이면 통과한다', async () => {
     // 범위를 바꾸는 결정이 선행돼야 한다는 뜻이지, 영원히 못 나간다는 뜻이 아니다.
     const { store, scm } = await readyGrant({ resource: 'group/other', sourceSha: 'abc123' })
     scm.facts = { ...scm.facts, resource: 'group/other', observed: { 'local.head': 'abc123' } }

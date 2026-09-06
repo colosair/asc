@@ -35,10 +35,10 @@ import { IDENTITY_FILE } from './identity-config.ts'
 import { TextRenderer } from '../adapters/text/renderer.ts'
 import { ApprovalService } from '../core/approval/service.ts'
 import { Executor } from '../core/execution/executor.ts'
-import { transitionGrant, transitionRequest } from '../core/model/transitions.ts'
+import { transitionGrant } from '../core/model/transitions.ts'
 import { applyTransition } from '../core/runtime/store-ops.ts'
 import { GrantService } from '../core/execution/grant.ts'
-import { ApprovalRequest, DecisionKind } from '../core/model/entities.ts'
+import { DecisionKind } from '../core/model/entities.ts'
 import { discoverProjectRoot, excludeFromGit, identitiesTemplate, overrideTemplate, writeIfAbsent } from '../core/attach/init.ts'
 import { AdoptError, buildAdoptedProfile, type AdoptedProfile, type RemoteEntry } from '../core/attach/adopt.ts'
 import { locatorsOf, lookupLocator, readIndex, register, writeIndex } from '../core/workspace/index-store.ts'
@@ -212,8 +212,7 @@ Lifecycle
 Execution
   asc mode                  who executes: MANUAL (you) or AUTO (ASC)
   asc mode auto             turn on managed execution — refuses unless the path is usable
-  asc mode manual [--request <REQ-ID>]
-                            step down. From AUTO this needs a decision a person approved
+  asc mode manual           step back to advisory. Recorded, with who said so
 
 Work
   asc work start [WORK]     start or resume the work, inside a contract
@@ -836,7 +835,6 @@ function parseArgsOrThrow(argv: string[]) {
       expect: { type: 'string' },
       advanced: { type: 'boolean', default: false },
       review: { type: 'boolean', default: false },
-      request: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   })
@@ -1541,17 +1539,6 @@ async function runRuntimeSelect(
   if (mode !== 'package' && mode !== 'development') {
     console.error('Usage: asc runtime use package | asc runtime use development <checkout>')
     return 2
-  }
-
-  // 도는 build 를 바꾸는 것은 guard·검수·실행 경로를 통째로 바꾸는 것이다 (§J).
-  // AUTO 인 자리에서는 Controller 의 결정이다.
-  if (mode === 'development') {
-    const gated = await guardedByController(
-      '`asc runtime use development`',
-      await discoverRoot(process.cwd(), values.root as string | undefined),
-      values,
-    )
-    if (gated !== null) return gated
   }
 
   const selection =
@@ -2665,13 +2652,6 @@ async function runHost(
     }
 
     case 'uninstall': {
-      // host 설치물을 걷어내는 것은 AUTO 의 enforcement 를 걷어내는 것과 같다 (§J).
-      const gated = await guardedByController(
-        '`asc host claude uninstall`',
-        await discoverRoot(process.cwd(), values.root as string | undefined),
-        values,
-      )
-      if (gated !== null) return gated
       const outcome = await uninstall(paths)
       for (const path of outcome.removed) console.log(`removed: ${path}`)
       for (const keep of outcome.kept) console.log(`kept: ${keep.path} — ${keep.reason}`)
@@ -4552,104 +4532,34 @@ const RENAMED: Record<string, string> = {
  * 이 함수는 그것을 한 판정에 모으기만 한다.
  */
 async function observeReadiness(root: string | null, runtime?: ResolvedRuntime): Promise<ReadinessAxis[]> {
-  const axes: ReadinessAxis[] = []
-
-  // ① control-plane — 우리 명령이 Host 안에서 실제로 실행될 수 있는가.
-  //    0.7.1 의 deadlock 이 시작된 자리다: 막는 길과 나가는 길이 같이 닫혔다.
-  const access = await controlPlaneAccess(hostPaths())
-  axes.push({
-    axis: 'control-plane',
-    state: access.denied ? 'BLOCKED_BY_HOST' : access.allowed ? 'READY' : 'MISSING',
-    ...(access.detail ? { detail: access.detail } : {}),
-  })
-
-  // ② controller / authority — 사람이 결정할 자리에 사람이 있는가.
-  const approvers = root ? Object.keys(await loadIdentityMap(root)) : []
-  const controllers = Object.keys(runtime?.controllerIdentities ?? {})
-  axes.push(
-    approvers.length > 0 || controllers.length > 0
-      ? { axis: 'controller', state: 'READY', detail: [...approvers, ...controllers].join(', ') }
-      : { axis: 'controller', state: 'MISSING', detail: 'no approver is known — `asc setup identity`' },
-  )
-
-  // ③ binding — 이 작업이 어느 원격을 가리키는지 하나로 풀리는가 (§K).
-  // ④ external executor — 승인된 것이 실제로 나갈 통로가 조립되는가.
-  // ⑤ provider capability — 그 통로가 무엇을 할 수 있다고 말하는가.
-  // ⑥⑦ review · verify — 나가기 전에 읽고, 나간 뒤에 되돌려 읽을 수 있는가 (§C).
-  //
-  // **설정 파일이 있다는 것으로 답하지 않는다** (§62·§63): 조립 결과와 supports() 가 근거다.
-  // 그리고 control-plane 하나로 끝내지 않는다 — AUTO 는 관리된 쓰기 **경로 전체**가
-  // 쓸 수 있다는 뜻이고, 그 경로에 마디가 빠져 있으면 AUTO 는 나갈 길이 없는 상태다.
-  const composed = root ? await composedPorts(runtime).catch(() => null) : null
-  const outward = composed?.scm ?? null
-  const declared = runtime?.layers.profile.bindings ?? []
-  const writeBindings = declared.filter((binding) => !outward || binding.adapter === outward.id)
-  axes.push(
-    !root
-      ? { axis: 'binding', state: 'MISSING', detail: 'not attached' }
-      : declared.length === 0
-        ? { axis: 'binding', state: 'MISSING', detail: 'the profile declares no binding' }
-        : writeBindings.length === 1
-          ? { axis: 'binding', state: 'READY', detail: `${writeBindings[0]!.adapter}:${writeBindings[0]!.resource}` }
-          : writeBindings.length === 0
-            ? { axis: 'binding', state: 'DEGRADED', detail: 'no declared binding matches the write path' }
-            : {
-                axis: 'binding',
-                state: 'DEGRADED',
-                detail: `more than one binding could be the write target (${writeBindings
-                  .map((binding) => `${binding.adapter}:${binding.resource}`)
-                  .join(', ')})`,
-              },
-  )
-  axes.push(
+  // ① 관리된 쓰기 경로가 조립되는가. 없으면 AUTO 는 막기만 하고 내보내지는 못하는 mode 다.
+  //    **설정 파일이 있다는 것으로 답하지 않는다** — Composition 이 실제로 만든 Port 가 근거다.
+  const outward = root ? await composedPorts(runtime).then((ports) => ports.scm ?? null).catch(() => null) : null
+  const axes: ReadinessAxis[] = [
     outward
       ? { axis: 'executor', state: 'READY', detail: outward.id }
       : { axis: 'executor', state: 'MISSING', detail: 'no binding provides an outward write path' },
-  )
-  // **되돌려 읽을 수 없는 행위는 자율 실행 가능한 것으로 광고하지 않는다** (P1-2).
-  const actions = outward
-    ? EXTERNAL_ACTIONS.filter((action) => (outward.supports?.(action) ?? false) && (outward.verifies?.(action) ?? false))
-    : []
-  axes.push(
-    !outward
-      ? { axis: 'provider', state: 'MISSING', detail: 'no outward write path to ask' }
-      : !outward.supports
-        ? { axis: 'provider', state: 'UNKNOWN', detail: `${outward.id} does not declare what it supports` }
-        : actions.length > 0
-          ? { axis: 'provider', state: 'READY', detail: actions.join(', ') }
-          : { axis: 'provider', state: 'DEGRADED', detail: `${outward.id} supports none of the known actions` },
-  )
-  axes.push(
-    !outward
-      ? { axis: 'review', state: 'MISSING', detail: 'no outward path to review with' }
-      : outward.review
-        ? { axis: 'review', state: 'READY', detail: 'the write path can be read before it is used' }
-        : { axis: 'review', state: 'MISSING', detail: `${outward.id} cannot read the target before writing` },
-  )
-  axes.push(
-    !outward
-      ? { axis: 'verify', state: 'MISSING', detail: 'no outward path to verify with' }
-      : outward.verify && actions.length > 0
-        ? { axis: 'verify', state: 'READY', detail: `read-back for ${actions.length} action(s)` }
-        : { axis: 'verify', state: 'MISSING', detail: `${outward.id} cannot read back what it wrote` },
-  )
+  ]
 
-  // ⑤ guard — 마지막이다. 나갈 길을 확인하기 전에 막는 쪽을 켜지 않는다 (§9).
+  // ② 막을 것을 실제로 막을 수 있는가. hook 이 없으면 AUTO 는 이름뿐이다.
   const host = await verifyInstall(hostPaths())
   axes.push({
     axis: 'guard',
     state:
       host.status === 'INSTALLED_CURRENT'
         ? 'READY'
-        : host.status === 'INSTALLED_STALE' || host.status === 'INSTALLED_MODIFIED'
+        : host.hookRegistered
           ? 'DEGRADED'
           : 'MISSING',
     detail: host.status,
   })
+
+  // ③ 그 상태에서 사람이 ASC 를 계속 부를 수 있는가 — 0.7.1 이 갇혔던 자리다.
+  const access = await controlPlaneAccess(hostPaths())
   axes.push({
-    axis: 'host',
-    state: host.hookRegistered ? (host.status === 'INSTALLED_CURRENT' ? 'READY' : 'DEGRADED') : 'MISSING',
-    detail: host.hookRegistered ? 'hook registered' : 'no ASC hook registration in settings.json',
+    axis: 'control-plane',
+    state: access.denied ? 'BLOCKED_BY_HOST' : access.allowed ? 'READY' : 'MISSING',
+    ...(access.detail ? { detail: access.detail } : {}),
   })
   return axes
 }
@@ -4699,7 +4609,13 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   const external = {
     read: ports?.eventSource?.id ?? ports?.inventory?.id ?? null,
     write: ports?.scm
-      ? { id: ports.scm.id, actions: EXTERNAL_ACTIONS.filter((action) => ports.scm!.supports?.(action) ?? false) }
+      ? {
+          id: ports.scm.id,
+          // 할 수 있는 행위와, 그 중 되돌려 읽을 수 있는 행위. 둘은 다른 사실이고,
+          // 화면이 그것을 뭉개면 사람이 확인되지 않는 쓰기를 확인된 것으로 읽는다.
+          actions: EXTERNAL_ACTIONS.filter((action) => ports.scm!.supports?.(action) ?? false),
+          verifiable: EXTERNAL_ACTIONS.filter((action) => ports.scm!.verifies?.(action) ?? false),
+        }
       : null,
     unavailable: ports?.unavailable ?? [],
   }
@@ -4776,6 +4692,9 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     console.log(
       `External write: ${external.write ? `${external.write.id} — ${external.write.actions.join(', ') || 'no known action'}` : 'none assembled'}`,
     )
+    if (external.write) {
+      console.log(`  read-back available for: ${external.write.verifiable.join(', ') || 'nothing'}`)
+    }
     for (const reason of external.unavailable.slice(0, 3)) console.log(`  ${reason}`)
   }
   console.log('')
@@ -4797,58 +4716,6 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   console.log(`Next: ${next}`)
   // 진단이지 실패가 아니다 — 막힌 것이 있어도 0이다.
   return 0
-}
-
-/**
- * 이 사람이 이 workspace 의 Controller 인가 (0.8.0 §J).
- *
- * **새 approval system 을 만들지 않는다** — 이미 있는 것을 그대로 쓴다: `identities.json`
- * 의 매핑과 override 의 controller identities. 여기서 하는 일은 그 둘에 대고 `--as` 를
- * 견주는 것뿐이다.
- *
- * 이 함수가 지키는 자리는 하나다: enforcement 를 낮추거나 걷어내는 명령. Guard 는 그
- * 명령들을 통과시키고(E-02), 거절은 Core 인 여기서 한다.
- */
-async function controllerAuthority(
-  root: string,
-  runtime: ResolvedRuntime | undefined,
-  values: Record<string, unknown>,
-): Promise<{ ok: boolean; known: number; names: string[] }> {
-  const approvers = await loadIdentityMap(root)
-  const names = [...new Set([...Object.keys(approvers), ...Object.keys(runtime?.controllerIdentities ?? {})])]
-  const actor = values.as as string | undefined
-  if (actor === undefined) return { ok: false, known: names.length, names }
-  if (names.includes(actor)) return { ok: true, known: names.length, names }
-  const binding = new LocalIdentityBinding(approvers)
-  const verified = await Promise.all(
-    names.map((name) => binding.verify({ channel: 'local', actor, authorizedApprover: name })),
-  )
-  return { ok: verified.some(Boolean), known: names.length, names }
-}
-
-/**
- * 이 명령이 AUTO 의 안전 경계를 실질적으로 걷어내는가 — 그렇다면 Controller 의 자리다.
- *
- * Host 가 `Bash(asc:*)` 를 허용한 것은 **ASC 가 갇히지 않게 하려는 것**이지, Agent 가
- * 자기를 감시하는 것을 스스로 떼어내라는 뜻이 아니다 (§J).
- */
-async function guardedByController(
-  what: string,
-  root: string | null,
-  values: Record<string, unknown>,
-): Promise<number | null> {
-  if (!root) return null
-  const store = new MarkdownStateStore(root)
-  const mode = await readExecutionMode(store.scope('policy'))
-  // 강제가 서 있는 자리에서만 묻는다 — 읽지 못한 자리도 포함이다(P0-1).
-  if (enforcementOf(mode) !== 'ENFORCE') return null
-  console.error(`This workspace enforces ASC's execution path. ${what} takes that away with it.`)
-  const decided = await consumeSafetyDecision(store, root, values, {
-    what: `safety-downgrade:${what}`,
-    title: `${what} — ASC 의 강제를 걷어낸다`,
-    situation: '이 명령이 끝나면 이 workspace 의 외부 쓰기는 더 이상 승인된 경로를 지나지 않는다.',
-  })
-  return decided.ok ? null : decided.code
 }
 
 /**
@@ -4932,121 +4799,37 @@ async function runMode(
       return 1
     }
     const record = await writeExecutionMode(scope, 'AUTO', values.as as string | undefined)
+    await store.appendHistory({
+      at: record.since ?? new Date().toISOString(),
+      actor: (values.as as string | undefined) ?? 'unattributed',
+      kind: 'execution_mode',
+      ref: 'execution-mode',
+      detail: `${current.mode ?? current.degraded ?? 'unknown'} → AUTO`,
+    })
     show({ ...record, chosen: true }, { applied: 'true' })
     return 0
   }
 
-  // AUTO → MANUAL 은 enforcement 를 낮추는 전환이다 (§11·§J·P0-2).
+  // MANUAL 로 내려가는 것은 **막지 않는다**.
   //
-  // **`--as` 하나로는 통과하지 않는다.** 그것은 자기 신고이고, Host 가 `Bash(asc:*)` 를
-  // 허용한 자리에서는 Agent 도 똑같이 칠 수 있다. 그러면 AUTO 는 스스로 벗을 수 있는 옷이
-  // 되고, 그것이 이 릴리스의 안전 경계를 무너뜨리는 가장 짧은 길이다.
+  // 이전 회차에는 여기에 Request → Inbox → 승인 → 소진을 세워 뒀다. 그것은 같은 셸을
+  // 쥔 Agent 를 막으려는 장치였는데, 같은 셸이면 `asc inbox decide` 도 칠 수 있다 —
+  // 실제로 그 안내를 우리가 화면에 찍어 주고 있었다. 막지 못하는 것을 막는 척하면서
+  // 사람에게만 세 걸음을 물리는 구조였다. ASC 의 위협 모델은 "협조적이지만 실수하는
+  // Agent" 이고, 적대적 Agent 로부터 ASC 자신을 지키는 일은 Host/OS 신뢰 경계의 몫이다.
   //
-  // 그래서 **이미 있는 결정 장부**를 쓴다: 사람이 Inbox 에서 승인한 요청 하나가 근거다.
-  // 새 approval framework 를 만들지 않는다 — 요청을 만드는 것은 Agent 도 할 수 있고(올리는
-  // 것은 승인이 아니다), 승인하는 것은 Inbox 를 지난 사람뿐이다.
-  if (enforcementOf(current) === 'ENFORCE') {
-    const decided = await consumeSafetyDecision(store, root, values, {
-      what: 'execution-mode:MANUAL',
-      title: '이 workspace 의 실행 축을 MANUAL 로 내린다',
-      situation: current.degraded
-        ? `실행 축 기록을 읽지 못한다 (${current.degraded}). 강제를 낮추려면 사람이 정해야 한다.`
-        : '지금 AUTO 다. 외부 쓰기는 승인된 실행 경로로만 나간다.',
-    })
-    if (!decided.ok) return decided.code
-  }
+  // 대신 **크게 남긴다**: 누가 그렇게 했다고 말하는지, 언제 바뀌었는지가 기록에 남고
+  // 화면에 나온다. 실수하는 Agent 에게 필요한 것은 잠금이 아니라 드러남이다.
   const record = await writeExecutionMode(scope, 'MANUAL', values.as as string | undefined)
+  await store.appendHistory({
+    at: record.since ?? new Date().toISOString(),
+    actor: (values.as as string | undefined) ?? 'unattributed',
+    kind: 'execution_mode',
+    ref: 'execution-mode',
+    detail: `${current.mode ?? current.degraded ?? 'unknown'} → MANUAL`,
+  })
   show({ ...record, chosen: true }, { applied: 'true' })
   return 0
-}
-
-/**
- * 안전을 낮추는 행위 앞에 서는 **사람의 결정**을 찾는다 (0.8.0 보정 P0-2·P0-3).
- *
- * 새 승인 체계를 만들지 않는다. 여기서 쓰는 것은 이미 있는 것뿐이다:
- *
- * ```text
- * ApprovalRequest   무엇을 물었는가        — Agent 가 만들 수 있다. 올리는 것은 승인이 아니다
- * asc inbox decide  사람이 답한 자리       — 승인은 여기서만 생긴다
- * DONE 전이         한 번 쓴 결정은 끝난다 — 같은 승인으로 두 번 내려가지 않는다
- * ```
- *
- * 흐름은 세 걸음이고, 그 중 가운데가 사람의 자리다:
- *
- * ```text
- * asc mode manual                        → 요청을 만들고 멈춘다 (REQ-xxxx)
- * asc inbox decide REQ-xxxx approve --as → 사람이 정한다
- * asc mode manual --request REQ-xxxx     → 그 결정을 근거로 내려간다
- * ```
- */
-async function consumeSafetyDecision(
-  store: MarkdownStateStore,
-  root: string,
-  values: Record<string, unknown>,
-  what: { what: string; title: string; situation: string },
-): Promise<{ ok: true } | { ok: false; code: number }> {
-  const requestId = values.request as string | undefined
-  const approvers = Object.keys(await loadIdentityMap(root))
-
-  if (requestId) {
-    const request = await store.get('request', requestId)
-    if (!request) {
-      console.error(`${requestId} 를 찾지 못했다.`)
-      return { ok: false, code: 1 }
-    }
-    // 그 결정이 **이 행위**에 대한 것이어야 한다. 다른 승인을 빌려 오지 않는다.
-    if (request.source?.reference !== what.what) {
-      console.error(`${requestId} 가 승인한 것은 '${request.source?.reference ?? '(없음)'}' 이지 ${what.what} 가 아니다.`)
-      return { ok: false, code: 2 }
-    }
-    if (request.status !== 'APPROVED') {
-      console.error(`${requestId} 는 지금 ${request.status} 다 — 사람이 승인한 결정만 근거가 된다.`)
-      console.error(`  asc inbox decide ${requestId} approve --as <actor>`)
-      return { ok: false, code: 2 }
-    }
-    // 한 번 쓴 결정은 소진된다. 같은 승인으로 두 번 내려가지 않는다.
-    //
-    // 소진은 executor 의 자리다 (APPROVED → DONE). 승인한 사람과 그것을 쓰는 쪽이 다른
-    // 역할이라는 것이 이 전이의 뜻이고, 여기서 그 규칙을 비켜 가지 않는다.
-    const consumed = await applyTransition(store, 'request', requestId, (r) =>
-      transitionRequest(r, 'DONE', 'executor', { resultRef: what.what }),
-    )
-    if (!consumed.ok) {
-      console.error(`${requestId} 를 소진하지 못했다 — 같은 승인이 다시 쓰일 수 있으므로 진행하지 않는다.`)
-      return { ok: false, code: 1 }
-    }
-    return { ok: true }
-  }
-
-  // 근거가 없다. **여기서 승인을 만들지 않는다** — 사람에게 올릴 자리를 만들고 멈춘다.
-  const id = await nextRequestId(store)
-  const at = new Date().toISOString()
-  const created = await store.create(
-    'request',
-    ApprovalRequest.parse({
-      id,
-      version: 0,
-      status: 'AWAITING_APPROVAL',
-      type: 'actionable',
-      priority: 'P0',
-      title: what.title,
-      detectedAt: at,
-      source: { eventKey: `${what.what}:${at}`, reference: what.what },
-      situation: what.situation,
-      impact: { interruptRequired: true, affectedSessions: [] },
-      draft: what.what,
-      authorizedApprover: approvers[0] ?? 'controller',
-      allowedDecisions: ['approve', 'dismiss'],
-    }),
-  )
-  console.error('This lowers ASC\'s enforcement, so it is a person\'s decision — not a flag on this command.')
-  console.error(`Raised for a person to decide: ${id}${created.ok ? '' : ' (could not be stored)'}`)
-  console.error(`  asc inbox show ${id}`)
-  console.error(`  asc inbox decide ${id} approve --as <actor>`)
-  console.error(`  asc mode manual --request ${id}`)
-  if (approvers.length > 0) console.error(`Known approvers: ${approvers.join(', ')}`)
-  else console.error('No approver is mapped here — `asc setup identity` names one first.')
-  return { ok: false, code: 2 }
 }
 
 /**
@@ -5164,10 +4947,6 @@ async function runUninstall(command: string | undefined, values: Record<string, 
     console.error('Nothing was removed.')
     return 2
   }
-
-  // AUTO 에서 이 명령은 enforcement 를 통째로 걷어낸다 — Controller 의 자리다 (§J).
-  const gated = await guardedByController('`asc uninstall`', here, values)
-  if (gated !== null) return gated
 
   let worst = 0
   if (adapter) {

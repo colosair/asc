@@ -134,23 +134,23 @@ export async function writeExecutionMode(
 }
 
 /**
- * AUTO 로 갈 수 있는지 판정하는 축들. **새 health subsystem 이 아니다** — 각 축의 상태는
- * 이미 다른 곳에서 관측되는 사실이고, 여기서는 그 사실을 받아 판정만 한다.
+ * AUTO 를 켤 때 물어야 하는 것 — **셋이다.**
  *
- * 순서가 §9 의 전환 순서다. Guard 가 마지막인 것은 규칙이다: 나갈 길을 확인하기 전에
- * 막는 쪽을 먼저 켜면 그것이 곧 출구 없는 AUTO 다.
+ * 한때 아홉이었다. binding·provider·review·verify·controller 까지 activation 시점에
+ * 물었는데, 그것들은 행위마다 달라지는 사실이다: 어느 저장소로 가는지, 그 행위를 이
+ * 통로가 되돌려 읽을 수 있는지는 **그 행위를 할 때** 답할 질문이고, 실제로 CHECK 단계가
+ * 그것을 다시 묻는다. 같은 사실을 두 번 판정하면 둘이 갈릴 자리를 만드는 것이고,
+ * "AUTO 를 켜려면 미래의 모든 행위가 지금 가능해야 한다" 는 과장이 된다.
+ *
+ * 남은 셋은 activation 시점에만 답할 수 있는 것들이다:
+ *
+ * ```text
+ * executor       관리된 쓰기 경로가 조립되는가 — 없으면 AUTO 는 막기만 하는 mode 다
+ * guard          막을 것을 실제로 막을 수 있는가 — 없으면 AUTO 는 이름뿐이다
+ * control-plane  Host 안에서 ASC 명령이 도는가 — 없으면 나갈 문이 없다 (0.7.1 실측)
+ * ```
  */
-export const READINESS_AXES = [
-  'control-plane',
-  'controller',
-  'binding',
-  'executor',
-  'provider',
-  'review',
-  'verify',
-  'guard',
-  'host',
-] as const
+export const READINESS_AXES = ['executor', 'guard', 'control-plane'] as const
 export type ReadinessAxisName = (typeof READINESS_AXES)[number]
 
 /**
@@ -176,20 +176,13 @@ export type AutoReadiness = {
 }
 
 /**
- * AUTO 를 켜도 되는가 (E-01).
+ * AUTO 를 켜도 되는가.
  *
- * **READY 가 아닌 것은 전부 막는다.** UNKNOWN 을 READY 로 뭉개면 그 판정이 곧 사람이
- * 나갈 길이 없는 AUTO 로 들어가는 근거가 된다 — 0.7.1 실측에서 실제로 일어난 일이다.
+ * 묻는 것은 하나다 — **AUTO 를 켠 뒤에도 일이 나갈 길과 사람이 나갈 길이 있는가.**
+ * 행위 하나하나가 지금 가능한지는 그 행위를 할 때 CHECK 가 답한다.
  *
- * 그리고 control-plane 하나로 끝내지 않는다. AUTO 는 "관리된 외부 쓰기 경로가 실제로
- * 쓸 수 있는 상태" 를 뜻하므로, 그 경로의 모든 마디가 서 있어야 한다:
- *
- * ```text
- * AUTO = control-plane usable
- *        AND managed executor usable      (binding · executor · provider)
- *        AND review/verify path usable    (검수 전 · 읽기 되돌림 후)
- *        AND Guard usable
- * ```
+ * READY 가 아닌 것은 전부 막는다. UNKNOWN 을 READY 로 뭉개면 그것이 곧 나갈 길 없는
+ * AUTO 로 들어가는 근거가 된다.
  */
 export function judgeAutoReadiness(observed: readonly ReadinessAxis[]): AutoReadiness {
   const order = new Map(READINESS_AXES.map((axis, index) => [axis, index]))

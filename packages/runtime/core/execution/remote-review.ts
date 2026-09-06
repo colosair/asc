@@ -165,7 +165,12 @@ export function reviewExternalAction(input: ReviewInput): ReviewOutcome {
  *
  * 실행 전에 적어 두는 이유는 하나다: 실행 뒤에 기대치를 정하면 관측한 것이 기대치가 된다.
  */
-function expectationOf(input: ReviewInput): Record<string, string> {
+export function expectationOf(input: {
+  action: string
+  target: string
+  facts: RemoteFacts
+  basis?: ApprovedBasis
+}): Record<string, string> {
   const expected: Record<string, string> = { action: input.action, target: input.target }
   const sha = input.basis?.sourceSha ?? input.facts.observed?.['local.head']
   if (sha) expected['sha'] = sha
@@ -176,6 +181,55 @@ function expectationOf(input: ReviewInput): Record<string, string> {
     if (key.startsWith('expect.') && value !== undefined) expected[key.slice('expect.'.length)] = value
   }
   return expected
+}
+
+/**
+ * 실행 직전의 재확인 — **바뀔 수 있는 것만 본다.**
+ *
+ * 검수(CHECK)는 계약을 만들 때 이미 끝났다. 그때 사람이 보고 넘어간 모호함·읽지 못한
+ * 사실을 실행 직전에 다시 꺼내면 그것은 두 번째 승인 벽이 된다 — 같은 질문에 두 번
+ * 답하게 만드는 구조이고, 이 릴리스가 없애려는 바로 그 형태다.
+ *
+ * 그래서 여기서 묻는 것은 **승인 이후 실제로 움직일 수 있는 것** 셋뿐이다:
+ *
+ * ```text
+ * 이 통로가 아직 이 행위를 할 수 있는가
+ * 대상이 아직 승인된 범위 안인가
+ * 못 박은 commit·기준선이 아직 그대로인가
+ * ```
+ *
+ * 답은 둘이다: 그대로면 `null`, 아니면 실행하지 않을 이유 하나.
+ */
+export function revalidate(input: {
+  action: string
+  facts: RemoteFacts
+  basis?: ApprovedBasis
+}): { code: 'NO_CAPABILITY' | 'BINDING_MISMATCH' | 'DRIFT'; detail: string } | null {
+  const { facts, basis } = input
+  if (facts.capability === false) {
+    return { code: 'NO_CAPABILITY', detail: `${facts.provider} cannot carry out '${input.action}'` }
+  }
+  if (basis?.resource && facts.resource && normalize(basis.resource) !== normalize(facts.resource)) {
+    return {
+      code: 'BINDING_MISMATCH',
+      detail: `this run is bound to ${basis.resource}, and the target is ${facts.resource}`,
+    }
+  }
+  const head = facts.observed?.['local.head']
+  if (basis?.sourceSha && head && head !== basis.sourceSha) {
+    return {
+      code: 'DRIFT',
+      detail: `what was approved is ${short(basis.sourceSha)}, and here it is now ${short(head)}`,
+    }
+  }
+  const remote = facts.observed?.['remote.sha']
+  if (basis?.remoteBaseline && remote && remote !== basis.remoteBaseline) {
+    return {
+      code: 'DRIFT',
+      detail: `the remote moved since this was approved (${short(basis.remoteBaseline)} → ${short(remote)})`,
+    }
+  }
+  return null
 }
 
 /** 사람이 읽는 한 줄들. 화면 형태는 MANUAL·AUTO 가 각자 정하고 판정은 같은 것을 쓴다. */

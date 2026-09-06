@@ -122,7 +122,12 @@ describe('P0-1 — guard 도 같은 세 자리를 본다', () => {
   })
 })
 
-describe('P0-2~4 — 강제를 낮추는 것은 사람의 결정이다', () => {
+describe('mode 전환은 막지 않고 드러낸다', () => {
+  // 한 회차 동안 여기에는 Request → Inbox → 승인 → 소진이 서 있었다. 그것은 같은 셸을
+  // 쥔 Agent 를 막으려는 장치였는데, 같은 셸이면 승인 명령도 칠 수 있다 — 막지 못하는
+  // 것을 막는 척하면서 사람에게만 세 걸음을 물리는 구조였다. 그 의식을 지우고, 대신
+  // **바뀌었다는 사실이 남는지**를 지킨다. ASC 가 지키는 것은 실수하는 Agent 이고,
+  // 적대적 Agent 로부터 ASC 자신을 지키는 일은 Host/OS 신뢰 경계의 몫이다.
   function run(cwd: string, home: string, args: string[]): { code: number; stdout: string; stderr: string } {
     const result = spawnSync(process.execPath, ['--experimental-strip-types', CLI, ...args], {
       cwd,
@@ -139,7 +144,7 @@ describe('P0-2~4 — 강제를 낮추는 것은 사람의 결정이다', () => {
     root: string
     cleanup: () => Promise<void>
   }> {
-    const base = await mkdtemp(join(tmpdir(), 'asc-downgrade-'))
+    const base = await mkdtemp(join(tmpdir(), 'asc-mode-'))
     const repo = join(base, 'repo')
     const home = join(base, 'home')
     spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' })
@@ -153,7 +158,6 @@ describe('P0-2~4 — 강제를 낮추는 것은 사람의 결정이다', () => {
       locators: Record<string, { root: string }>
     }
     const root = Object.values(index.locators)[0]!.root
-    await writeFile(join(root, 'identities.json'), JSON.stringify({ 'controller-a': ['local:colosair'] }), 'utf8')
     await mkdir(join(root, 'adapters', 'policy'), { recursive: true })
     await writeFile(
       join(root, 'adapters', 'policy', 'execution-mode.json'),
@@ -163,58 +167,34 @@ describe('P0-2~4 — 강제를 낮추는 것은 사람의 결정이다', () => {
     return { repo, home, root, cleanup: () => rm(base, { recursive: true, force: true }) }
   }
 
-  it('T-17 — `--as` 만으로는 내려가지 않는다. 사람이 정할 자리를 만들고 멈춘다', async () => {
+  it('AUTO 에서 MANUAL 로 내려가는 것은 한 명령이다 — 사람을 세 걸음 걷게 하지 않는다', async () => {
     const { repo, home, cleanup } = await attachedAuto()
     try {
-      const attempted = run(repo, home, ['mode', 'manual', '--as', 'controller-a'])
-      assert.equal(attempted.code, 2)
-      assert.match(attempted.stderr, /person's decision/)
-      assert.match(attempted.stderr, /asc inbox decide/)
-      // mode 는 그대로 AUTO 다.
-      const after = run(repo, home, ['mode', '--json'])
-      assert.equal((JSON.parse(after.stdout) as { mode: string }).mode, 'AUTO')
-      // 올릴 자리는 만들어졌다 — 올리는 것은 승인이 아니다.
-      const inbox = run(repo, home, ['inbox', '--json'])
-      const requests = JSON.parse(inbox.stdout) as { requestId: string; status: string }[]
-      assert.equal(requests.length, 1)
-      assert.equal(requests[0]!.status, 'AWAITING_APPROVAL')
-    } finally {
-      await cleanup()
-    }
-  })
-
-  it('T-18 — 사람이 Inbox 에서 승인한 결정이 있으면 내려간다', async () => {
-    const { repo, home, root, cleanup } = await attachedAuto()
-    try {
-      run(repo, home, ['mode', 'manual'])
-      const inbox = run(repo, home, ['inbox', '--json'])
-      const request = (JSON.parse(inbox.stdout) as { requestId: string }[])[0]!.requestId
-
-      const decided = run(repo, home, ['inbox', 'decide', request, 'approve', '--as', 'colosair'])
-      assert.equal(decided.code, 0, decided.stderr)
-
-      const lowered = run(repo, home, ['mode', 'manual', '--request', request, '--json'])
+      const lowered = run(repo, home, ['mode', 'manual', '--as', 'colosair', '--json'])
       assert.equal(lowered.code, 0, lowered.stderr)
       assert.equal((JSON.parse(lowered.stdout) as { mode: string }).mode, 'MANUAL')
-
-      // 한 번 쓴 결정은 소진된다. AUTO 로 되돌려 놓고 같은 승인을 다시 들이밀면 거절된다.
-      await writeFile(
-        join(root, 'adapters', 'policy', 'execution-mode.json'),
-        JSON.stringify({ key: 'execution-mode', value: JSON.stringify({ mode: 'AUTO', since: NOW, by: 'controller-a' }) }),
-        'utf8',
-      )
-      const again = run(repo, home, ['mode', 'manual', '--request', request])
-      assert.equal(again.code, 2)
-      assert.match(again.stderr, /DONE|승인한 결정만/)
     } finally {
       await cleanup()
     }
   })
 
-  it('T-19 — Guard 는 그 명령을 막지 않는다. 거절은 Core 가 한다', async () => {
+  it('그 전환은 기록에 남는다 — 누가 그렇게 했다고 말했는지까지', async () => {
     const { repo, home, root, cleanup } = await attachedAuto()
     try {
-      const dir = await tempDir('asc-downgrade-hook-')
+      run(repo, home, ['mode', 'manual', '--as', 'colosair'])
+      const history = await readFile(join(root, 'monitor', 'log-current.md'), 'utf8').catch(() => '')
+      assert.match(history, /execution_mode/)
+      assert.match(history, /AUTO → MANUAL/)
+      assert.match(history, /colosair/, '주장한 이름이 남는다 — 증명이 아니라 귀속이다')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('Guard 는 그 명령을 막지 않는다 — 거절이 필요하면 Core 가 한다', async () => {
+    const { repo, home, cleanup } = await attachedAuto()
+    try {
+      const dir = await tempDir('asc-mode-hook-')
       const script = join(dir, 'guard-hook.mjs')
       await writeFile(script, hookScript(), 'utf8')
       const hook = spawnSync(process.execPath, [script], {
@@ -222,26 +202,28 @@ describe('P0-2~4 — 강제를 낮추는 것은 사람의 결정이다', () => {
           tool_name: 'Bash',
           session_id: 'p1',
           cwd: repo,
-          tool_input: { command: 'asc mode manual --as controller-a' },
+          tool_input: { command: 'asc mode manual' },
         }),
         env: { ...process.env, ASC_HOME: home },
         encoding: 'utf8',
       })
       assert.equal(hook.status ?? 0, 0, 'guard 가 control-plane 을 막았다')
-      // 그리고 Core 는 거절한다 — 두 층의 답이 서로 다르다는 것이 이 설계다.
-      assert.equal(run(repo, home, ['mode', 'manual', '--as', 'controller-a']).code, 2)
-      assert.ok(root.length > 0)
     } finally {
       await cleanup()
     }
   })
 
-  it('AUTO 를 걷어내는 다른 명령도 같은 결정을 요구한다', async () => {
+  it('돌고 있는 일은 여전히 몰래 버려지지 않는다', async () => {
+    // 안전 의식을 지웠다고 해서 일이 사라져도 된다는 뜻은 아니다. 이쪽은 사람이 잃는
+    // 것이 실제로 있는 자리이므로 그대로 둔다.
     const { repo, home, cleanup } = await attachedAuto()
     try {
-      const removed = run(repo, home, ['host', 'claude', 'uninstall', '--as', 'controller-a'])
+      run(repo, home, ['session', 'issue', 'S-20260907-09', '--role', 'implementer', '--goal', '진행 중'])
+      run(repo, home, ['session', 'start', 'S-20260907-09'])
+      const removed = run(repo, home, ['uninstall'])
       assert.equal(removed.code, 2)
-      assert.match(removed.stderr, /asc inbox decide/)
+      assert.match(removed.stderr, /S-20260907-09/)
+      assert.match(removed.stderr, /Nothing was removed/)
     } finally {
       await cleanup()
     }

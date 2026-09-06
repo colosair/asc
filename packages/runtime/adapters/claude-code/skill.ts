@@ -106,23 +106,19 @@ mode never changes a session's owner, scope, progress or handoff.
 "ASC가 자동으로 관리해"             → asc mode auto
 \`\`\`
 
-Stepping down out of AUTO is a person's decision, and **saying a name is not that
-decision**. Run \`asc mode manual\`: it raises the question into the inbox and stops. A
-person answers it (\`asc inbox decide <REQ-ID> approve --as <actor>\`), and then
-\`asc mode manual --request <REQ-ID>\` goes through. Do not invent an approver name to get
-past it — that is the one shortcut this release exists to close.
+Stepping down out of AUTO is one command and it is recorded — who said so, and when.
+**Do not use it to get past a block.** If the guard stopped a write, the answer is
+\`asc work publish\`, not a mode change; flipping to MANUAL to push raw is the exact drift
+ASC exists to make visible, and the record makes it visible to the person you work with.
 
 **A workspace nobody has chosen a mode for is not in AUTO.** AUTO exists only where a
-person turned it on and the whole managed path measured READY, so a fresh or upgraded
+person turned it on and the checks below passed, so a fresh or upgraded
 workspace enforces nothing until someone says so. \`asc status\` says which of the two it is.
 
-\`asc mode auto\` refuses unless the approved path is actually usable here — control plane,
-controller, binding, executor, provider, review and read-back, all of it — and says which
-axis is missing. Read that answer and stop; do not turn enforcement on some other way.
-If ASC's own enforcement is what is in the way, the one official exit is
-\`asc mode manual\` — the command always runs, and what it needs is a person's answer, not a
-flag. Removing the product, uninstalling the host integration or switching the runtime is
-not that exit, and in AUTO those commands ask for the same decision.
+\`asc mode auto\` refuses unless three things hold here: a managed write path assembles, the
+guard is installed, and ASC's own commands still run in this host. Whether a *particular*
+action can go out is answered when that action is attempted, not now. If ASC's own
+enforcement is in the way, the exit is \`asc mode manual\`.
 
 **A workspace whose mode cannot be read is not MANUAL.** If the record is there but broken,
 raw external writes stay blocked and \`asc status\` names the reason

@@ -21,6 +21,7 @@ import { CONTROL_PLANE_ALLOW_RULES, controlPlaneAccess } from '../adapters/claud
 import { MarkdownStateStore } from '../adapters/markdown/state-store.ts'
 import {
   DEFAULT_EXECUTION_MODE,
+  READINESS_AXES,
   judgeAutoReadiness,
   readExecutionMode,
   writeExecutionMode,
@@ -32,12 +33,9 @@ import { tempDir } from './support/temp.ts'
 const NOW = '2026-09-06T10:00:00+09:00'
 
 const READY: ReadinessAxis[] = [
-  { axis: 'control-plane', state: 'READY' },
-  { axis: 'controller', state: 'READY' },
   { axis: 'executor', state: 'READY' },
-  { axis: 'provider', state: 'READY' },
   { axis: 'guard', state: 'READY' },
-  { axis: 'host', state: 'READY' },
+  { axis: 'control-plane', state: 'READY' },
 ]
 
 describe('Execution Mode — 기록과 기본값', () => {
@@ -76,16 +74,23 @@ describe('E-01 — 나갈 길이 없으면 AUTO 가 아니다', () => {
 
   it('UNKNOWN 을 READY 로 뭉개지 않는다', () => {
     const verdict = judgeAutoReadiness(
-      READY.map((axis) => (axis.axis === 'provider' ? { ...axis, state: 'UNKNOWN' as const } : axis)),
+      READY.map((axis) => (axis.axis === 'executor' ? { ...axis, state: 'UNKNOWN' as const } : axis)),
     )
     assert.equal(verdict.ready, false)
   })
 
-  it('확인 순서가 §9 그대로다 — guard 가 마지막이다', () => {
-    // 나갈 길을 확인하기 전에 막는 쪽을 먼저 켜면 그것이 곧 출구 없는 AUTO 다.
-    const axes = judgeAutoReadiness([...READY].reverse()).axes.map((axis) => axis.axis)
-    assert.deepEqual(axes, ['control-plane', 'controller', 'executor', 'provider', 'guard', 'host'])
-    assert.ok(axes.indexOf('guard') > axes.indexOf('executor'))
+  it('나갈 통로가 없으면 AUTO 가 아니다 — 막기만 하는 mode 는 만들지 않는다', () => {
+    const verdict = judgeAutoReadiness(
+      READY.map((axis) => (axis.axis === 'executor' ? { ...axis, state: 'MISSING' as const } : axis)),
+    )
+    assert.equal(verdict.ready, false)
+    assert.deepEqual(verdict.blocking.map((axis) => axis.axis), ['executor'])
+  })
+
+  it('물어보는 것이 셋뿐이다 — 행위마다 달라지는 사실은 실행할 때 본다', () => {
+    // 예전에는 binding·provider·review·verify 까지 activation 시점에 물었다. 그 넷은
+    // 행위마다 답이 다른 것들이고, CHECK 단계가 이미 같은 것을 묻는다.
+    assert.deepEqual([...READINESS_AXES], ['executor', 'guard', 'control-plane'])
   })
 })
 
