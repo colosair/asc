@@ -3674,7 +3674,7 @@ async function runController(
     // 누가 거뒀는지 모르면 History에 'controller' 라는 익명이 남는다 (C-10 §2.4)
     ...(reclaimedBy ? { reclaimedBy } : {}),
   })
-  console.log(renderCollect(outcome, await store.list('session')))
+  console.log(renderCollect(outcome))
 
   // 거둔 세션의 live 진행 표시는 여기서 정리한다 — 종결 보고(terminal)는 남는다
   const cleared = await progressService(store).collect(outcome.collected)
