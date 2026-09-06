@@ -35,7 +35,10 @@ Description=ASC persistent runtime
 [Service]
 Type=oneshot
 ExecStart=${[command.program, ...command.args].map(quote).join(' ')}
-`
+${Object.entries(command.environment ?? {})
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([key, value]) => `Environment=${quote(`${key}=${value}`)}\n`)
+  .join('')}`
 }
 
 export function timerUnit(command: ServiceCommand): string {

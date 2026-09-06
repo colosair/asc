@@ -30,6 +30,15 @@ export type ServiceCommand = {
   args: readonly string[]
   /** 회차 간격(초). Core 상수가 아니다 — 호출자가 정한다 (C-12 불변식 ③). */
   intervalSeconds: number
+  /**
+   * 등록물이 돌 때의 환경. **서비스는 로그인 셸의 PATH 를 물려받지 않는다** — 실기계에서
+   * launchd 가 준 PATH 는 `/usr/bin:/bin:/usr/sbin:/sbin` 뿐이라 외부 통로 실행 파일을
+   * 하나도 못 찾았다. 등록하는 쪽이 필요한 것을 결정해 여기 실어 보내고, 내용이 바뀌면
+   * 등록물이 STALE 로 드러난다 — 셸 설정을 추측하는 경로는 없다.
+   */
+  environment?: Readonly<Record<string, string>>
+  /** 회차의 표준 출력·오류를 남길 파일. 없으면 OS 기본(대개 버려진다). */
+  logPath?: string
 }
 
 /** 지금 이 기계의 등록 상태. */

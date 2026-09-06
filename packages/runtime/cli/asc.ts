@@ -68,6 +68,7 @@ import { evaluateHealth, healthAlertLines } from '../core/monitor/health-alerts.
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
 import type { ScmPort } from '../ports/scm.ts'
+import { servicePath } from '../core/distribution/external-command.ts'
 import { LocalCanonicalReader } from '../adapters/local/canonical.ts'
 import { LocalRepoAdapter } from '../adapters/local/repo.ts'
 import { GitHubAdapter } from '../adapters/github/adapter.ts'
@@ -3951,7 +3952,23 @@ function serviceCommand(intervalSeconds: number): ServiceCommand {
     program: process.execPath,
     args: [fileURLToPath(import.meta.url), 'runtime', 'tick', '--all'],
     intervalSeconds,
+    ...serviceEnvironment(),
+    logPath: join(ascHome(), 'service.log'),
   }
+}
+
+/**
+ * 서비스가 외부 통로를 열 수 있게 하는 환경 (P0-R1).
+ *
+ * 여기가 어떤 실행 파일이 필요한지 아는 자리다 — 조립 계층은 provider 를 안다. 지금 도는
+ * node 의 디렉터리를 맨 앞에 둬서 같은 node 의 npx 가 먼저 잡히게 한다. Windows 의 예약
+ * 작업은 사용자 환경을 그대로 물려받으므로 환경을 싣지 않는다.
+ */
+function serviceEnvironment(): Pick<ServiceCommand, 'environment'> {
+  if (process.platform === 'win32') return {}
+  const tools = [process.execPath, jamLauncher().command, 'glab', 'git']
+  const { path } = servicePath(tools)
+  return { environment: { PATH: path } }
 }
 
 const serviceInterval = (values: Record<string, unknown>): number =>

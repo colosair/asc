@@ -14,7 +14,7 @@
 //      shell 옵션이 필요 없다.
 // 셋 다 실패하면 이름 그대로 돌려준다 — PATH에 진짜 실행 파일이 있는 환경이 그 경우다.
 
-import { existsSync, readFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs'
 import { delimiter as winDelimiter, dirname, extname, isAbsolute, join } from 'node:path/win32'
 
 export type ResolvedInvocation = { command: string; args: string[] }
@@ -96,3 +96,60 @@ export function resolveExternalCommand(
   return { command, args: [...args] }
 }
 
+/**
+ * PATH 에서 실행 파일 하나를 찾는다 (POSIX). 없으면 null — 있는 척하지 않는다.
+ *
+ * Windows 는 위 `resolveExternalCommand` 가 shim 까지 풀어 주므로 여기서는 다루지 않는다.
+ */
+export function findOnPath(
+  command: string,
+  deps: { env?: NodeJS.ProcessEnv; exists?: (path: string) => boolean; platform?: NodeJS.Platform } = {},
+): string | null {
+  const platform = deps.platform ?? process.platform
+  if (platform === 'win32') return null
+  if (command.includes('/')) return (deps.exists ?? isExecutable)(command) ? command : null
+  const exists = deps.exists ?? isExecutable
+  const pathValue = (deps.env ?? process.env).PATH ?? ''
+  for (const dir of pathValue.split(':')) {
+    if (!dir) continue
+    const candidate = `${dir}/${command}`
+    if (exists(candidate)) return candidate
+  }
+  return null
+}
+
+const isExecutable = (path: string): boolean => {
+  try {
+    accessSync(path, constants.X_OK)
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** 시스템 기본 자리. 서비스 관리자가 주는 PATH 가 대개 이것이다. */
+export const SYSTEM_PATH = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'] as const
+
+/**
+ * 서비스에 실어 보낼 PATH — **지금 이 셸의 PATH 를 통째로 옮기지 않는다.** 세션마다 붙는
+ * 임시 디렉터리가 그대로 들어가면 등록물이 매번 STALE 이 되고, 사라진 경로가 남는다.
+ * 대신 필요한 실행 파일이 **실제로 있는 디렉터리만** 고른다. 못 찾은 도구는 조용히 빠지지
+ * 않고 `missing` 에 남는다 — 그 도구를 쓰는 통로는 서비스에서도 열리지 않을 것이다.
+ */
+export function servicePath(
+  tools: readonly string[],
+  deps: { env?: NodeJS.ProcessEnv; exists?: (path: string) => boolean; platform?: NodeJS.Platform } = {},
+): { path: string; missing: string[] } {
+  const dirs: string[] = []
+  const missing: string[] = []
+  const push = (dir: string) => {
+    if (!dirs.includes(dir)) dirs.push(dir)
+  }
+  for (const tool of tools) {
+    const found = findOnPath(tool, deps)
+    if (found) push(found.slice(0, found.lastIndexOf('/')) || '/')
+    else missing.push(tool)
+  }
+  for (const dir of SYSTEM_PATH) push(dir)
+  return { path: dirs.join(':'), missing }
+}
