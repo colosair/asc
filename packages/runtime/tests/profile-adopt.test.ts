@@ -196,8 +196,13 @@ describe('P0 — 제로베이스 경로 (CLI)', () => {
     try {
       run(repo, env, ['profile', 'adopt', '--json'])
 
+      // 만들고 나면 되묻지 않는다 — 이 저장소가 증명하는 Profile 이 하나 있고 그것을 쓴다.
       const plan = JSON.parse(run(repo, env, ['setup', 'plan', '--json']).stdout)
-      assert.ok(plan.profiles.includes('fixture'), '만든 것이 후보로 보여야 한다')
+      assert.equal(plan.requiresUserAction, false, '만든 것이 있는데 다시 고르라고 하면 안 된다')
+      assert.ok(
+        plan.changes.some((c: { target: string; profile?: string }) => c.target === 'attach-workspace' && c.profile === 'fixture'),
+        '만든 것으로 붙는 계획이어야 한다',
+      )
 
       const applied = JSON.parse(run(repo, env, ['setup', 'apply', '--profile', 'fixture', '--json']).stdout)
       assert.equal(applied.changesApplied, true)

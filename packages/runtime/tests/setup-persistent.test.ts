@@ -8,7 +8,12 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { describe, it } from 'node:test'
 
-import { applySetupPlan, computeSetupPlan, renderSetupPlan } from '../core/attach/setup-plan.ts'
+import {
+  applySetupPlan,
+  computeSetupPlan,
+  renderSetupPlan,
+  type SetupState,
+} from '../core/attach/setup-plan.ts'
 
 const base = {
   projectRoot: '/p',
@@ -48,8 +53,11 @@ describe('setup — 지속 등록은 같은 계획에 든다', () => {
     assert.match(plan.evidence.join('\n'), /persistent=unsupported/)
   })
 
-  it('프로젝트를 아직 못 골랐어도 등록은 계획에 남는다', () => {
-    // 기계 수준 준비는 profile 선택과 무관하다 — stable runtime 설치와 같은 자리다
+  it('붙는 것이 이번에 안 끝나면 등록하지 않는다 — 돌볼 workspace 가 아직 없다', () => {
+    // 예전에는 "기계 수준 준비는 profile 선택과 무관하다"는 이유로 여기서도 등록했다.
+    // 실기계에서 그 결과가 드러났다: OS 가 identity·binding 이 서기 전의 workspace 를
+    // 회차로 돌렸고, 사람은 자기 setup 을 끝내기도 전에 실패 기록을 봤다. 등록물은
+    // workspace 를 돌보는 것이고, 돌볼 것이 설 때 등록한다.
     const plan = computeSetupPlan({
       ...base,
       requestedProfile: undefined,
@@ -58,7 +66,16 @@ describe('setup — 지속 등록은 같은 계획에 든다', () => {
       persistentRuntime: { action: 'install', adapter: 'launchd' },
     })
     assert.equal(plan.status, 'user_action_required')
-    assert.ok(plan.changes.some((change) => change.target === 'persistent-runtime'))
+    assert.equal(plan.changes.some((change) => change.target === 'persistent-runtime'), false)
+    // 사람이 고르고 나면 같은 계획이 등록까지 들고 간다 — 별도 onboarding 은 여전히 없다.
+    const chosen = computeSetupPlan({
+      ...base,
+      requestedProfile: 'a',
+      profileCandidates: ['a', 'b'],
+      ascRoot: undefined,
+      persistentRuntime: { action: 'install', adapter: 'launchd' },
+    })
+    assert.deepEqual(chosen.changes.map((c) => c.target), ['attach-workspace', 'persistent-runtime'])
   })
 
   it('이 갈래를 모르는 호출자에게는 적용되지 않은 것으로 남는다', async () => {
@@ -111,5 +128,90 @@ describe('등록을 시도해도 되는 실행인가', () => {
     // 던지면 프로젝트가 붙는 것까지 같이 실패한다 — 다른 축이다
     assert.match(block.slice(0, 700), /catch \(error\)/)
     assert.doesNotMatch(block.slice(0, 700), /throw new Error/)
+  })
+})
+
+describe('P0 fresh onboarding — 되묻지 않고, 순서를 지킨다', () => {
+  const base: SetupState = {
+    entry: 'bootstrap',
+    projectRoot: '/work/project',
+    git: true,
+    profileCandidates: ['example-team', 'pilot-local'],
+    scope: 'local',
+    host: [{ id: 'claude', status: 'INSTALLED_CURRENT' }],
+  }
+
+  it('이 저장소가 증명하는 Profile 이 없으면 만들고 붙는다 — 고르라고 하지 않는다', () => {
+    const plan = computeSetupPlan({ ...base, adoptable: { id: 'PROJ', exists: false } })
+    assert.equal(plan.requiresUserAction, false)
+    assert.equal(plan.code, undefined)
+    assert.deepEqual(
+      plan.changes.map((change) => change.target),
+      ['adopt-profile', 'attach-workspace'],
+    )
+  })
+
+  it('그 이름의 Profile 이 이미 있으면 만들지 않고 그것으로 붙는다', () => {
+    const plan = computeSetupPlan({
+      ...base,
+      profileCandidates: ['example-team', 'PROJ'],
+      adoptable: { id: 'PROJ', exists: true },
+    })
+    assert.deepEqual(
+      plan.changes.map((change) => change.target),
+      ['attach-workspace'],
+    )
+    assert.equal(plan.changes[0]!.target === 'attach-workspace' && plan.changes[0]!.profile, 'PROJ')
+  })
+
+  it('증명하는 것이 없으면 예전처럼 사람이 고른다', () => {
+    const plan = computeSetupPlan(base)
+    assert.equal(plan.code, 'ASC_PROFILE_SELECTION_REQUIRED')
+    assert.equal(plan.requiresUserAction, true)
+  })
+
+  it('승인자와 결합이 비어 있으면 계획에 든다 — 사람이 따로 고치지 않는다', () => {
+    const plan = computeSetupPlan({
+      ...base,
+      adoptable: { id: 'PROJ', exists: true },
+      profileCandidates: ['PROJ'],
+      identity: { wired: false, actor: 'gitlab:me' },
+      bindingProposal: [
+        { role: 'code-primary', adapter: 'gitlab', resource: 'group/project' },
+        { role: 'work', adapter: 'jam', resource: 'PROJ' },
+      ],
+    })
+    assert.deepEqual(
+      plan.changes.map((change) => change.target),
+      ['attach-workspace', 'identity', 'profile-bindings'],
+    )
+  })
+
+  it('알 수 있는 이름이 없으면 승인자를 지어내지 않는다', () => {
+    const plan = computeSetupPlan({ ...base, adoptable: { id: 'PROJ', exists: true }, identity: { wired: false } })
+    assert.equal(plan.changes.some((change) => change.target === 'identity'), false)
+  })
+
+  it('등록은 맨 마지막이다 — 붙기 전에 OS 가 돌지 않는다', () => {
+    const plan = computeSetupPlan({
+      ...base,
+      adoptable: { id: 'PROJ', exists: false },
+      identity: { wired: false, actor: 'gitlab:me' },
+      persistentRuntime: { action: 'install', adapter: 'launchd' },
+      stableRuntime: { status: 'NOT_INSTALLED', expectedVersion: '9.9.9', executableVisible: false },
+    })
+    assert.deepEqual(
+      plan.changes.map((change) => change.target),
+      ['runtime-install', 'adopt-profile', 'attach-workspace', 'identity', 'persistent-runtime'],
+    )
+  })
+
+  it('사람이 고르는 데서 멈추면 등록은 계획에 들지 않는다 — 돌볼 workspace 가 아직 없다', () => {
+    const plan = computeSetupPlan({
+      ...base,
+      persistentRuntime: { action: 'install', adapter: 'launchd' },
+    })
+    assert.equal(plan.code, 'ASC_PROFILE_SELECTION_REQUIRED')
+    assert.equal(plan.changes.some((change) => change.target === 'persistent-runtime'), false)
   })
 })
