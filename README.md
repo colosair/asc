@@ -64,7 +64,7 @@ ASC ships as two packages:
 ### First run, on a machine with nothing installed
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.7.1 init
+npx --yes @asc-agent/bootstrap@0.8.0 init
 ```
 
 ### A profile for your project
@@ -77,7 +77,7 @@ Make one from the repository you are in:
 ```bash
 asc profile adopt          # writes ~/.asc/profiles/<repo>/profile.json
 asc setup apply --profile <repo>
-asc setup status           # profile: <repo> — your own profile directory
+asc status                 # profile: <repo> — your own profile directory
 ```
 
 `adopt` writes only what a git remote proves: the project's identity. Canonical branches
@@ -99,10 +99,10 @@ not break an existing attachment — are in [docs/profiles.md](docs/profiles.md)
 The command does not appear by magic, and this is the whole chain:
 
 ```text
-npx --yes @asc-agent/bootstrap@0.7.1 init
+npx --yes @asc-agent/bootstrap@0.8.0 init
         ↓  the bootstrap runs ASC's ordinary setup: detect → plan → apply → verify
         ↓  the plan lists "install the runtime on this machine" as a change
-        ↓  apply runs: npm install -g @asc-agent/runtime@0.7.1
+        ↓  apply runs: npm install -g @asc-agent/runtime@0.8.0
         ↓  npm owns the executable link (on Windows, npm's own asc.cmd)
         ↓  verify checks the installed version and that a NEW process can run it
 bootstrap exits
@@ -119,7 +119,7 @@ is not visible in the current process, ASC says exactly that instead of claiming
 
 ```text
 Runtime package was installed, but `asc` is not visible in this process.
-Open a new terminal and run `asc setup status`.
+Open a new terminal and run `asc status`.
 ```
 
 ### Three ways to run ASC
@@ -128,8 +128,8 @@ Every command exists in all three tiers; only the entry differs.
 
 | Tier | Entry | When |
 |---|---|---|
-| Zero-install | `npx --yes @asc-agent/bootstrap@0.7.1 <command> --json` | nothing is installed yet |
-| Persistent | `npm install -g @asc-agent/runtime@0.7.1`, then `asc <command>` | the stable local command — and the fallback when `npx` itself cannot start |
+| Zero-install | `npx --yes @asc-agent/bootstrap@0.8.0 <command> --json` | nothing is installed yet |
+| Persistent | `npm install -g @asc-agent/runtime@0.8.0`, then `asc <command>` | the stable local command — and the fallback when `npx` itself cannot start |
 | Development | `asc runtime use development <checkout>` | run a built checkout instead of the package |
 
 If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
@@ -141,10 +141,12 @@ command ASC asked to run: that one is ASC speaking, and its JSON says what to do
 ### Everyday use
 
 ```bash
-asc setup status     # what works, what is blocked, and why
-asc proceed          # pick up the runnable work you own
-asc front            # what is running, what is waiting on you
-asc runtime status   # which build is in use
+asc status           # what works, what is blocked, and why
+asc work start       # pick up the runnable work you own
+asc work publish     # send an approved result outside
+asc work finish      # hand off, close and collect in one command
+asc mode manual|auto # who executes an approved act
+asc inbox            # what is waiting on you
 ```
 
 ### For a coding agent
@@ -159,7 +161,7 @@ to `stderr`.
 On a fresh machine, start from the bootstrap — there is no `asc` yet:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.7.1 setup apply --json
+npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
 ```
 
 The document carries a stable shape:
@@ -171,7 +173,7 @@ The document carries a stable shape:
   "executionMode": "bootstrap",     // or installed-runtime
   "changes": [
     { "target": "runtime-install", "package": "@asc-agent/runtime",
-      "version": "0.7.1", "strategy": "npm-global", "from": "NOT_INSTALLED" },
+      "version": "0.8.0", "strategy": "npm-global", "from": "NOT_INSTALLED" },
     { "target": "attach-workspace", "scope": "local", "profile": "..." }
   ],
   "requiresUserAction": false,
@@ -181,9 +183,9 @@ The document carries a stable shape:
     // must exist before anything can be selected.
     { "type": "apply_setup",
       "display":  "asc setup apply",
-      "portable": "npx --yes @asc-agent/bootstrap@0.7.1 setup apply" }
+      "portable": "npx --yes @asc-agent/bootstrap@0.8.0 setup apply" }
   ],
-  "nextActions": ["npx --yes @asc-agent/bootstrap@0.7.1 setup apply"],
+  "nextActions": ["npx --yes @asc-agent/bootstrap@0.8.0 setup apply"],
   "evidence": ["project=/path", "git=yes", "attached=no", "runtime=NOT_INSTALLED"]
 }
 ```
@@ -197,7 +199,7 @@ Branch on `code` and `requiresUserAction`. Never parse the prose.
 
 ## Local-first and zero footprint
 
-`asc init` defaults to **local scope**, and in that mode **nothing is created inside the
+`asc setup` defaults to **local scope**, and in that mode **nothing is created inside the
 target repository**.
 
 ```text
@@ -228,7 +230,7 @@ So moving or re-cloning a checkout can still resolve to the same workspace.
 
 ```bash
 asc workspace list
-asc init --profile <id> --workspace <W-id>   # you declare the match; ASC never picks for you
+asc setup --profile <id> --workspace <W-id>  # you declare the match; ASC never picks for you
 ```
 
 If a repository already contains a `repo/.asc` from the older layout:

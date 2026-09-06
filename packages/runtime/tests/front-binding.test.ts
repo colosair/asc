@@ -168,8 +168,9 @@ describe('설치 — 사람의 host 설정을 보존한다 (C-03 §5.1)', () => 
       assert.ok(commands.includes('caveman-hook'), '남의 hook이 그대로 있다')
       assert.ok(commands.includes('ponytail-hook'), '남의 hook이 그대로 있다')
       assert.equal(commands.length, 3, 'ASC 것 하나만 더해졌다')
-      // 무관한 설정은 손대지 않는다
-      assert.deepEqual(settings.permissions, { allow: ['Bash(ls:*)'] })
+      // 남의 설정은 그대로 있고, 우리 것은 **더해질** 뿐이다. 0.8.0 에서 control-plane
+      // 허용 규칙이 여기 들어온다 — Host 가 ASC 명령을 막으면 나갈 길이 사라진다 (E-02).
+      assert.deepEqual(settings.permissions, { allow: ['Bash(ls:*)', 'Bash(asc:*)'] })
     } finally {
       await rm(p.dir, { recursive: true, force: true })
     }

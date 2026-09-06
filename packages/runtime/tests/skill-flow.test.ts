@@ -47,13 +47,17 @@ describe('skill 이 말하는 명령은 이 build 에 있다', () => {
 
 describe('자연어 의도마다 갈 자리가 있다', () => {
   const intents: { intent: string; mustMention: RegExp[] }[] = [
-    { intent: 'setup', mustMention: [/setup apply --json/, /setup status/] },
+    { intent: 'setup', mustMention: [/setup apply --json/, /asc setup/] },
     { intent: 'update', mustMention: [/asc update/, /jam update/] },
-    { intent: 'start work', mustMention: [/asc proceed --work/, /asc proceed --json/] },
+    { intent: 'refresh', mustMention: [/asc refresh/, /jam refresh/] },
+    { intent: 'uninstall', mustMention: [/asc uninstall/, /jam uninstall/] },
+    { intent: 'start work', mustMention: [/asc work start/] },
     { intent: 'continue work', mustMention: [/RESUMED|CONTINUE_ACTIVE/, /checkpoint/] },
-    { intent: 'publish', mustMention: [/asc grant issue --session/, /asc grant run/] },
-    { intent: 'finish', mustMention: [/asc session done/, /asc controller collect/] },
-    { intent: 'check status', mustMention: [/asc inbox/, /asc setup status/] },
+    { intent: 'publish', mustMention: [/asc work publish/] },
+    { intent: 'finish', mustMention: [/asc work finish/] },
+    { intent: 'check status', mustMention: [/asc inbox/, /asc status/] },
+    // 실행 축은 결정 축과 다르다는 것을 문서가 말해야 한다 (H-01~H-04).
+    { intent: 'execution mode', mustMention: [/asc mode manual/, /asc mode auto/, /AUTO is not the opposite/] },
   ]
 
   for (const { intent, mustMention } of intents) {

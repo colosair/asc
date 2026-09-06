@@ -64,12 +64,12 @@ export type SetupInput = {
  * 포함한다 — "attach가 끝나야 아무것도 할 수 있다"는 오해를 이 목록이 직접 깬다.
  */
 const ALWAYS_READY = [
-  'issue, run, pause, resume and finish sessions (asc session, asc proceed)',
-  'record and read progress (asc progress)',
-  'check output paths up front (asc preflight)',
-  'collect finished work and confirm closure (asc controller collect, asc closure)',
-  'read incoming requests (asc inbox list/show)',
-  'install and check the host (asc host)',
+  'start, pause, resume and finish work inside a contract (asc work)',
+  'see where the work is right now (asc work status)',
+  'check output paths up front (asc work inspect)',
+  'read what is waiting for a person (asc inbox)',
+  'choose who executes an approved act (asc mode)',
+  'see and converge this installation (asc status, asc refresh)',
 ]
 
 const RESOLVE_AGAIN =
@@ -188,11 +188,11 @@ export function renderSetup(status: SetupStatus): string {
 
   switch (status.attachment) {
     case 'UNATTACHED':
-      lines.push('Not attached yet — run `asc init --profile <id>` first.')
+      lines.push('Not attached yet — run `asc setup` first.')
       return lines.join('\n')
     case 'BROKEN':
       lines.push('Attachment is half-finished: a runtime exists but profile.lock does not.')
-      lines.push('  Re-attach with `asc init --profile <id>`, or lock it with `asc profile resolve --write`.')
+      lines.push('  Re-attach with `asc setup`, or lock it with `asc profile resolve --write`.')
       return lines.join('\n')
     case 'LOCK_DRIFT':
       // 이 상태에서 gate를 나열하면 "설정이 덜 찼다"로 잘못 읽힌다. 원인을 먼저 말한다.

@@ -124,7 +124,7 @@ export async function verifyStableInstall(
     return {
       ok: false,
       state,
-      remedy: 'Runtime package was installed, but `asc` is not visible in this process. Open a new terminal and run `asc setup status`.',
+      remedy: 'Runtime package was installed, but `asc` is not visible in this process. Open a new terminal and run `asc status`.',
     }
   }
   return { ok: false, state, remedy: state.detail }
