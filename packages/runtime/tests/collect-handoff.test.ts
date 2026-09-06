@@ -85,3 +85,37 @@ describe('거둔 뒤에도 인계가 화면에 남는다', () => {
     assert.match(text, /\(다음 작업 없음\)/)
   })
 })
+
+// ── 0.7.0 / Phase L — 승인된 작업이 화면에서 사라지지 않는다 ──────────────────
+
+describe('사람이 하기로 한 것은 목록에 남는다', () => {
+  it('queue 로 결정한 요청이 기본 목록에 보인다', async () => {
+    const { LocalOperator } = await import('../core/operator/local-operator.ts')
+    const { ApprovalRequest } = await import('../core/model/entities.ts')
+    const store = new MemoryStateStore()
+    await store.create(
+      'request',
+      ApprovalRequest.parse({
+        id: 'REQ-0001',
+        version: 0,
+        status: 'QUEUED',
+        type: 'actionable',
+        priority: 'P1',
+        title: '리뷰 응답',
+        detectedAt: NOW,
+        source: { eventKey: 'note:1:2026-09-06T00:00:00Z', reference: 'g/p!19' },
+        situation: 's',
+        impact: { interruptRequired: false },
+        authorizedApprover: 'colosair',
+        allowedDecisions: ['approve', 'queue'],
+      }),
+    )
+
+    const listed = await new LocalOperator({ store }).list()
+    assert.deepEqual(
+      listed.map((item) => item.requestId),
+      ['REQ-0001'],
+      'queue 로 정한 순간 화면에서 사라지면 사람이 방금 하기로 한 일을 볼 자리가 없다',
+    )
+  })
+})

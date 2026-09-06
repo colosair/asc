@@ -8,7 +8,6 @@ import type {
   ControlState,
   ExecutionGrant,
   MonitorEvent,
-  QueueItem,
   Session,
 } from '../core/model/entities.ts'
 
@@ -20,7 +19,6 @@ export type EntityMap = {
   session: Session
   request: ApprovalRequest
   grant: ExecutionGrant
-  queueItem: QueueItem
   event: MonitorEvent
 }
 export type EntityKind = keyof EntityMap
@@ -30,7 +28,6 @@ export const ENTITY_KEY: { [K in EntityKind]: keyof EntityMap[K] & string } = {
   session: 'id',
   request: 'id',
   grant: 'id',
-  queueItem: 'id',
   event: 'eventKey',
 }
 

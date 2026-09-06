@@ -10,21 +10,18 @@ import {
   ExecutionGrant,
   Handoff,
   MonitorEvent,
-  QueueItem,
   Session,
 } from '../core/model/entities.ts'
 import { EventKey, RequestId, SessionId, nextId } from '../core/model/ids.ts'
 import {
   EVENT_TRANSITIONS,
   GRANT_TRANSITIONS,
-  QUEUE_TRANSITIONS,
   REQUEST_TRANSITIONS,
   SESSION_TRANSITIONS,
   TransitionError,
   terminalStates,
   transitionEvent,
   transitionGrant,
-  transitionQueueItem,
   transitionRequest,
   transitionSession,
 } from '../core/model/transitions.ts'
@@ -106,14 +103,6 @@ describe('전이표는 설계 정본과 1:1 대응한다', () => {
     )
   })
 
-  it('QueueItem — OM §4.8', () => {
-    assert.deepEqual(
-      edges(QUEUE_TRANSITIONS),
-      new Set(['READY->ACTIVE', 'READY->BLOCKED', 'ACTIVE->BLOCKED', 'ACTIVE->DONE', 'BLOCKED->READY', 'BLOCKED->ACTIVE']),
-    )
-    assert.deepEqual(terminalStates(QUEUE_TRANSITIONS, ['READY', 'ACTIVE', 'BLOCKED', 'DONE']), ['DONE'])
-  })
-
   it('MonitorEvent — OM §10.5', () => {
     assert.deepEqual(
       edges(EVENT_TRANSITIONS),
@@ -126,7 +115,6 @@ describe('전이표는 설계 정본과 1:1 대응한다', () => {
       ...SESSION_TRANSITIONS,
       ...REQUEST_TRANSITIONS,
       ...GRANT_TRANSITIONS,
-      ...QUEUE_TRANSITIONS,
       ...EVENT_TRANSITIONS,
     ]
     for (const rule of all) {
@@ -275,13 +263,7 @@ describe('ExecutionGrant lifecycle', () => {
   })
 })
 
-describe('QueueItem·MonitorEvent', () => {
-  it('Queue 전이는 Controller 전용이다', () => {
-    const item = QueueItem.parse({ id: 'Q-0001', version: 0, state: 'READY', title: 'PR #44 리뷰 영향 확인' })
-    assert.throws(() => transitionQueueItem(item, 'ACTIVE', 'session'), (e: TransitionError) => e.reason === 'FORBIDDEN_ACTOR')
-    assert.equal(transitionQueueItem(item, 'ACTIVE', 'controller', { sessionId: 'S-20260822-01' }).sessionId, 'S-20260822-01')
-  })
-
+describe('MonitorEvent', () => {
   it('Phase B 실패는 그 이벤트만 PENDING_RETRY로 남고 재시도된다', () => {
     const event = MonitorEvent.parse({
       eventKey: 'notification:t-1:2026-08-22T09:00:00Z',

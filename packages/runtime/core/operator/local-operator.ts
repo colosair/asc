@@ -13,7 +13,15 @@ import type { DecisionSummary, DecisionView, Freshness } from '../view/decision-
 import { assembleView, assess, buildOverlay, summarize } from '../view/build-view.ts'
 
 /** 아직 사람의 판단을 기다리는 상태. 목록의 기본 필터다. */
-const PENDING = new Set(['AWAITING_APPROVAL', 'APPROVED'])
+/**
+ * 아직 사람의 손을 떠나지 않은 것들.
+ *
+ * `QUEUED` 가 여기 있는 이유 (0.7.0 / Phase L): 그것은 **승인된 작업**이다. 사람이
+ * "하자" 고 정했고 아직 실행되지 않았다. 그런데 목록에서 빠져 있어서, `queue` 로 결정한
+ * 순간 그 항목이 화면에서 사라졌다 — 사람이 방금 하기로 한 일이 어디에도 보이지 않는다.
+ * OM §1 원칙 10 이 Inbox 와 Queue 를 나눈 것은 그것을 잃지 않기 위해서였다.
+ */
+const PENDING = new Set(['AWAITING_APPROVAL', 'APPROVED', 'QUEUED'])
 
 export type ListOptions = {
   /** true면 처분된 것까지 전부 (기본은 판단 대기만). */
