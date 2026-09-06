@@ -12,6 +12,7 @@ import { describe, it } from 'node:test'
 
 import {
   CoordinationLedger,
+  responsesFrom,
   coordinationLines,
   deriveCoordination,
   viewCoordination,
@@ -277,5 +278,54 @@ describe('영향 경계', () => {
     )
     // Host 어휘도 세션 생성 경로도 없다 — 회차가 부르든 사람이 부르든 같은 답이다
     assert.doesNotMatch(code.replace(/\/\/.*/g, ''), /host|session\.create|SessionRuntime/i)
+  })
+})
+
+describe('무엇을 응답으로 세는가', () => {
+  const communication = {
+    evidenceId: 'C-1',
+    queryId: 'X-20260906-01',
+    identity: { adapter: 'a', objectType: 'thread', objectId: 'proj#7' },
+    audience: [],
+    publishedAt: AT,
+    observedAt: AT,
+    evidenceSource: 'test',
+  }
+
+  it('그 시스템이 남긴 자국은 답이 아니다', () => {
+    const responses = responsesFrom(
+      communication,
+      [
+        { id: '1', author: 'them', at: AT, system: true },
+        { id: '2', author: 'them', at: AT },
+      ],
+      new Set(['me']),
+    )
+    assert.deepEqual(responses.map((response) => response.evidenceId), ['C-1:2'])
+  })
+
+  it('내가 쓴 글은 답이 아니다 — 그러면 혼잣말이 답이 된다', () => {
+    const responses = responsesFrom(
+      communication,
+      [
+        { id: '3', author: 'me', at: AT },
+        { id: '4', author: 'colosair', at: AT },
+      ],
+      new Set(['me', 'colosair']),
+    )
+    assert.deepEqual(responses, [])
+  })
+
+  it('같은 글을 다시 봐도 같은 증거 id 다 (R11)', () => {
+    const once = responsesFrom(communication, [{ id: '9', author: 'them', at: AT }], new Set())
+    const twice = responsesFrom(communication, [{ id: '9', author: 'them', at: AT }], new Set())
+    assert.equal(once[0]!.evidenceId, twice[0]!.evidenceId)
+  })
+
+  it('답의 의미를 정하지 않는다 — 결정·승인 필드가 없다', () => {
+    const [response] = responsesFrom(communication, [{ id: '5', author: 'them', at: AT }], new Set())
+    assert.equal('kind' in response!, false)
+    assert.equal('decision' in response!, false)
+    assert.equal(response!.responder, 'them')
   })
 })

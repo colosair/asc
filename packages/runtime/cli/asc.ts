@@ -147,6 +147,7 @@ import { QueryLedger } from '../core/runtime/query.ts'
 import {
   CoordinationLedger,
   coordinationLines,
+  responsesFrom,
   viewCoordination,
   type CoordinationView,
 } from '../core/runtime/coordination.ts'
@@ -274,6 +275,7 @@ const USAGE = `asc — Agent Session Control
   asc coordination [status] [--json]   # what was asked outside, and whether it reached anyone
   asc coordination publish --query <ID> --title <text> --body-file <path>
                    [--audience <who>] [--known <objectId>] [--work <ref>] [--json]
+  asc coordination observe [--json]    # did anything come back on what we published
 
   asc progress show   [<S-ID>]
   asc progress report <S-ID> --physical <id> --phase <text>
@@ -890,7 +892,7 @@ async function runParsedCommand(
   if (group === 'front') return runFront(command, values, store, root)
 
   // 밖에 물은 것이 실제로 전달됐는가. 읽기만 한다.
-  if (group === 'coordination') return runCoordination(command, values, store, guard.runtime)
+  if (group === 'coordination') return runCoordination(command, values, store, root, guard.runtime)
 
   // 사람에게 올릴 자격이 있는가 (C-13). 자격 없으면 request가 만들어지지 않는다.
   if (group === 'escalate') return runEscalate(command, target, values, store, guard.runtime)
@@ -4725,6 +4727,83 @@ async function runCoordinationPublish(
 }
 
 /**
+ * `asc coordination observe` — 게시한 것에 답이 왔는가.
+ *
+ * **답의 의미를 정하지 않는다.** 여기서 남는 것은 "밖에서 사람이 글을 남겼다"까지이고,
+ * 그것이 결정인지 승인인지는 다른 계약의 몫이다. 그 시스템이 스스로 남긴 자국과 우리가
+ * 쓴 글은 세지 않는다 — 그 둘을 세면 아무도 답하지 않은 스레드가 답이 온 것으로 보인다.
+ */
+async function runCoordinationObserve(
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  root: string,
+  resolved?: ResolvedRuntime,
+): Promise<number> {
+  const ledger = coordinationLedger(store)
+  const communications = await ledger.communications()
+  if (communications.length === 0) {
+    console.log('Nothing has been published from here yet.')
+    return 0
+  }
+
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const adapters = monitorAdapters()
+  const declared = resolved?.layers.profile.bindings ?? []
+  const plan = await composeBindings({
+    context: { projectRoot, env: process.env },
+    adapters,
+    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+  })
+  // **그 게시물을 만든 통로에게 묻는다.** 프로젝트 전체의 자원 조회를 하나 고르면
+  // 어느 것을 고를지 갈리고(실제로 갈렸다), 갈리지 않더라도 다른 시스템에게 남의 게시물을
+  // 묻게 된다. 증거에 적힌 adapter 가 곧 그 통로다.
+  const built = await buildObservationChannels({
+    plan,
+    roles: rolesFor(plan, declared),
+    ...jamComposition(projectRoot),
+    endpointFor: (binding) => endpointOf(adapters, binding),
+  })
+  const contextOf = (adapterId: string) =>
+    built.channels.find((channel) => channel.adapterId === adapterId && channel.resourceContext)?.resourceContext
+
+  // 나를 나로 알아보는 곳은 identities.json 하나다. 채널 접두사를 떼면 계정 이름이 남는다.
+  const identity = await loadIdentityMap(root)
+  const mine = new Set<string>()
+  for (const [name, accounts] of Object.entries(identity)) {
+    mine.add(name)
+    for (const account of accounts) mine.add(account.includes(':') ? account.slice(account.indexOf(':') + 1) : account)
+  }
+
+  let added = 0
+  let looked = 0
+  for (const communication of communications) {
+    const context = contextOf(communication.identity.adapter)
+    if (!context) {
+      // 못 본 것을 "답이 없다"로 넘기지 않는다.
+      console.error(`  ${communication.identity.objectId}: ${communication.identity.adapter} 통로가 열리지 않아 보지 못했다`)
+      continue
+    }
+    looked += 1
+    const remarks = await context
+      .getComments(communication.identity.objectId, { limit: 100 })
+      .catch(() => [])
+    for (const response of responsesFrom(communication, remarks, mine)) {
+      const outcome = await ledger.responseRecorded(response)
+      if (outcome.ok) added += 1
+    }
+  }
+
+  const views = await coordinationNow(store, resolved)
+  if (values.json) {
+    console.log(JSON.stringify({ published: communications.length, observed: looked, recorded: added, coordination: views }, null, 2))
+    return 0
+  }
+  console.log(`Looked at ${looked} of ${communications.length} published artefact(s) — ${added} new response(s).`)
+  for (const line of coordinationLines(views)) console.log(line)
+  return 0
+}
+
+/**
  * `asc coordination` — 밖에 물은 것이 실제로 나갔는가, 답이 왔는가.
  *
  * **읽기만 한다.** 이 화면이 상태를 만들지 않는다는 것이 요점이다 — 보이는 것은 전부
@@ -4734,9 +4813,11 @@ async function runCoordination(
   command: string | undefined,
   values: Record<string, unknown>,
   store: MarkdownStateStore,
+  root: string,
   resolved?: ResolvedRuntime,
 ): Promise<number> {
   if (command === 'publish') return runCoordinationPublish(values, store, resolved)
+  if (command === 'observe') return runCoordinationObserve(values, store, root, resolved)
   if (command !== undefined && command !== 'status') {
     console.error(`Unknown coordination command: ${command}\n\n${USAGE}`)
     return 2
