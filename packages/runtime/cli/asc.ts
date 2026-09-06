@@ -1077,7 +1077,11 @@ async function attachLocalWorkspace(
   const index = await readIndex(home)
 
   const existing = lookupLocator(index, projectRoot)
-  if (existing && !declaredWorkspace) {
+  // **자리만 있고 workspace 가 없으면 등록된 것이 아니다.** 이 상태에서 "이미 등록됨" 이라고
+  // 답하면 붙기는 성공하는데 기계 전체 화면에는 끝내 나타나지 않는다 — 등록된 서비스가
+  // 그 workspace 를 영영 돌지 않는다. 색인이 부분적으로 지워진 자리에서 실제로 그랬다.
+  const orphaned = existing !== null && index.workspaces[existing.workspaceId] === undefined
+  if (existing && !orphaned && !declaredWorkspace) {
     console.log(`Already registered workspace: ${existing.workspaceId}`)
     return existing.root
   }
@@ -1117,8 +1121,10 @@ async function attachLocalWorkspace(
     )
   }
 
-  const workspaceId = newWorkspaceId()
+  // 상태가 남아 있으면 그 id 로 되돌린다 — 새 id 를 주면 세션·증거가 있는 자리가 고아로 남는다.
+  const workspaceId = orphaned && existing ? existing.workspaceId : newWorkspaceId()
   const root = join(home, 'workspaces', workspaceId)
+  if (orphaned) console.log(`This location pointed at ${workspaceId}, which the index no longer lists — registering it again.`)
   await writeIndex(
     home,
     register(index, {
