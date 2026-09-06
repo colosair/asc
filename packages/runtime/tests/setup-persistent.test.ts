@@ -317,3 +317,15 @@ describe('첫 설치가 등록까지 간다 — 명령을 하나 더 치게 하�
     assert.equal(plan.changes.some((change) => change.target === 'persistent-runtime'), false)
   })
 })
+
+describe('검사는 이 기계에 등록을 남기지 않는다', () => {
+  it('setup 을 실제로 실행하는 검사는 전부 이 축을 끈다', async () => {
+    // 끄지 않은 검사 하나가 실제로 launchd 에 job 을 남겼다 — plist 는 임시 HOME 과 함께
+    // 지워졌는데 job 은 남아, 지워진 경로를 로그로 가리킨 채 계속 실행됐다.
+    const spawning = ['setup-plan.test.ts', 'contract-draft.test.ts', 'profile-adopt.test.ts']
+    for (const name of spawning) {
+      const source = await readFile(new URL(`./${name}`, import.meta.url), 'utf8')
+      assert.match(source, /ASC_SERVICE: 'off'/, `${name} 이 기계 등록 축을 끄지 않는다`)
+    }
+  })
+})
