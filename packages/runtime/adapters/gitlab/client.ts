@@ -52,7 +52,7 @@ export async function glabAvailable(run: ProcessRunner): Promise<boolean> {
  * `glab api` 를 읽기 통로로 감싼 클라이언트. GET 만 다룬다 — 쓰기는 Grant 를 지나야 하고,
  * 그 경로를 우회하는 통로를 여기에 만들지 않는다.
  */
-export class GlabApiClient implements GitLabReader {
+export class GlabApiClient implements GitLabReader, GitLabWriter {
   #run: ProcessRunner
 
   constructor(run: ProcessRunner) {
@@ -69,6 +69,20 @@ export class GlabApiClient implements GitLabReader {
       return { ok: false, status: 0, data: null, error: String((error as Error).message ?? error).slice(0, 200) }
     }
   }
+
+  async post<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>> {
+    // 값 하나가 한 필드다. 문자열을 만들어 붙이지 않는다 — 그렇게 하면 본문에 개행이나
+    // 따옴표가 있을 때 조용히 다른 것이 나간다.
+    const fields = Object.entries(body).flatMap(([key, value]) =>
+      value === undefined ? [] : ['-f', `${key}=${String(value)}`],
+    )
+    try {
+      const stdout = await this.#run('glab', ['api', '--method', 'POST', path.replace(/^\//, ''), ...fields])
+      return { ok: true, status: 201, data: JSON.parse(stdout) as T }
+    } catch (error) {
+      return { ok: false, status: 0, data: null, error: String((error as Error).message ?? error).slice(0, 200) }
+    }
+  }
 }
 
 /**
@@ -76,11 +90,24 @@ export class GlabApiClient implements GitLabReader {
  * Port 들은 어느 쪽인지 몰라야 한다. 통로가 바뀌었다고 조회 코드가 바뀌면, 통로를 늘릴
  * 때마다 같은 코드가 갈라진다.
  */
+/**
+ * 쓰기 통로. **읽기와 일부러 갈라 둔다** — 조회 코드가 쓰기를 할 수 있으면 어디서 무엇이
+ * 나가는지 아무도 세지 못한다. 이것을 쥔 곳은 조율 표면 하나뿐이고, 거기서 나가는 것은
+ * 공개 payload 로 제한돼 있다.
+ *
+ * 승인(Grant)을 지나는 외부 Action 과는 다른 경로다. 그쪽은 사람이 승인한 단일 행동을
+ * 그대로 내보내는 통로이고, 이쪽은 물어본 것이 밖에 실제로 있게 하는 조율 행위다.
+ * 둘을 한 통로로 합치면 승인의 의미가 흐려진다.
+ */
+export interface GitLabWriter {
+  post<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>>
+}
+
 export interface GitLabReader {
   get<T>(path: string): Promise<GitLabResponse<T>>
 }
 
-export class GitLabClient implements GitLabReader {
+export class GitLabClient implements GitLabReader, GitLabWriter {
   #token: string
   #fetch: Fetch
   #baseUrl: string
@@ -106,6 +133,22 @@ export class GitLabClient implements GitLabReader {
       // 빈 문자열은 "다음 없음"이다 — 그대로 실어 보내면 0페이지를 영원히 돈다.
       ...(nextPage ? { nextPage } : {}),
     }
+  }
+
+  async post<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>> {
+    const response = await this.#fetch(`${this.#baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'private-token': this.#token,
+      },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) {
+      return { ok: false, status: response.status, data: null, error: `HTTP ${response.status}` }
+    }
+    return { ok: true, status: response.status, data: (await response.json()) as T }
   }
 }
 

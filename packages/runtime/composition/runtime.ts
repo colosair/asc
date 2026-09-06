@@ -16,6 +16,7 @@ import type { EventSource } from '../ports/event-source.ts'
 import type { InventoryPort } from '../ports/inventory.ts'
 import type { ResourceContextPort } from '../ports/resource-context.ts'
 import type { ScmPort } from '../ports/scm.ts'
+import type { CoordinationSurfacePort } from '../ports/coordination-surface.ts'
 import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
 import { GitHubEventSource } from '../adapters/github/event-source.ts'
@@ -27,6 +28,7 @@ import {
   glabAvailable,
   type ProcessRunner,
 } from '../adapters/gitlab/client.ts'
+import { GitLabCoordinationSurface } from '../adapters/gitlab/coordination.ts'
 import {
   GitLabChangeContext,
   GitLabEventSource,
@@ -43,6 +45,8 @@ export type RuntimePorts = {
   inventory?: InventoryPort
   resourceContext?: ResourceContextPort
   changeContext?: ChangeContextPort
+  /** 밖에 물은 것이 실제로 있게 하는 통로 (C-04·C-10). 없으면 게시는 일어나지 않는다. */
+  coordinationSurface?: CoordinationSurfacePort
   /** 무엇을 왜 못 만들었는지. 조용히 빠지면 사람이 이유를 알 수 없다. */
   unavailable: string[]
 }
@@ -91,7 +95,10 @@ const FACTORIES: Record<string, Factory> = {
       inventory: new GitLabInventory({ client, project }),
       resourceContext: new GitLabResourceContext({ client, project }),
       changeContext: new GitLabChangeContext({ client, project }),
-      // canonical·외부 write 통로는 아직 없다. 없는 것을 있는 척하지 않는다.
+      // 조율 표면. 토큰 통로일 때만 쓰기가 가능하다 — 도구를 통로로 쓰는 경우도 POST 를
+      // 대신 보내 준다. 둘 다 아니면 create 가 그 사실을 그대로 말한다.
+      coordinationSurface: new GitLabCoordinationSurface({ reader: client, writer: client, project }),
+      // canonical 통로는 아직 없다. 없는 것을 있는 척하지 않는다.
     }
   },
   github(binding, input, token) {
@@ -181,6 +188,7 @@ const PORT_OF: Partial<Record<Capability, keyof Omit<RuntimePorts, 'unavailable'
   'context.change': 'changeContext',
   'context.resource': 'resourceContext',
   'canonical.read': 'scm',
+  'coordination.surface': 'coordinationSurface',
 }
 
 /**

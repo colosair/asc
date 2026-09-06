@@ -238,7 +238,10 @@ describe('B-29 Gate — Runtime 조립 (C-09 §6)', () => {
     assert.ok(ports.changeContext)
     assert.ok(ports.resourceContext)
     assert.ok(ports.scm)
-    assert.deepEqual(ports.unavailable, [])
+    // 선언하지 않은 갈래는 없다고 남는다 — 조용히 빠지지 않는 것이 이 조립의 규칙이다.
+    assert.deepEqual(ports.unavailable, [
+      "coordination.surface: 'coordination.surface' 를 제공하는 binding이 없다",
+    ])
   })
 
   it('제공하지 않는 갈래는 조용히 빠지지 않고 이유가 남는다', async () => {
