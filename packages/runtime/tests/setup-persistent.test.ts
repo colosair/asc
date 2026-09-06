@@ -283,3 +283,49 @@ describe('F5 — 정본 갈래까지 결선한다', () => {
     )
   })
 })
+
+describe('첫 설치가 등록까지 간다 — 명령을 하나 더 치게 하지 않는다', () => {
+  const fresh: SetupState = {
+    entry: 'bootstrap',
+    projectRoot: '/work/project',
+    git: true,
+    profileCandidates: [],
+    scope: 'local',
+    host: [{ id: 'claude', status: 'INSTALLED_CURRENT' }],
+    adoptable: { id: 'PROJ', exists: false },
+    stableRuntime: { status: 'NOT_INSTALLED', expectedVersion: '9.9.9', executableVisible: false },
+    persistentRuntime: { action: 'install', adapter: 'launchd' },
+  }
+
+  it('전역 runtime 을 놓는 같은 계획이 등록도 싣는다', () => {
+    const plan = computeSetupPlan(fresh)
+    assert.deepEqual(
+      plan.changes.map((change) => change.target),
+      ['runtime-install', 'adopt-profile', 'attach-workspace', 'persistent-runtime'],
+    )
+    // 등록이 설치보다 앞서면 가리킬 것이 없는 채로 등록된다.
+    const order = plan.changes.map((change) => change.target)
+    assert.ok(order.indexOf('runtime-install') < order.indexOf('persistent-runtime'))
+  })
+
+  it('가리킬 자리가 없고 이번에 놓지도 않으면 등록하지 않는다', () => {
+    const plan = computeSetupPlan({
+      ...fresh,
+      stableRuntime: { status: 'CURRENT', expectedVersion: '9.9.9', installedVersion: '9.9.9', executableVisible: true },
+      persistentRuntime: { action: 'unsupported', adapter: 'launchd', detail: 'nothing stable to point at' },
+    })
+    assert.equal(plan.changes.some((change) => change.target === 'persistent-runtime'), false)
+  })
+})
+
+describe('검사는 이 기계에 등록을 남기지 않는다', () => {
+  it('setup 을 실제로 실행하는 검사는 전부 이 축을 끈다', async () => {
+    // 끄지 않은 검사 하나가 실제로 launchd 에 job 을 남겼다 — plist 는 임시 HOME 과 함께
+    // 지워졌는데 job 은 남아, 지워진 경로를 로그로 가리킨 채 계속 실행됐다.
+    const spawning = ['setup-plan.test.ts', 'contract-draft.test.ts', 'profile-adopt.test.ts']
+    for (const name of spawning) {
+      const source = await readFile(new URL(`./${name}`, import.meta.url), 'utf8')
+      assert.match(source, /ASC_SERVICE: 'off'/, `${name} 이 기계 등록 축을 끄지 않는다`)
+    }
+  })
+})

@@ -130,6 +130,9 @@ describe('B-69 Gate — agent 표면 (C-14 §7, 불변식 ⑫)', () => {
         HOME: join(base, 'home'),
         USERPROFILE: join(base, 'home'),
         ASC_HOME: join(base, 'asc'),
+        // 기계 서비스는 HOME 으로 격리되지 않는다 — 이 축을 끄지 않으면 검사가 이 기계에
+        // 진짜 등록을 남긴다 (G-2 와 같은 이유).
+        ASC_SERVICE: 'off',
         NO_COLOR: '1',
       },
       cleanup: () => rm(base, { recursive: true, force: true }),

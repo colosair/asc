@@ -216,6 +216,8 @@ describe('Case A — 설치만 했으면 세션은 0이다', () => {
         HOME: join(base, 'home'),
         USERPROFILE: join(base, 'home'),
         ASC_HOME: join(base, 'asc'),
+        // 기계 서비스는 HOME 으로 격리되지 않는다 — 검사가 진짜 등록을 남기지 않게 한다.
+        ASC_SERVICE: 'off',
         NO_COLOR: '1',
       },
       cleanup: () => rm(base, { recursive: true, force: true }),
