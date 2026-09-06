@@ -17,6 +17,7 @@ import { describe, it } from 'node:test'
 
 import { CLAUDE_PROVIDER, claudeBindings } from '../adapters/claude-code/binding.ts'
 import { hookScript } from '../adapters/claude-code/guard.ts'
+import { CONTROL_PLANE_ALLOW_RULES, controlPlaneAccess } from '../adapters/claude-code/install.ts'
 import { MarkdownStateStore } from '../adapters/markdown/state-store.ts'
 import {
   DEFAULT_EXECUTION_MODE,
@@ -162,6 +163,33 @@ describe('guard 는 mode 를 읽는다 (§69)', () => {
   it('mode 기록이 없으면 0.7 과 같이 막는다 — 조용한 안전 변경이 없다', async () => {
     const cwd = await project()
     assert.equal((await invokeHook(bash(cwd, 'git push origin main'))).code, 2)
+  })
+})
+
+describe('control-plane 접근은 Host 설정에서 읽는다 (§8·Phase I)', () => {
+  const home = async (settings: unknown): Promise<{ claudeHome: string }> => {
+    const dir = await tempDir('asc-hostsettings-')
+    const claudeHome = join(dir, '.claude')
+    await mkdir(claudeHome, { recursive: true })
+    await writeFile(join(claudeHome, 'settings.json'), JSON.stringify(settings), 'utf8')
+    return { claudeHome }
+  }
+
+  it('허용 규칙이 있으면 READY 다', async () => {
+    const access = await controlPlaneAccess(await home({ permissions: { allow: [...CONTROL_PLANE_ALLOW_RULES] } }))
+    assert.deepEqual({ allowed: access.allowed, denied: access.denied }, { allowed: true, denied: false })
+  })
+
+  it('Host 가 ASC 명령을 막고 있으면 그 사실을 말한다 — 0.7.1 이 갇혔던 자리', async () => {
+    const access = await controlPlaneAccess(await home({ permissions: { deny: ['Bash(asc:*)'] } }))
+    assert.equal(access.denied, true)
+    assert.equal(access.allowed, false)
+    assert.match(access.detail ?? '', /denies/)
+  })
+
+  it('아무 규칙도 없으면 없는 것이다 — 있다고 치지 않는다', async () => {
+    const access = await controlPlaneAccess(await home({}))
+    assert.deepEqual({ allowed: access.allowed, denied: access.denied }, { allowed: false, denied: false })
   })
 })
 
