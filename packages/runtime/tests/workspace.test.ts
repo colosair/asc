@@ -623,3 +623,37 @@ describe('linked worktree — 같은 workspace의 다른 execution instance', ()
     assert.match(line, /same git repository as \/w\/main/)
   })
 })
+
+describe('자리는 있는데 workspace 가 없을 때 (색인 부분 손상)', () => {
+  const AT = '2026-09-06T00:00:00.000Z'
+  it('그 자리는 등록된 것이 아니다 — 다시 등록해야 기계 화면에 나타난다', () => {
+    // 실제로 있었던 상태: locators 는 남고 workspaces 에서만 사라졌다. 그때 붙기는
+    // "이미 등록됨" 으로 성공했고, 등록된 서비스는 그 workspace 를 영영 돌지 않았다.
+    let index = register(emptyIndex(), {
+      workspaceId: 'W-1abfc160bf3b4d21bacb8b68df3c1edc',
+      root: '/home/me/.asc/workspaces/W-1',
+      locator: { path: '/work/project', platform: 'darwin', observedAt: AT },
+      aliases: ['git.example.com/team/project'],
+      now: AT,
+    })
+    const found = lookupLocator(index, '/work/project')
+    assert.equal(found?.workspaceId, 'W-1abfc160bf3b4d21bacb8b68df3c1edc')
+
+    // workspace 항목만 사라진 상태를 만든다.
+    index = { ...index, workspaces: {} }
+    const orphan = lookupLocator(index, '/work/project')
+    assert.equal(orphan?.workspaceId, 'W-1abfc160bf3b4d21bacb8b68df3c1edc', '자리는 그대로 가리킨다')
+    assert.equal(index.workspaces[orphan!.workspaceId], undefined, '그런데 그 workspace 는 없다')
+
+    // 같은 id 로 다시 등록하면 상태가 있는 자리를 그대로 되찾는다.
+    const repaired = register(index, {
+      workspaceId: orphan!.workspaceId,
+      root: '/home/me/.asc/workspaces/W-1',
+      locator: { path: '/work/project', platform: 'darwin', observedAt: AT },
+      aliases: ['git.example.com/team/project'],
+      now: AT,
+    })
+    assert.ok(repaired.workspaces['W-1abfc160bf3b4d21bacb8b68df3c1edc'], '다시 등록된다')
+    assert.equal(lookupLocator(repaired, '/work/project')?.workspaceId, 'W-1abfc160bf3b4d21bacb8b68df3c1edc')
+  })
+})
