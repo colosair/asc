@@ -39,6 +39,8 @@ type NotePayload = {
   author?: { username?: string }
   resolvable?: boolean
   resolved?: boolean
+  /** 그 시스템이 스스로 남긴 자국. 사람의 답이 아니다. */
+  system?: boolean
 }
 
 type IssuePayload = {
@@ -216,6 +218,7 @@ export class GitLabResourceContext extends GitLabBase implements ResourceContext
         body: note.body ?? '',
         // 여기는 resolvable 여부를 알려준다 — 아는 것만 적는다.
         ...(note.resolvable ? { unresolved: note.resolved !== true } : {}),
+        ...(note.system ? { system: true } : {}),
       }))
   }
 }

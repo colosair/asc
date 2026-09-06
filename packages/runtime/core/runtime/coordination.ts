@@ -162,6 +162,43 @@ export type AppendOutcome<T> =
  * 잃는 것이 표시값이 아니라 **누가 무엇을 밖에 내보냈고 누가 답했는가**이기 때문에,
  * 나중 쓰기가 앞선 것을 덮지 않는다.
  */
+/** 밖에서 본 글 하나. adapter 어휘를 그대로 받되 Core 는 세 가지만 본다. */
+export type ObservedRemark = {
+  id: string
+  author: string
+  at: string
+  /** 사람이 쓴 것이 아니라 그 시스템이 남긴 자국인가. */
+  system?: boolean
+}
+
+/**
+ * 게시물에 붙은 글 중 **응답으로 셀 것**을 고른다.
+ *
+ * 두 가지를 뺀다: 그 시스템이 스스로 남긴 자국(커밋 언급·배정 변경)과, 우리가 쓴 글.
+ * 둘 다 세면 아무도 답하지 않은 스레드가 답이 온 것으로 보인다 — 이 구조가 막으려는
+ * 바로 그 착각이다.
+ *
+ * **답의 의미는 판정하지 않는다.** 여기서 나오는 것은 "왔다"까지이고, 그것이 결정인지
+ * 승인인지는 C-04·C-13 의 몫이다.
+ */
+export function responsesFrom(
+  communication: CommunicationEvidence,
+  remarks: readonly ObservedRemark[],
+  mine: ReadonlySet<string>,
+): Omit<ResponseEvidence, 'observedAt'>[] {
+  return remarks
+    .filter((remark) => !remark.system && !mine.has(remark.author))
+    .map((remark) => ({
+      // 같은 글을 다시 봐도 같은 id 다 — append-only 원장이 두 번째를 거절한다.
+      evidenceId: `${communication.evidenceId}:${remark.id}`,
+      communicationId: communication.evidenceId,
+      identity: { ...communication.identity, revisionMarker: remark.at },
+      responder: remark.author,
+      receivedAt: remark.at,
+      evidenceSource: 'surface-remark',
+    }))
+}
+
 export class CoordinationLedger {
   #scope: ScopedStore
   #now: () => string

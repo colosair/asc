@@ -15,6 +15,11 @@ export type ContextComment = {
   body: string
   /** 아직 닫히지 않은 논의인가. provider가 알려주지 않으면 생략한다 — 추측하지 않는다. */
   unresolved?: boolean
+  /**
+   * 사람이 쓴 것이 아니라 그 시스템이 남긴 자국인가 (커밋 언급·배정 변경 등).
+   * 사람의 답과 섞이면 "답이 왔다"가 자동으로 성립해 버린다.
+   */
+  system?: boolean
 }
 
 export type ResourceSnapshot = {
