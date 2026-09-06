@@ -248,3 +248,66 @@ describe('P1-F — 신원 등록은 두 파일을 한 번에 맞춘다', () => {
     assert.deepEqual(twice.identities, { a: ['local:a'] })
   })
 })
+
+
+// ── 0.7.0 / D-08 — 한 사람의 여러 채널 ────────────────────────────────────────
+
+describe('identity 는 더해지지 덮이지 않는다', () => {
+  it('다른 provider 로 다시 세워도 앞의 것이 남는다', () => {
+    const first = withIdentity({}, {}, {
+      name: 'colosair',
+      actor: 'gitlab:colosair',
+      controller: true,
+      monitor: true,
+    })
+    const second = withIdentity(first.identities, first.override, {
+      name: 'colosair',
+      actor: 'local:colosair',
+      controller: true,
+      monitor: true,
+    })
+
+    assert.deepEqual(second.identities['colosair'], ['gitlab:colosair', 'local:colosair'])
+    const controller = second.override['controller'] as { identities: Record<string, string[]> }
+    assert.deepEqual(controller.identities['colosair'], ['gitlab:colosair', 'local:colosair'])
+  })
+
+  it('같은 것을 두 번 세워도 하나다', () => {
+    const first = withIdentity({}, {}, { name: 'a', actor: 'local:a', controller: true, monitor: false })
+    const second = withIdentity(first.identities, first.override, {
+      name: 'a',
+      actor: 'local:a',
+      controller: true,
+      monitor: false,
+    })
+    assert.deepEqual(second.identities['a'], ['local:a'])
+  })
+
+  it('읽는 쪽이 배열 전체를 대조한다 — writer 만 고치면 되는 이유다', async () => {
+    const merged = withIdentity({}, {}, {
+      name: 'colosair',
+      actor: 'gitlab:colosair',
+      controller: true,
+      monitor: false,
+    })
+    const both = withIdentity(merged.identities, merged.override, {
+      name: 'colosair',
+      actor: 'local:colosair',
+      controller: true,
+      monitor: false,
+    })
+    const binding = new LocalIdentityBinding(both.identities as Record<string, string[]>)
+
+    for (const [channel, actor] of [['gitlab', 'colosair'], ['local', 'colosair']]) {
+      assert.equal(
+        await binding.verify({ channel: channel!, actor: actor!, authorizedApprover: 'colosair' }),
+        true,
+        `${channel}:${actor}`,
+      )
+    }
+    assert.equal(
+      await binding.verify({ channel: 'github', actor: 'someone', authorizedApprover: 'colosair' }),
+      false,
+    )
+  })
+})
