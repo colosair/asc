@@ -13,7 +13,8 @@ import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { homedir, hostname, userInfo } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import {
   MINIMUM_NODE_MAJOR,
   checkNodeRuntime,
@@ -22,6 +23,7 @@ import {
   reexecWithCandidate,
 } from '../core/distribution/node-runtime.ts'
 import { RELEASE_VERSION, RUNTIME_PACKAGE } from '../core/distribution/release.ts'
+import { planUpdate, requiredMajorFrom, updateLine, type UpdatePlan } from '../core/distribution/update.ts'
 
 import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
@@ -217,6 +219,10 @@ const USAGE = `asc — Agent Session Control
   asc runtime status [--json]              # which build is in use, and whether it observes
   asc runtime use package
   asc runtime use development <checkout>   # run a built checkout instead
+
+  asc update                               # install the newest release and verify it
+  asc update check [--json]                # what is installed, what is published
+  asc update plan  [--json]                # what would be done, changing nothing
   asc front [status] [--json]
   asc front open [--json]                  # a host session opened here — what is waiting
   asc escalate open <S-ID> --predicate <p>... --question <t> --blocked <node>...
@@ -832,13 +838,17 @@ async function runParsedCommand(
   // 사람이 갇힌다.
   // 기계 수준 명령은 **프로젝트와 무관하다.** 붙지 않은 자리에서도 답해야 하고,
   // 등록된 서비스는 어느 프로젝트 안에서 도는 것이 아니다 (설계 §4.1).
+  // 업데이트는 **갈아 끼우려는 그 build 로 넘어가면 안 된다** — 넘어가면 구본이 자기를
+  // 교체하는 셈이고, 교체 도중 그 파일들이 사라진다. 붙지 않은 자리에서도 답해야 하므로
+  // 기계 수준 명령과 같은 자리에 둔다.
   const machineLevelRuntime =
-    group === 'runtime' &&
+    group === 'update' ||
+    (group === 'runtime' &&
     (command === 'use' ||
       command === 'status' ||
       command === 'list' ||
       command === 'service' ||
-      (command === 'tick' && Boolean(values.all)))
+      (command === 'tick' && Boolean(values.all))))
 
   if (!machineLevelRuntime) {
     const redispatched = await redispatchIfNeeded(argv)
@@ -858,6 +868,9 @@ async function runParsedCommand(
   if (group === 'runtime' && command === 'tick' && values.all) return runRuntimeTickAll(values)
 
   if (group === 'host') return runHost(command, positionals[2], positionals[3], values)
+
+  // 갈아 끼우는 일은 붙은 프로젝트와 무관하다 — 어느 자리에서 쳐도 같은 답이어야 한다.
+  if (group === 'update') return runUpdate(command, values)
 
   // setup은 **붙기 전에도** 답을 줘야 한다. 아래 discoverRoot 실패는 exit 2로 끊는데,
   // 그러면 "아직 안 붙었다"를 확인하려고 부른 명령이 안 붙었다는 이유로 죽는다.
@@ -4327,6 +4340,210 @@ function serviceEnvironment(node: string): Pick<ServiceCommand, 'environment'> {
 
 const serviceInterval = (values: Record<string, unknown>): number =>
   values['interval-min'] === undefined ? 5 * 60 : Math.max(60, Number(values['interval-min']) * 60)
+
+/**
+ * `asc update` — 돌던 것을 잃지 않고 갈아 끼운다 (C-14 §3).
+ *
+ * 이 명령이 있는 이유는 실측이다. 한 라운드에 설치본을 다섯 번 갈아 끼웠고, 매번 사람이
+ * 구본을 먼저 지우고 `setup` 을 통째로 다시 돌렸다. 뒤쪽이 특히 나쁘다 — `setup` 은
+ * profile·binding·정본을 **다시 추론**하는 경로이고, 업데이트는 이미 정해진 것 위에서
+ * 실행본만 바꾸는 일이다. 그래서 여기서는 그 함수들을 부르지 않는다.
+ *
+ * 순서는 계획이 정하고(`planUpdate`), 여기서는 그대로 실행한다.
+ */
+async function runUpdate(command: string | undefined, values: Record<string, unknown>): Promise<number> {
+  if (command !== undefined && command !== 'check' && command !== 'plan') {
+    console.error(`Unknown update command: ${command}\n\n${USAGE}`)
+    return 2
+  }
+
+  const plan = await observeUpdate()
+
+  if (command === 'check' || command === 'plan') {
+    if (values.json) {
+      console.log(JSON.stringify({ package: RUNTIME_PACKAGE, ...plan }, null, 2))
+    } else {
+      console.log(updateLine(plan))
+      for (const step of plan.steps) console.log(`  ${step}`)
+    }
+    // 읽기는 상태를 판정하되 실패로 만들지 않는다 — 물어본 것에는 답한 것이다.
+    return 0
+  }
+
+  if (plan.steps.length === 0) {
+    console.log(updateLine(plan))
+    // 못 하는 것과 할 것이 없는 것은 다르다. `CURRENT` 만 성공이다.
+    return plan.state === 'CURRENT' ? 0 : 1
+  }
+  return applyUpdate(plan, values)
+}
+
+/**
+ * 세상의 사실을 모아 계획에 넘긴다. **판정은 여기서 하지 않는다** (`setup` 과 같은 태도).
+ *
+ * registry 를 못 물으면 그 사실이 그대로 계획에 간다 — 조회 실패를 "최신" 으로 뭉개면
+ * 그 답이 곧 사람이 업데이트를 건너뛰는 근거가 된다.
+ */
+async function observeUpdate(): Promise<UpdatePlan> {
+  const latest = await execText('npm', ['view', RUNTIME_PACKAGE, 'version'])
+  const engines = latest ? await execText('npm', ['view', `${RUNTIME_PACKAGE}@${latest}`, 'engines.node']) : null
+  const required = requiredMajorFrom(engines ?? undefined)
+  const installed = await detectStableInstall(nodeProcessRunner, latest ?? RELEASE_VERSION)
+  const node = await checkNodeRuntime(nodeRuntimeDeps())
+  return planUpdate({
+    ...(installed.installedVersion ? { installed: installed.installedVersion } : {}),
+    executableVisible: installed.executableVisible,
+    ...(latest ? { latest } : {}),
+    ...(required !== undefined ? { requiredNodeMajor: required } : {}),
+    nodeVersion: process.version,
+    ...(node.ok ? {} : { nodeCandidates: node.candidates }),
+  })
+}
+
+/**
+ * 계획대로 실행한다. **삭제하지 않는다** — npm 전역 설치는 같은 자리를 덮으므로 치울
+ * 구본이 없고, 치울 것이 있다고 적으면 그 단계는 언젠가 지우지 말아야 할 것을 지운다.
+ */
+async function applyUpdate(plan: UpdatePlan, values: Record<string, unknown>): Promise<number> {
+  const target = plan.to!
+  console.log(updateLine(plan))
+
+  // 무엇이 바뀌면 안 되는지를 **먼저** 적어 둔다. 업데이트가 건드려도 되는 것은 셋뿐이다 —
+  // 설치본, host 설치물, 기계 등록물. 나머지는 이미 정해진 것이고, 그것을 다시 정하는
+  // 경로(`setup`)를 부르지 않는다는 말은 여기서 증거로 확인된다.
+  const before = await protectedState()
+
+  const installed = await installStableRuntime(nodeProcessRunner, target)
+  if (!installed.ok) {
+    console.error(`install failed: ${installed.detail ?? '(no detail)'}`)
+    // 설치가 아예 안 됐다. 돌던 것이 그대로 서 있는지는 확인해야 안다 — npm 은 중간에서도
+    // 실패한다.
+    return rollbackUpdate(plan)
+  }
+
+  // npm 이 화내지 않았다는 것과 그 버전이 실제로 서 있다는 것은 다르다 (C-14 §3.3).
+  const verified = await verifyStableInstall(nodeProcessRunner, target)
+  if (!verified.ok) {
+    console.error(`verify failed: ${verified.remedy ?? verified.state.detail ?? verified.state.status}`)
+    return rollbackUpdate(plan)
+  }
+  console.log(`installed: ${RUNTIME_PACKAGE}@${target}`)
+
+  let worst = 0
+
+  // host 설치물은 버전마다 내용이 바뀐다. 새 runtime 에 낡은 hook 을 남기지 않는다.
+  // **사람이 고친 것은 덮지 않는다** — 그것은 남의 파일이고, 덮으면 그 사람의 수정이
+  // 말없이 사라진다. 남은 것은 말하고, 업데이트 자체는 계속 간다.
+  const host = await install(hostPaths(), undefined, { force: false })
+  for (const path of host.written) console.log(`host: ${path}`)
+  for (const skip of host.skipped) {
+    console.error(`host: ${skip.path} left as it is — ${skip.reason}`)
+    worst = 1
+  }
+
+  // 등록물이 낡았으면 지금 형태로 수렴시킨다. 기존 STALE→수렴 경로를 그대로 쓴다.
+  worst = Math.max(worst, await convergeService(values))
+
+  // 마지막은 언제나 확인이다.
+  const health = await detectStableInstall(nodeProcessRunner, target)
+  if (health.status !== 'CURRENT') {
+    console.error(`health: ${health.detail ?? health.status}`)
+    return 1
+  }
+
+  // 상태 불변 — 이 명령의 가장 중요한 계약이다.
+  const changed = diffState(before, await protectedState())
+  if (changed.length > 0) {
+    // 회차가 겹쳐 관측 기록이 늘어난 것일 수도 있다. 어느 쪽이든 **무엇이 달라졌는지
+    // 말한다** — "안 바뀌었다"를 확인 없이 적는 것이 이 계약을 없애는 방식이다.
+    console.error(`state changed during the update (${changed.length}):`)
+    for (const path of changed.slice(0, 10)) console.error(`  ${path}`)
+    worst = 1
+  } else {
+    console.log('state: unchanged')
+  }
+
+  console.log(`asc ${target} is current.`)
+  return worst
+}
+
+/**
+ * 바뀌면 안 되는 것들. **위치를 새로 정하지 않는다** — 이 machine 의 `~/.asc` 가 그대로
+ * 그 자리이고, 업데이트가 건드려도 되는 셋(설치본·host 설치물·기계 등록물)은 여기 없다.
+ *
+ * 등록물이 회차마다 다시 쓰는 lease·log 는 상태가 아니라 실행 흔적이라 뺀다.
+ */
+async function protectedState(): Promise<Map<string, string>> {
+  const home = ascHome()
+  const state = new Map<string, string>()
+  const skip = new Set(['runtime-lease.json', 'service.log'])
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const full = join(dir, entry.name)
+      if (skip.has(relative(home, full))) continue
+      if (entry.isDirectory()) await walk(full)
+      else state.set(relative(home, full), createHash('sha256').update(await readFile(full).catch(() => Buffer.alloc(0))).digest('hex'))
+    }
+  }
+  await walk(home)
+  return state
+}
+
+/** 달라진 경로들. 없어진 것도 달라진 것이다. */
+function diffState(before: Map<string, string>, after: Map<string, string>): string[] {
+  const changed: string[] = []
+  for (const [path, digest] of before) if (after.get(path) !== digest) changed.push(path)
+  for (const path of after.keys()) if (!before.has(path)) changed.push(path)
+  return changed.sort()
+}
+
+/**
+ * 되돌린다. **되돌릴 자리가 있을 때만** — 없던 것으로 되돌릴 수는 없고, 그때는 돌던 것이
+ * 없었다는 사실을 그대로 말한다.
+ */
+async function rollbackUpdate(plan: UpdatePlan): Promise<number> {
+  if (!plan.rollbackTo) {
+    console.error('Nothing to roll back to — this machine had no installed runtime before.')
+    return 1
+  }
+  console.error(`rolling back to ${plan.rollbackTo}`)
+  const back = await installStableRuntime(nodeProcessRunner, plan.rollbackTo)
+  const verified = back.ok ? await verifyStableInstall(nodeProcessRunner, plan.rollbackTo) : null
+  if (verified?.ok) {
+    console.error(`UPDATE_FAILED_ROLLED_BACK — asc ${plan.rollbackTo} is current again.`)
+    return 1
+  }
+  // 되돌리기까지 실패했다. 여기서부터는 사람의 자리다 — 숨기지 않는다.
+  console.error(`BROKEN — rollback failed: ${back.detail ?? verified?.remedy ?? '(no detail)'}`)
+  console.error(`Install it directly: npm install -g ${RUNTIME_PACKAGE}@${plan.rollbackTo}`)
+  return 1
+}
+
+/** 등록물을 지금 실행본으로 수렴시킨다. 등록이 없던 기계에 새로 만들지는 않는다. */
+async function convergeService(values: Record<string, unknown>): Promise<number> {
+  const adapter = serviceAdapter()
+  if (!adapter) return 0
+  const runtime = await serviceRuntime()
+  if (runtime.kind !== 'STABLE') {
+    console.error(`service: ${serviceRuntimeLine(runtime)}`)
+    return 1
+  }
+  const wanted = serviceCommand(serviceInterval(values), runtime)
+  const plan = await planPersistentRuntime(adapter, wanted).catch(() => null)
+  if (!plan) return 0
+  if (plan.action === 'none' || plan.action === 'unsupported') {
+    console.log(`service: ${persistentRuntimeLine(adapter.id, plan)}`)
+    return 0
+  }
+  // 등록이 없던 기계라면 `install` 이 계획된다 — 업데이트가 등록을 새로 만들지는 않는다.
+  if (plan.action === 'install') {
+    console.log('service: not registered on this machine — leaving it that way (`asc runtime service install`)')
+    return 0
+  }
+  await adapter.install(wanted)
+  console.log(`service: converged with ${adapter.id}`)
+  return 0
+}
 
 /**
  * `asc runtime service` — 이 기계의 지속 등록 (설계 §4).

@@ -87,6 +87,27 @@ The user does not need to know this sequence. This is the one the skill follows.
 canonical source are all a person's call, and \`setup status\` already states the reason
 and the remedy.
 
+## "Update ASC" — one command per product, no questions
+
+Each product updates itself. ASC never updates JAM and JAM never updates ASC; the person
+asking for both is what puts them in one turn.
+
+\`\`\`text
+jam update      → verify it answered
+asc update      → verify it answered
+\`\`\`
+
+Order matters that way round: ASC's work channel reads JAM, so JAM lands first. Neither
+command asks anything on the normal path, and neither re-runs setup — an update replaces
+the executable and leaves the workspace, profile, bindings, canonical source, sessions and
+evidence exactly as they were. Do not reach for \`setup apply\` to update; that is the path
+that re-infers all of it.
+
+Read the state before acting when the person asked whether an update is needed:
+\`asc update check --json\` and \`jam update check --json\` change nothing. \`UNKNOWN\` means
+the registry could not be asked — it does not mean up to date, and it is not a failure to
+report as one.
+
 ## Procedure
 
 1. Run \`asc proceed --json\` (add \`--session <S-ID>\` to name a session).
