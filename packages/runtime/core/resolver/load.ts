@@ -273,7 +273,16 @@ export function compareLock(locked: ProfileLock, current: ProfileLock): LockDrif
 // ── Run 시작 guard ──────────────────────────────────────────────────────────
 
 export type BootstrapOutcome =
-  | { ok: true; runtime: ResolvedRuntime; lock: ProfileLock }
+  | {
+      ok: true
+      runtime: ResolvedRuntime
+      lock: ProfileLock
+      /**
+       * lock 이 이 build 가 아닌 판번호로 적혀 있다. 멈출 일은 아니고 (사람이 고친 설정이
+       * 아니다), 기록이 낡았다는 사실은 말한다.
+       */
+      staleLock?: LockDrift[]
+    }
   /** attach 전이다. `.asc/` 자체가 없다 — 설정 없이 도는 경로만 허용된다. */
   | { ok: false; reason: 'NOT_ATTACHED' }
   /**
@@ -353,7 +362,31 @@ export async function bootstrapGuard(input: {
     generatedAt: locked.generatedAt,
   })
   const drifts = compareLock(locked, current)
-  if (drifts.length > 0) return { ok: false, reason: 'LOCK_DRIFT', drifts, runtime: resolved.runtime }
+  const configuration = configurationDrifts(drifts)
+  if (configuration.length > 0) {
+    return { ok: false, reason: 'LOCK_DRIFT', drifts, runtime: resolved.runtime }
+  }
 
-  return { ok: true, runtime: resolved.runtime, lock: locked }
+  // 남은 것이 있다면 그것은 **이 build 가 옮겨 온 것**이다. 멈출 일이 아니지만 없던 일도
+  // 아니므로 그대로 실어 보낸다 — 호출자가 한 줄 말하고, lock 은 다음 재고정 때 따라온다.
+  return { ok: true, runtime: resolved.runtime, lock: locked, ...(drifts.length > 0 ? { staleLock: drifts } : {}) }
 }
+
+/**
+ * 사람이 정해야 하는 어긋남만 남긴다 (C-14 실측).
+ *
+ * lock 은 **사람이 바꾼 설정**을 잡으라고 있는 파일이다. runtime 을 갈아 끼우면
+ * `ascCore.version` 과 함께 딸려 오는 adapter 판번호가 바뀌고, 그 둘이 재료인
+ * `configurationDigest` 도 따라 바뀐다 — 사람이 아무것도 고치지 않았는데 셋이 어긋난다.
+ * 그 상태로 멈추면 업데이트가 그 machine 의 모든 프로젝트를 세운다.
+ *
+ * 실측이 그것이었다: 이 machine 의 workspace 세 개가 전부 `0.3.1 → 0.6.0` 한 가지 이유로
+ * 서 있었고, 그 중 둘은 그렇게 여러 릴리스 동안 회차를 돌지 못했다. Profile·Preset·
+ * Override·capability 가 어긋나면 지금처럼 멈춘다 — 그것이 사람의 결정이다.
+ */
+export function configurationDrifts(drifts: readonly LockDrift[]): LockDrift[] {
+  return drifts.filter((drift) => !VERSION_SHAPED.has(drift.field) && !drift.field.startsWith('adapters.'))
+}
+
+/** runtime 을 갈아 끼우는 것만으로 바뀌는 자리들. */
+const VERSION_SHAPED = new Set(['ascCore.version', 'configurationDigest'])

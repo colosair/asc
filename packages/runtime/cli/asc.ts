@@ -2276,7 +2276,15 @@ async function checkBootstrap(root: string): Promise<{ code: number; runtime?: R
     adapters: ADAPTER_VERSIONS,
     ascVersion: ASC_VERSION,
   })
-  if (outcome.ok) return { code: 0, runtime: outcome.runtime }
+  if (outcome.ok) {
+    // 판번호만 낡은 lock 은 멈출 이유가 아니다. 다만 조용히 지나가지도 않는다 —
+    // 다음 재고정 때 따라온다는 것을 여기서 한 번 말한다.
+    if (outcome.staleLock) {
+      const moved = outcome.staleLock.find((drift) => drift.field === 'ascCore.version')
+      if (moved) console.error(`(profile.lock was written by ASC ${moved.locked}; this is ${moved.current}. \`asc profile resolve --write\` records it.)`)
+    }
+    return { code: 0, runtime: outcome.runtime }
+  }
 
   // 아직 붙이지 않았으면 설정 없이 도는 경로만 쓰는 것이므로 막지 않는다
   if (outcome.reason === 'NOT_ATTACHED') return { code: 0 }
