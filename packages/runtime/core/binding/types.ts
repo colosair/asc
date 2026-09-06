@@ -22,6 +22,7 @@ export const CAPABILITIES = [
   'context.history',
   'canonical.read',
   'action.comment',
+  'coordination.surface',
   'action.update',
   'presentation.digest',
   'presentation.priority',

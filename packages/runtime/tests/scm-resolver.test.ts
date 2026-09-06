@@ -95,7 +95,10 @@ describe('B-49 Gate — multi-binding이 서로를 덮지 않는다 (버그 B)',
     assert.equal(ports.eventSource!.id, 'gitlab-todo', 'code는 GitLab이 맡는다')
     assert.ok(ports.inventory, 'mirror가 맡은 갈래도 남아 있다')
     assert.ok(ports.scm, 'canonical도 mirror가 맡는다')
-    assert.deepEqual(ports.unavailable, [])
+    // 두 binding 중 누구도 조율 표면을 맡지 않았다. 없는 것은 없다고 남는다.
+    assert.deepEqual(ports.unavailable, [
+      "coordination.surface: 'coordination.surface' 를 제공하는 binding이 없다",
+    ])
   })
 
   it('작업 항목 adapter도 조립된다 — 등록만 되고 못 만들던 것을 닫는다', async () => {
