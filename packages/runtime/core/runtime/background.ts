@@ -270,7 +270,14 @@ export function renderBackground(status: BackgroundStatus): string[] {
   if (degraded) lines.push(degraded)
   switch (status.lease.kind) {
     case 'FREE':
-      lines.push('Background runtime: not running — `asc runtime start --detach` keeps it observing')
+      // **정상 경로는 기계 등록물이다** (0.4.0 이 그렇게 정했다: "those surfaces exist for
+      // development and recovery, not for the normal path"). 그런데 이 줄은 사람에게
+      // 개발용 명령을 정상 경로로 안내하고 있었다 — 화면이 결정과 어긋나 있으면 사람은
+      // 화면을 따른다.
+      lines.push(
+        'Background runtime: not running — this machine observes through its registration ' +
+          '(`asc runtime service status` shows it)',
+      )
       break
     case 'HELD':
       lines.push(

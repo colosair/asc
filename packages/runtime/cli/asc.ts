@@ -215,7 +215,8 @@ const USAGE = `asc — Agent Session Control
 
   asc runtime start [--detach] [--interval-min <n>] [--delta-min <n>]
                     [--reconcile-min <n>] [--census-min <n>] [--digest-min <n>]
-                        # --detach: keep observing after this terminal closes
+                        # development and recovery only — the machine's registration is
+                        # what observes on the normal path (asc runtime service)
   asc runtime tick [--all]                 # --all: every workspace this machine knows
   asc runtime list [--json]                # every workspace, without visiting each one
   asc runtime service [status] [--json]    # the machine's persistent registration
