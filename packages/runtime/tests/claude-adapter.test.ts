@@ -227,6 +227,42 @@ describe('guard hook(3층) — 실행 직전 차단', () => {
     }
   })
 
+  // 0.7.0 / D-03 — 놓은 것이 guard 에 닿는다.
+  //
+  // 이 연결이 없어서 조사에서 못 잡았다. binding 단위 검사와 guard 단위 검사는 각각
+  // 있었는데, **release 뒤에 guard 가 무엇이라 답하는지**를 보는 것이 없었다.
+  it('release 하면 그 Run 은 더 이상 관리 대상이 아니다', async () => {
+    const { project, store } = await attachedProject()
+    const bindings = claudeBindings(store)
+    await bindings.claim(
+      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
+      NOW,
+    )
+
+    const blocked = await invokeHook({
+      tool_name: 'Bash',
+      tool_input: { command: 'git push origin main' },
+      session_id: 'claude-abc',
+      cwd: project,
+    })
+    assert.equal(blocked.code, 2, '계약 안에서는 승인 경로로만 나간다')
+    assert.match(blocked.stderr, /ASC-managed/)
+
+    assert.equal(await bindings.release('S-20260823-01', 'claude-abc'), true)
+
+    const after = await invokeHook({
+      tool_name: 'Bash',
+      tool_input: { command: 'git push origin main' },
+      session_id: 'claude-abc',
+      cwd: project,
+    })
+    // 계약 밖으로 나왔다. 그렇다고 열리지는 않는다 — ASC 가 맡은 자리이므로 여전히
+    // 막히되, 이유가 다르다: 관리 대상 세션의 금지가 아니라 세션 밖의 외부 write 다.
+    assert.equal(after.code, 2)
+    assert.match(after.stderr, /논리 세션 밖에서 나갈 수 없다/)
+    assert.doesNotMatch(after.stderr, /ASC-managed/, '놓은 계약의 이름으로 막지 않는다')
+  })
+
   it('ASC 무관 프로젝트는 항상 통과한다', async () => {
     const plain = await tempDir('asc-plain-')
     const outcome = await invokeHook(
