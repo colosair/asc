@@ -2267,6 +2267,9 @@ const installRoot = () => join(dirname(fileURLToPath(import.meta.url)), '..')
  */
 const externalProfileRoot = () => join(ascHome(), 'profiles')
 
+/** 한 프로세스에서 한 번만 말한다. 사실은 매번 같고, 반복은 읽히지 않는다. */
+let staleLockReported = false
+
 async function checkBootstrap(root: string): Promise<{ code: number; runtime?: ResolvedRuntime }> {
   const outcome = await bootstrapGuard({
     ascRoot: root,
@@ -2279,9 +2282,14 @@ async function checkBootstrap(root: string): Promise<{ code: number; runtime?: R
   if (outcome.ok) {
     // 판번호만 낡은 lock 은 멈출 이유가 아니다. 다만 조용히 지나가지도 않는다 —
     // 다음 재고정 때 따라온다는 것을 여기서 한 번 말한다.
-    if (outcome.staleLock) {
+    // 한 명령 안에서 이 문이 두 번 지나간다. 같은 말을 두 번 하면 그때부터 사람은
+    // 이 줄을 읽지 않는다 — 회차 기록에도 매번 두 줄씩 쌓였다.
+    if (outcome.staleLock && !staleLockReported) {
       const moved = outcome.staleLock.find((drift) => drift.field === 'ascCore.version')
-      if (moved) console.error(`(profile.lock was written by ASC ${moved.locked}; this is ${moved.current}. \`asc profile resolve --write\` records it.)`)
+      if (moved) {
+        staleLockReported = true
+        console.error(`(profile.lock was written by ASC ${moved.locked}; this is ${moved.current}. \`asc profile resolve --write\` records it.)`)
+      }
     }
     return { code: 0, runtime: outcome.runtime }
   }
