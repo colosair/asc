@@ -4754,18 +4754,17 @@ async function runCoordinationObserve(
     adapters,
     roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
   })
-  const ports = await buildRuntimePorts({
+  // **그 게시물을 만든 통로에게 묻는다.** 프로젝트 전체의 자원 조회를 하나 고르면
+  // 어느 것을 고를지 갈리고(실제로 갈렸다), 갈리지 않더라도 다른 시스템에게 남의 게시물을
+  // 묻게 된다. 증거에 적힌 adapter 가 곧 그 통로다.
+  const built = await buildObservationChannels({
     plan,
     roles: rolesFor(plan, declared),
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
   })
-  const context = ports.resourceContext
-  if (!context) {
-    console.error('No channel can read the published artefacts — nothing was observed.')
-    for (const line of ports.unavailable) console.error(`  ${line}`)
-    return 1
-  }
+  const contextOf = (adapterId: string) =>
+    built.channels.find((channel) => channel.adapterId === adapterId && channel.resourceContext)?.resourceContext
 
   // 나를 나로 알아보는 곳은 identities.json 하나다. 채널 접두사를 떼면 계정 이름이 남는다.
   const identity = await loadIdentityMap(root)
@@ -4776,7 +4775,15 @@ async function runCoordinationObserve(
   }
 
   let added = 0
+  let looked = 0
   for (const communication of communications) {
+    const context = contextOf(communication.identity.adapter)
+    if (!context) {
+      // 못 본 것을 "답이 없다"로 넘기지 않는다.
+      console.error(`  ${communication.identity.objectId}: ${communication.identity.adapter} 통로가 열리지 않아 보지 못했다`)
+      continue
+    }
+    looked += 1
     const remarks = await context
       .getComments(communication.identity.objectId, { limit: 100 })
       .catch(() => [])
@@ -4788,10 +4795,10 @@ async function runCoordinationObserve(
 
   const views = await coordinationNow(store, resolved)
   if (values.json) {
-    console.log(JSON.stringify({ observed: communications.length, recorded: added, coordination: views }, null, 2))
+    console.log(JSON.stringify({ published: communications.length, observed: looked, recorded: added, coordination: views }, null, 2))
     return 0
   }
-  console.log(`Looked at ${communications.length} published artefact(s) — ${added} new response(s).`)
+  console.log(`Looked at ${looked} of ${communications.length} published artefact(s) — ${added} new response(s).`)
   for (const line of coordinationLines(views)) console.log(line)
   return 0
 }
