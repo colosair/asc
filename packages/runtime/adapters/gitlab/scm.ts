@@ -28,6 +28,10 @@ const run = promisify(execFile)
 
 /** 이 adapter 가 수행할 수 있는 행위. 목록에 없는 것은 하지 않는다. */
 export const GITLAB_ACTIONS = [
+  // 조율 게시. 실행은 CoordinationSurface 가 하고, 이 통로는 **그 행위가 승인될 수
+  // 있다는 것**만 안다 — 발급 시점에 "할 수 없는 일을 승인시키지 않는다" 가 성립하려면
+  // 이 목록이 그 사실을 담아야 한다.
+  'coordination.publish',
   'gitlab.note.create',
   'gitlab.mr.create',
   'gitlab.mr.merge',
@@ -133,6 +137,10 @@ export class GitLabScm implements ScmPort {
         return this.#updateIssue(action)
       case 'git.push':
         return this.#push(action)
+      case 'coordination.publish':
+        // 이 행위는 CoordinationSurface 가 수행한다. 계약은 여기서 승인될 수 있지만
+        // 실행은 그쪽 통로다 — 두 곳이 같은 글을 올리지 않게 여기서는 하지 않는다.
+        return { ok: false, error: 'coordination.publish runs through the coordination surface' }
       default:
         return { ok: false, error: `unsupported action: ${action.action}` }
     }

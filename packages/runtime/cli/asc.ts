@@ -35,6 +35,8 @@ import { IDENTITY_FILE } from './identity-config.ts'
 import { TextRenderer } from '../adapters/text/renderer.ts'
 import { ApprovalService } from '../core/approval/service.ts'
 import { Executor } from '../core/execution/executor.ts'
+import { transitionGrant } from '../core/model/transitions.ts'
+import { applyTransition } from '../core/runtime/store-ops.ts'
 import { GrantService } from '../core/execution/grant.ts'
 import { DecisionKind } from '../core/model/entities.ts'
 import { discoverProjectRoot, excludeFromGit, identitiesTemplate, overrideTemplate, writeIfAbsent } from '../core/attach/init.ts'
@@ -289,8 +291,9 @@ const USAGE = `asc — Agent Session Control
   asc query list   [--json]
 
   asc coordination [status] [--json]   # what was asked outside, and whether it reached anyone
-  asc coordination publish --query <ID> --title <text> --body-file <path>
+  asc coordination publish --grant <G-ID> --query <ID> --title <text> --body-file <path>
                    [--audience <who>] [--known <objectId>] [--work <ref>] [--json]
+                        # publishing is an outward write — it goes through an approved grant
   asc coordination observe [--json]    # did anything come back on what we published
 
   asc progress show   [<S-ID>]
@@ -5318,6 +5321,40 @@ async function runCoordinationPublish(
     return 2
   }
 
+  // **밖으로 나가는 쓰기는 승인된 계약을 지난다** (OM §11.5, 0.7.0 / Phase H).
+  //
+  // 조율 게시는 오래 이 규칙 밖에 있었다. 근거는 adapter 주석 하나였다 — "물어본 것이
+  // 밖에 실제로 있게 하는 행위이지 승인된 단일 행동이 아니다". 그 구분은 뜻이 있지만,
+  // 계약을 대체할 결정으로 어디에도 기록되지 않았고 실제로 하는 일은 남의 저장소에
+  // 글을 만드는 것이다. 살아 있는 불변식을 따른다.
+  //
+  // 읽기(status·observe)는 그대로다. 계약을 요구하는 것은 실제로 나가는 이 한 번뿐이다.
+  const grantId = typeof values.grant === 'string' ? values.grant : undefined
+  if (!grantId) {
+    console.error('밖으로 나가는 게시는 승인된 계약을 지난다 — --grant <G-ID> 가 필요하다.')
+    console.error('세션이 만든 결과라면:')
+    console.error('  asc grant issue --session <S-ID> --action coordination.publish \\')
+    console.error('       --target <query-id> --body-file <path> --as <actor>')
+    return 2
+  }
+  const grant = await store.get('grant', grantId)
+  if (!grant) {
+    console.error(`${grantId} 를 찾지 못했다.`)
+    return 1
+  }
+  if (grant.status !== 'READY') {
+    console.error(`${grantId} 는 지금 ${grant.status} 다 — 한 번 쓴 계약은 다시 쓰지 않는다.`)
+    return 1
+  }
+  if (grant.action !== 'coordination.publish') {
+    console.error(`${grantId} 가 승인한 것은 '${grant.action}' 이지 게시가 아니다.`)
+    return 1
+  }
+  if (grant.target !== queryId) {
+    console.error(`${grantId} 가 승인한 대상은 ${grant.target} 인데 지금 게시하려는 것은 ${queryId} 다.`)
+    return 1
+  }
+
   const { surface, unavailable } = await coordinationSurfaceFor(resolved)
   if (!surface) {
     console.error('No coordination surface is bound to this workspace — nothing was published.')
@@ -5345,6 +5382,20 @@ async function runCoordinationPublish(
   )
 
   if (outcome.ok) {
+    // 한 번 쓴 계약은 다시 쓰이지 않는다 (OM §11.5 single_use). 게시가 실제로 나간
+    // 뒤에 옮긴다 — 먼저 옮기면 실패한 게시가 계약만 태운다.
+    const consumedAt = new Date().toISOString()
+    const claimed = await applyTransition(store, 'grant', grantId, (g) =>
+      transitionGrant(g, 'CLAIMED', 'executor', { claimedBy: `cli-${process.pid}` }),
+    )
+    if (claimed.ok) {
+      await applyTransition(store, 'grant', grantId, (g) =>
+        transitionGrant(g, 'EXECUTED', 'executor', {
+          resultRef: outcome.identity.objectId,
+          consumedAt,
+        }),
+      )
+    }
     const recorded = await recordPublication(coordinationLedger(store), outcome)
     if (values.json) {
       console.log(JSON.stringify({ publish: outcome, recorded: recorded.ok }, null, 2))
