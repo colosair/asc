@@ -198,6 +198,8 @@ const USAGE = `asc — Agent Session Control
 
   asc grant issue <REQUEST_ID> --action <key> --target <ref> --as <actor>
                   [--grant-id <id>] [--expires <iso>]
+  asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>
+                        # what a session produced, sent out because a person said so
   asc grant run   <GRANT_ID> [--run-id <id>]
 
   asc monitor scan      [--backfill] [--as <controller>]   # fast path
@@ -5613,8 +5615,11 @@ async function runGrant(
 ): Promise<number> {
   switch (command) {
     case 'issue': {
-      if (!target || !values.action || !values.target || !values.as) {
+      // 근거는 둘 중 하나다 — 밖에서 들어온 판단 요청, 또는 계약 안에서 일한 세션.
+      const fromSession = (values.session as string | undefined) ?? undefined
+      if ((!target && !fromSession) || !values.action || !values.target || !values.as) {
         console.error('Usage: asc grant issue REQ-0042 --action <key> --target <ref> --as <actor>')
+        console.error('   or: asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>')
         return 2
       }
       // **할 수 없는 일을 승인시키지 않는다** (0.7.0 / F-3).
@@ -5636,6 +5641,44 @@ async function runGrant(
 
       // 발급도 승인 권한자만 할 수 있다 — 외부로 나가는 권한이 여기서 만들어지기 때문이다
       const grants = new GrantService(store, new LocalIdentityBinding(await loadIdentityMap(root)))
+
+      if (fromSession) {
+        // 사람이 지금 내보내라고 한 것이 승인이다. 그 말과 함께 온 내용이 payload 이고,
+        // 여기서 지어내지 않는다 — 사람이 본 적 없는 글이 사람의 이름을 달고 나가면 안 된다.
+        const bodyFile = values['body-file'] as string | undefined
+        if (!bodyFile) {
+          console.error('--body-file <path> 가 필요하다 — 내보낼 내용은 사람이 준 것이어야 한다.')
+          return 2
+        }
+        const payload = await readFile(bodyFile, 'utf8').catch(() => null)
+        if (payload === null) {
+          console.error(`내용을 읽지 못했다: ${bodyFile}`)
+          return 2
+        }
+        const forSession = await grants.issueForSession({
+          grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
+          sessionId: fromSession,
+          issuedBy: values.as as string,
+          channel: 'local',
+          action: values.action as string,
+          target: values.target as string,
+          payload,
+          ...(values.expires ? { expiresAt: values.expires as string } : {}),
+          issuedAt: new Date().toISOString(),
+        })
+        if (!forSession.ok) {
+          console.error(GRANT_ERROR[forSession.failure.kind] ?? forSession.failure.kind)
+          return 1
+        }
+        console.log(`${forSession.grant.id} READY — ${forSession.grant.action} → ${forSession.grant.target}`)
+        console.log('The target state is checked again before execution. If it changed in the meantime, nothing runs.')
+        return 0
+      }
+
+      if (!target) {
+        console.error('요청 근거가 없다 — REQUEST_ID 를 주거나 --session <S-ID> 를 쓰라.')
+        return 2
+      }
       const issued = await grants.issue({
         grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
         requestId: target,
@@ -5744,6 +5787,8 @@ const GRANT_ERROR: Record<string, string> = {
     '계약을 발급할 권한이 없다. .asc/identities.json 에 `"이름": ["local:계정"]` 형태로 매핑을 추가하라 ' +
     '(현재 상태는 `asc setup status`).',
   NO_PAYLOAD: '내보낼 내용이 없다.',
+  SESSION_NOT_FOUND: '그 세션을 찾지 못했다.',
+  SESSION_NOT_RUNNABLE: '아직 시작하지 않은 세션이다 — 내보낼 결과가 없다.',
   GRANT_EXISTS: '같은 id의 계약이 이미 있다.',
 }
 

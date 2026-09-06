@@ -227,7 +227,16 @@ export type GrantStatus = z.infer<typeof GrantStatus>
 export const ExecutionGrant = z.object({
   id: GrantId,
   version: Version,
-  requestId: RequestId,
+  /**
+   * 이 계약의 근거. **둘 중 하나는 반드시 있다.**
+   *
+   * `requestId` 는 밖에서 들어온 판단 요청을 사람이 승인한 경우다 (OM §11.8 의 경로).
+   * `sessionId` 는 계약 안에서 일한 세션이 만든 결과를 사람이 내보내라고 한 경우다 —
+   * 초기 모델에는 이 자리가 없었고, 그래서 실제 작업이 밖으로 나갈 때마다 관계없는
+   * 판단 요청을 하나 지어내야 했다. 지어낸 요청은 승인 기록을 흐린다.
+   */
+  requestId: RequestId.optional(),
+  sessionId: SessionId.optional(),
   status: GrantStatus,
   issuedBy: z.string().min(1),
   issuedAt: Timestamp,
@@ -244,6 +253,9 @@ export const ExecutionGrant = z.object({
   consumedAt: Timestamp.optional(),
   resultRef: z.string().optional(),
 })
+  .refine((grant) => Boolean(grant.requestId) !== Boolean(grant.sessionId), {
+    message: 'a grant stands on exactly one basis — an approved request or a session',
+  })
 export type ExecutionGrant = z.infer<typeof ExecutionGrant>
 
 // ── QueueItem / MonitorEvent / State ────────────────────────────────────────
