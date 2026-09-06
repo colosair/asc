@@ -148,6 +148,7 @@ import {
   viewCoordination,
   type CoordinationView,
 } from '../core/runtime/coordination.ts'
+import { publishLine, publishOnce, recordPublication } from '../core/runtime/publish.ts'
 import { ObservationLedger } from '../core/monitor/observation.ts'
 import { DeliveryLedger, deliver, planDigest } from '../core/presentation/digest.ts'
 import { LocalPresentation } from '../adapters/local/presentation.ts'
@@ -269,6 +270,8 @@ const USAGE = `asc — Agent Session Control
   asc query list   [--json]
 
   asc coordination [status] [--json]   # what was asked outside, and whether it reached anyone
+  asc coordination publish --query <ID> --title <text> --body-file <path>
+                   [--audience <who>] [--known <objectId>] [--work <ref>] [--json]
 
   asc progress show   [<S-ID>]
   asc progress report <S-ID> --physical <id> --phase <text>
@@ -695,6 +698,11 @@ function parseArgsOrThrow(argv: string[]) {
   validator: { type: 'string' },
   result: { type: 'string' },
   finding: { type: 'string', multiple: true },
+  query: { type: 'string' },
+  title: { type: 'string' },
+  'body-file': { type: 'string' },
+  audience: { type: 'string', multiple: true },
+  known: { type: 'string', multiple: true },
   blocker: { type: 'string', multiple: true },
   risk: { type: 'string', multiple: true },
   evidence: { type: 'string', multiple: true },
@@ -4619,6 +4627,89 @@ async function runFrontOpen(values: Record<string, unknown>): Promise<number> {
 }
 
 /**
+ * 이 workspace 의 조율 표면. 없으면 없다고 말한다 — 아무 데나 대신 게시하지 않는다.
+ */
+async function coordinationSurfaceFor(resolved?: ResolvedRuntime) {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const adapters = monitorAdapters()
+  const declared = resolved?.layers.profile.bindings ?? []
+  const plan = await composeBindings({
+    context: { projectRoot, env: process.env },
+    adapters,
+    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+  })
+  const ports = await buildRuntimePorts({
+    plan,
+    roles: rolesFor(plan, declared),
+    ...jamComposition(projectRoot),
+    endpointFor: (binding) => endpointOf(adapters, binding),
+  })
+  return { surface: ports.coordinationSurface, unavailable: ports.unavailable }
+}
+
+/**
+ * `asc coordination publish` — 기대 하나를 밖에 실제로 내보낸다.
+ *
+ * 본문을 파일로 받는 이유는 하나다: 사람이 읽을 글이 셸을 지나며 조용히 달라지는 것을
+ * 막는다. 그리고 **내부 메모가 섞일 자리를 주지 않는다** — 나가는 것은 제목·본문·라벨뿐이다.
+ */
+async function runCoordinationPublish(
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  resolved?: ResolvedRuntime,
+): Promise<number> {
+  const queryId = typeof values.query === 'string' ? values.query : undefined
+  const title = typeof values.title === 'string' ? values.title : undefined
+  const bodyFile = typeof values['body-file'] === 'string' ? (values['body-file'] as string) : undefined
+  if (!queryId || !title || !bodyFile) {
+    console.error('coordination publish needs --query, --title and --body-file\n\n' + USAGE)
+    return 2
+  }
+
+  const { surface, unavailable } = await coordinationSurfaceFor(resolved)
+  if (!surface) {
+    console.error('No coordination surface is bound to this workspace — nothing was published.')
+    for (const line of unavailable) console.error(`  ${line}`)
+    return 1
+  }
+
+  const body = await readFile(bodyFile, 'utf8')
+  const audience = (values.audience as string[] | undefined) ?? []
+  const known = ((values.known as string[] | undefined) ?? []).map((objectId) => ({
+    objectType: 'issue',
+    objectId,
+  }))
+  const workReference = typeof values.work === 'string' ? values.work : undefined
+
+  const outcome = await publishOnce(
+    {
+      queryId,
+      publicPayload: { title, body },
+      ...(audience.length > 0 ? { audience } : {}),
+      ...(known.length > 0 ? { known } : {}),
+      ...(workReference ? { workReference } : {}),
+    },
+    { surface, bindingRole: 'coordination-surface' },
+  )
+
+  if (outcome.ok) {
+    const recorded = await recordPublication(coordinationLedger(store), outcome)
+    if (values.json) {
+      console.log(JSON.stringify({ publish: outcome, recorded: recorded.ok }, null, 2))
+      return 0
+    }
+    console.log(publishLine(outcome))
+    // 이미 적힌 사실을 다시 적지 않는다. 그것은 실패가 아니라 같은 것을 두 번 안 세는 것이다.
+    console.log(recorded.ok ? 'recorded as communication evidence' : 'already recorded')
+    return 0
+  }
+
+  if (values.json) console.log(JSON.stringify({ publish: outcome }, null, 2))
+  else console.error(publishLine(outcome))
+  return 1
+}
+
+/**
  * `asc coordination` — 밖에 물은 것이 실제로 나갔는가, 답이 왔는가.
  *
  * **읽기만 한다.** 이 화면이 상태를 만들지 않는다는 것이 요점이다 — 보이는 것은 전부
@@ -4630,6 +4721,7 @@ async function runCoordination(
   store: MarkdownStateStore,
   resolved?: ResolvedRuntime,
 ): Promise<number> {
+  if (command === 'publish') return runCoordinationPublish(values, store, resolved)
   if (command !== undefined && command !== 'status') {
     console.error(`Unknown coordination command: ${command}\n\n${USAGE}`)
     return 2
