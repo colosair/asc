@@ -102,7 +102,7 @@ Every portable answers in JSON — that is why they end in `--json`.
 **1 — first run.** No `asc` exists yet, so start from the bootstrap:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.5.4 setup apply --json
+npx --yes @asc-agent/bootstrap@0.6.0 setup apply --json
 ```
 
 This is the canonical entry, and the only one you need to remember. `setup plan --json`
@@ -114,16 +114,24 @@ genuinely left to decide — including the case in step 2.
 If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
 failure, no ASC JSON on stdout — that is not an ASC failure, and there is no `code` to
 branch on. Do not retry the same shape. Fall back to the persistent entry:
-`npm install -g @asc-agent/runtime@0.5.4`, then re-run the same subcommand as `asc …`.
+`npm install -g @asc-agent/runtime@0.6.0`, then re-run the same subcommand as `asc …`.
 This is distinct from `HOST_EXECUTION_PERMISSION_REQUIRED`, where the host refused a
 command ASC asked to run — that one is ASC speaking, and its JSON says what to do.
+
+**Updating an installed machine is `asc update`, not the setup entry.** Setup re-infers the
+profile, the bindings and the canonical source; an update replaces the executable and
+leaves all of that alone. `asc update check --json` reports without changing anything, and
+answers `UNKNOWN` when the registry could not be asked — which never means up to date.
+ASC updates ASC only. JAM has `jam update`, and neither product calls the other; when
+someone asks for both, run `jam update` first (the work channel reads JAM), then
+`asc update`, and report both results.
 
 **2 — a profile for this project.** If the plan comes back with
 `code: "ASC_PROFILE_SELECTION_REQUIRED"`, the packaged profiles are examples and none of
 them describes this project. Run the `adopt_profile` action's `portable` command:
 
 ```bash
-asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.5.4 profile adopt --json
+asc profile adopt --json     # before install: npx --yes @asc-agent/bootstrap@0.6.0 profile adopt --json
 ```
 
 It reads this repository's git remote and writes `~/.asc/profiles/<id>/profile.json` — in
