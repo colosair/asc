@@ -301,16 +301,18 @@ ${logic}
 /**
  * 이 workspace 의 Execution Mode (0.8.0 Axis C).
  *
- * 기록이 없으면 AUTO 다 — 0.7 까지 붙어 있던 workspace 는 전부 enforcement 가 켜진 채
- * 돌았고, 읽지 못했다는 이유로 조용히 보호를 푸는 것이 가장 나쁘다. 나갈 길은 언제나
- * 열려 있다: 이 hook 은 ASC control-plane 을 막지 않고, \`asc mode manual\` 이 공식 출구다.
+ * **기록이 없으면 AUTO 가 아니다.** AUTO 는 사람이 고르고 readiness 를 통과한 결과로만
+ * 존재한다 — 기록이 없다는 사실은 그 둘 중 어느 것도 증명하지 않으므로, 그 자리에서
+ * enforcement 를 켜면 한 번도 검사되지 않은 강제가 서는 것이다.
+ *
+ * 읽지 못한 경우도 같다. 모르는 것을 AUTO 로 읽으면 위와 같은 일이 생긴다.
  */
 function executionMode(ascRoot) {
   try {
     const { value } = JSON.parse(readFileSync(join(ascRoot, 'adapters', 'policy', 'execution-mode.json'), 'utf8'))
-    return JSON.parse(value).mode === 'MANUAL' ? 'MANUAL' : 'AUTO'
+    return JSON.parse(value).mode === 'AUTO' ? 'AUTO' : 'MANUAL'
   } catch {
-    return 'AUTO'
+    return 'MANUAL'
   }
 }
 
@@ -415,15 +417,14 @@ const observedSessionId = String(input.session_id ?? '')
 // 등록된 workspace가 먼저다. 없으면 저장소 안 .asc 로 내려간다 (C-11 §3 우선순위).
 const registered = lookupWorkspace(cwd)
 if (registered === 'MISSING') {
-  // **조건부 fail-closed** (C-11 §4). 이 경로는 ASC가 맡은 곳인데 runtime을 읽지 못했다.
-  // 그대로 통과시키면 관리 대상 세션의 외부 write가 조용히 열린다 — 그게 가장 나쁘다.
-  const blocked = forbiddenIn(command, FORBIDDEN)
-  if (blocked) {
+  // 이 경로는 ASC가 맡은 곳인데 runtime을 읽지 못했다. **막지는 않는다** — mode 가 그
+  // runtime 안에 있으므로, 읽지 못한 상태에서 차단하면 고르지 않은 enforcement 를 켜는
+  // 것이 된다(0.8.0 §B). 대신 그 사실을 말한다: 무엇이 깨졌는지 사람이 알아야 한다.
+  if (forbiddenIn(command, FORBIDDEN)) {
     console.error(
-      \`[ASC guard] 이 경로는 ASC workspace로 등록돼 있는데 runtime을 읽지 못했다. \` +
-      \`'\${blocked}' 를 막는다 — asc status 로 확인하라.\`,
+      '[ASC] 이 경로는 ASC workspace 로 등록돼 있는데 runtime 을 읽지 못했다 — ' +
+      '실행 축(MANUAL/AUTO)을 확인할 수 없다. asc status 로 확인하라.',
     )
-    process.exit(2)
   }
   process.exit(0)
 }
@@ -443,11 +444,45 @@ if (managed) {
   } catch {}
 }
 
-// ── AUTO 에서만 서는 문 ───────────────────────────────────────────────────────
+// 완전 오프라인 선언이 있을 때만 읽기까지 막는다 — 이것은 Execution Mode 가 아니라
+// 사람이 직접 켠 스위치이므로 두 mode 모두에 선다. 녹이려면 \`asc thaw\`.
+if (!isMutation) {
+  const freeze = freezePolicy(ascRoot)
+  if (freeze && freeze.frozen && freeze.denyRemoteRead) {
+    const offline = forbiddenIn(command, OFFLINE_ONLY)
+    if (offline) {
+      console.error(
+        \`[ASC guard] 완전 오프라인이다\${freeze.reason ? ' (' + freeze.reason + ')' : ''} — '\${offline}' 를 막는다. \` +
+        \`로컬 작업은 그대로 된다. 녹이려면 asc thaw.\`,
+      )
+      process.exit(2)
+    }
+  }
+}
+
+// ── MANUAL — 막지 않는다. 다만 말은 한다 (0.8.0 §F) ─────────────────────────
 //
-// MANUAL 은 하나도 hard-block 하지 않는다. ASC 는 작업·판단·기록을 계속 관리하지만
-// 외부 side effect 를 강제로 자기 경로로 끌고 오지 않는다 — 그것이 MANUAL 의 정의다.
-// Host 자신의 permission 정책은 Host 의 몫으로 남는다.
+// MANUAL 은 ASC OFF 가 아니다: 일 관리·결정권·검수·감사는 그대로 돈다. 달라지는 것은
+// 강제 라우팅 하나다. 그래서 이 자리의 guard 는 감시자가 아니라 조언자다 —
+// 밖으로 나가는 쓰기를 보면 한 줄 남기고 그대로 통과시킨다.
+//
+// **여기서 대상을 해석하지 않는다** (§H). 어느 프로젝트인지·어느 SHA 인지 판정하는 것은
+// Remote Review 의 일이고, 그 검수는 \`asc work publish --review\` 가 읽기만으로 보여 준다.
+if (mode !== 'AUTO') {
+  const outward = forbiddenIn(command, FORBIDDEN)
+  if (outward) {
+    console.error(
+      [
+        \`[ASC] MANUAL — '\${outward}' 를 막지 않는다. 이 쓰기는 ASC 가 관리하는 경로 밖으로 나간다.\`,
+        '  asc work publish --review    # 대상·SHA·결합을 읽기만으로 검수한다',
+        '  asc mode auto                # 관리 경로로만 나가게 하려면',
+      ].join('\\n'),
+    )
+  }
+  process.exit(0)
+}
+
+// ── AUTO 에서만 서는 문 ───────────────────────────────────────────────────────
 if (mode === 'AUTO') {
   // **일이 시작되는데 논리 세션이 없다** (F6). 사람이 "ASC 적용해" 라고 말해야 했던 자리다.
   // 여기서 막고 다음 한 걸음을 그대로 준다. 세션에 들어간 뒤에는 이 문이 다시 열린다.
@@ -491,22 +526,6 @@ if (mode === 'AUTO') {
         \`외부 반영은 \\\`asc work publish\\\` 로 나간다 (승인된 Execution Grant).\`,
       )
       process.exit(2) // exit 2 = 도구 실행 차단
-    }
-  }
-}
-
-// 완전 오프라인 선언이 있을 때만 읽기까지 막는다 — 이것은 Execution Mode 가 아니라
-// 사람이 직접 켠 스위치이므로 두 mode 모두에 선다. 녹이려면 \`asc thaw\`.
-if (!isMutation) {
-  const freeze = freezePolicy(ascRoot)
-  if (freeze && freeze.frozen && freeze.denyRemoteRead) {
-    const offline = forbiddenIn(command, OFFLINE_ONLY)
-    if (offline) {
-      console.error(
-        \`[ASC guard] 완전 오프라인이다\${freeze.reason ? ' (' + freeze.reason + ')' : ''} — '\${offline}' 를 막는다. \` +
-        \`로컬 작업은 그대로 된다. 녹이려면 asc thaw.\`,
-      )
-      process.exit(2)
     }
   }
 }

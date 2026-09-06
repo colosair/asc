@@ -36,6 +36,7 @@ import {
 } from '../adapters/claude-code/probe.ts'
 import { inboxSkillText, reviewSkillText, skillBundle, skillText } from '../adapters/claude-code/skill.ts'
 import { MarkdownStateStore } from '../adapters/markdown/state-store.ts'
+import { writeExecutionMode } from '../core/policy/execution-mode.ts'
 import { MemoryStateStore } from '../adapters/memory/state-store.ts'
 
 const NOW = '2026-08-23T18:00:00+09:00'
@@ -125,9 +126,16 @@ describe('guard hook(3층) — 실행 직전 차단', () => {
     }
   }
 
-  async function attachedProject(): Promise<{ project: string; store: MarkdownStateStore }> {
+  /**
+   * 붙은 프로젝트 하나. **mode 를 명시한다** — 0.8.0 보정에서 기록 없는 workspace 는
+   * AUTO 가 아니게 됐다(§B). 강제를 검사하려면 그 강제를 켠 상태를 만들어야 한다.
+   */
+  async function attachedProject(
+    mode: 'MANUAL' | 'AUTO' = 'AUTO',
+  ): Promise<{ project: string; store: MarkdownStateStore }> {
     const project = await tempDir('asc-hookproj-')
     const store = await MarkdownStateStore.open(join(project, '.asc'))
+    await writeExecutionMode(store.scope('policy'), mode, 'controller-a', NOW)
     return { project, store }
   }
 

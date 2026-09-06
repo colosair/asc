@@ -106,10 +106,31 @@ mode never changes a session's owner, scope, progress or handoff.
 "ASC가 자동으로 관리해"             → asc mode auto
 \`\`\`
 
-\`asc mode auto\` refuses unless the approved path is actually usable here, and says which
-axis is missing. Read that answer and stop — do not turn enforcement on some other way.
+**A workspace nobody has chosen a mode for is not in AUTO.** AUTO exists only where a
+person turned it on and the whole managed path measured READY, so a fresh or upgraded
+workspace enforces nothing until someone says so. \`asc status\` says which of the two it is.
+
+\`asc mode auto\` refuses unless the approved path is actually usable here — control plane,
+controller, binding, executor, provider, review and read-back, all of it — and says which
+axis is missing. Read that answer and stop; do not turn enforcement on some other way.
 If ASC's own enforcement is what is in the way, the one official exit is
-\`asc mode manual\`. Removing the product or deleting the hook is not that exit.
+\`asc mode manual\` (a controller decision, so \`--as\`). Removing the product, uninstalling
+the host integration or switching the runtime is not that exit, and in AUTO those commands
+ask for the same authority.
+
+## Whose decision is which
+
+\`\`\`text
+the project's rules   what has to be done, on which branch, in what order
+ASC                   who owns the work · what a person must decide · whether this
+                      action is executable against the remote right now · execution · audit
+\`\`\`
+
+ASC does not own a project's workflow. If a repository's own conventions say a branch is
+updated a certain way, that judgement belongs to those conventions — ASC checks that the
+action they chose is possible against the current remote, not whether it was the right
+action. A canonical source is what judgement is measured against; it is not a list of the
+only branches that may be written.
 
 ## Maintenance — the same words in both products
 
@@ -213,11 +234,19 @@ approval, and it is not asked for twice. It is also not wider than itself: **"op
 is not "approve the merge"**.
 
 Nothing reaches an external system except through an approved grant. One command carries
-that whole path — proposed act, decision authority, grant, executor, read-back, audit:
+that whole path — read-only review, decision authority, grant, atomic claim, revalidation,
+exactly one write, read-back, audit:
 
 \`\`\`text
 asc work publish [<S-ID>] --action <key> --target <ref> --body-file <path> --as <actor>
+asc work publish … --review    # read the facts and stop. Nothing goes out
 \`\`\`
+
+The review is **not a second approval**. The person's instruction already settled who
+decides; the review settles facts — is this the remote this work is bound to, is the commit
+that was approved still the commit that is here, is there already an open change for it. A
+\`NOT_EXECUTABLE\` means the action does not hold as it stands; a \`REVIEW_REQUIRED\` means a
+person has to look at something the facts cannot settle. Neither is a request to re-approve.
 
 The action key is the provider's (\`gitlab.mr.create\`, \`gitlab.note.create\`, \`git.push\`,
 \`coordination.publish\`, \`github.issue_comment.create\`). If nothing bound to this
@@ -235,6 +264,10 @@ no grant.
 guard stops those, and being stopped is not a puzzle to solve — it means the act belongs in
 \`asc work publish\`. ASC's own commands are never blocked by that guard, so the way out is
 always an asc command, never uninstalling the hook.
+
+In MANUAL the guard blocks none of it. It leaves one line saying the write is leaving the
+managed path and pointing at \`asc work publish --review\`; what to do about that is the
+person's call, and the project's rules are what answer it.
 
 ## Progress reporting
 

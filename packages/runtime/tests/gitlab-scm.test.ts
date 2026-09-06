@@ -83,26 +83,42 @@ describe('원격에 올리는 것도 승인된 행위 하나다', () => {
     return new GitLabScm({ reader, writer, defaultProject: 'g/p', repoRoot: '/repo', git })
   }
 
-  it('가지를 올린다', async () => {
+  it('가지가 아니라 commit 을 올린다 (0.8.0 §L)', async () => {
+    // 승인은 "이 브랜치" 가 아니라 그때의 그 commit 에 대한 것이었다. 이름으로 밀면
+    // 승인 이후 움직인 HEAD 가 같은 명령으로 다른 내용을 내보낸다.
     const seen: string[][] = []
     const scm = scmWith(async (args) => {
       seen.push([...args])
-      return { ok: true, detail: '' }
+      return { ok: true, detail: args[0] === 'rev-parse' ? 'abc123' : '' }
     })
     const result = await scm.execute({ action: 'git.push', target: 'origin feat/x', payload: '' })
 
     assert.equal(result.ok, true)
-    assert.deepEqual(seen, [['push', 'origin', 'feat/x']])
+    assert.deepEqual(seen, [
+      ['rev-parse', 'HEAD'],
+      ['push', 'origin', 'abc123:refs/heads/feat/x'],
+    ])
+    assert.ok(result.ok && result.resultRef.includes('abc123'), '무엇이 올라갔는지가 결과에 남는다')
+  })
+
+  it('HEAD 를 읽지 못하면 이름으로 밀지 않는다', async () => {
+    const scm = scmWith(async (args) => (args[0] === 'rev-parse' ? { ok: false, detail: 'not a repository' } : { ok: true, detail: '' }))
+    const result = await scm.execute({ action: 'git.push', target: 'origin feat/x', payload: '' })
+    assert.equal(result.ok, false)
+    assert.match(result.ok ? '' : result.error, /could not read HEAD/)
   })
 
   it('remote 를 생략하면 origin 이다', async () => {
     const seen: string[][] = []
     const scm = scmWith(async (args) => {
       seen.push([...args])
-      return { ok: true, detail: '' }
+      return { ok: true, detail: args[0] === 'rev-parse' ? 'abc123' : '' }
     })
     await scm.execute({ action: 'git.push', target: 'feat/x', payload: '' })
-    assert.deepEqual(seen, [['push', 'origin', 'feat/x']])
+    assert.deepEqual(seen, [
+      ['rev-parse', 'HEAD'],
+      ['push', 'origin', 'abc123:refs/heads/feat/x'],
+    ])
   })
 
   it('되돌릴 수 없는 형태는 승인 한 번으로 열지 않는다', async () => {

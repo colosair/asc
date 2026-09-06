@@ -2,14 +2,21 @@
 //
 // 이 파일이 시스템에서 유일하게 외부 write를 부르는 지점이다. 순서가 곧 안전장치다:
 //
-//   CLAIM (원자적)  →  계약 범위 확인  →  Drift Guard  →  외부 행위 1회  →  EXECUTED
+//   CLAIM (원자적) → 계약 범위 확인 → Drift Guard → 실행 직전 재검수(읽기)
+//   → 외부 행위 1회 → 되돌려 읽기 → EXECUTED
 //
 // CLAIM을 먼저 하는 이유는 두 Executor가 같은 Grant로 같은 댓글을 두 번 달지 않게 하기
 // 위해서고, Drift Guard를 그 다음에 두는 이유는 승인 이후 스레드가 움직였을 때 오래된
 // 초안이 나가지 않게 하기 위해서다 (OM §11.9). 둘 다 실패는 조용히 넘어가지 않는다.
+//
+// 0.8.0 에서 앞뒤로 한 마디씩 붙었다. 앞의 재검수는 승인이 딛고 선 사실이 아직 그대로인지
+// **읽기만으로** 확인하고(§D), 뒤의 되돌려 읽기는 명령이 0 으로 끝났다는 것과 밖에 그것이
+// 있다는 것이 다르다는 사실을 다룬다(§L·§M·§N). 둘 다 판정은 Core 가 하고, 사실은 Port 가
+// 읽어 온다 — 그래야 사람이 보는 검수와 Agent 가 따르는 검수가 같은 판정이다.
 
 import type { ExecutionGrant } from '../model/entities.ts'
 import { transitionGrant, transitionRequest } from '../model/transitions.ts'
+import { reviewExternalAction, verifyAgainst, type ReviewOutcome } from './remote-review.ts'
 import type { ScmPort } from '../../ports/scm.ts'
 import type { StateStore } from '../../ports/state-store.ts'
 import { applyTransition } from '../runtime/store-ops.ts'
@@ -25,6 +32,19 @@ export type ExecuteOutcome =
   | { ok: false; reason: 'FORBIDDEN_ACTION'; detail: string }
   /** 승인 이후 대상이 움직였다 — 실행하지 않고 되돌린다. */
   | { ok: false; reason: 'DRIFT'; detail: string }
+  /** 실행 직전 재검수가 "지금 이 행동은 성립하지 않는다" 로 답했다. 밖은 그대로다. */
+  | { ok: false; reason: 'NOT_EXECUTABLE'; detail: string; review: ReviewOutcome }
+  /** 사람이 봐야 하는 것이 남아 있다 — 범위 밖 대상·모호함. 밖은 그대로다. */
+  | { ok: false; reason: 'REVIEW_REQUIRED'; detail: string; review: ReviewOutcome }
+  /** 밖에서 거절했다. 나간 것이 없다는 것이 확인된 실패다. */
+  | { ok: false; reason: 'REJECTED'; detail: string }
+  /**
+   * 나갔는지 모른다 (0.8.0 §P). 다시 부르지 않는다 — 다시 부르면 같은 것이 두 번 나갈 수
+   * 있고, 그것이 이 상태에서 가장 나쁜 결과다. Grant 는 집힌 채로 남아 재사용되지 않는다.
+   */
+  | { ok: false; reason: 'UNCERTAIN'; detail: string }
+  /** 나갔는데 되돌려 읽은 것이 기대와 다르다. 성공이라고 적지 않는다. */
+  | { ok: false; reason: 'NOT_VERIFIED'; detail: string; resultRef: string; mismatches: string[] }
   | { ok: false; reason: 'ACTION_FAILED'; detail: string }
 
 export type ExecutorDeps = {
@@ -83,27 +103,73 @@ export class Executor {
       return { ok: false, reason: 'DRIFT', detail: drift }
     }
 
-    // 4. 외부 행위 1회. payload는 승인된 내용 그대로 나간다
-    const result = await this.#scm.execute({
+    const action = {
       action: claimed.entity.action,
       target: claimed.entity.target,
       payload: claimed.entity.payload,
-    })
-    if (!result.ok) {
-      // 재시도하지 않는다. 실패한 호출이 정말 나가지 않았는지는 여기서 알 수 없고,
-      // 모른 채 다시 부르면 같은 글이 두 번 올라간다. 사람이 확인하고 새 Grant를 낸다.
-      await this.#close(grant.id, 'INVALIDATED', this.#now(), `실행 실패: ${result.error}`)
-      return { ok: false, reason: 'ACTION_FAILED', detail: result.error }
     }
 
-    // 5. 소비 기록 — 성공한 Grant는 다시 쓸 수 없다
+    // 4. 실행 직전 재검수 (0.8.0 §D). 승인은 그때의 사실 위에서 났다 — 그 사실이 아직
+    //    그대로인지 **읽기만으로** 확인한다. 여기서 멈추면 밖은 하나도 바뀌지 않는다.
+    let review: ReviewOutcome | undefined
+    if (this.#scm.review) {
+      const facts = await this.#scm.review(action)
+      review = reviewExternalAction({
+        action: action.action,
+        target: action.target,
+        facts,
+        ...(claimed.entity.basis ? { basis: claimed.entity.basis } : {}),
+      })
+      if (review.verdict !== 'READY') {
+        const detail = review.findings.map((finding) => `${finding.code}: ${finding.detail}`).join('; ')
+        await this.#close(grant.id, 'INVALIDATED', this.#now(), `재검수 ${review.verdict}: ${detail}`)
+        return review.verdict === 'NOT_EXECUTABLE'
+          ? { ok: false, reason: 'NOT_EXECUTABLE', detail, review }
+          : { ok: false, reason: 'REVIEW_REQUIRED', detail, review }
+      }
+    }
+
+    // 5. 외부 행위 1회. payload는 승인된 내용 그대로 나간다
+    const result = await this.#scm.execute(action)
+    if (!result.ok) {
+      // **나갔는지 모르는 실패와 거절을 가른다** (0.8.0 §P). 어느 쪽이든 다시 부르지
+      // 않는다 — 모른 채 재시도하면 같은 것이 두 번 나갈 수 있다.
+      if (uncertain(result.error)) {
+        await this.#store.appendHistory({
+          at: this.#now(),
+          actor: this.#runId,
+          kind: 'external_action_uncertain',
+          ref: grant.id,
+          detail: `${grant.action} → ${grant.target}: ${result.error}`,
+        })
+        // Grant 는 CLAIMED 로 남는다. 다시 실행할 수 없고, 사람이 밖을 확인한 뒤 정한다.
+        return { ok: false, reason: 'UNCERTAIN', detail: result.error }
+      }
+      await this.#close(grant.id, 'INVALIDATED', this.#now(), `실행 실패: ${result.error}`)
+      return { ok: false, reason: 'REJECTED', detail: result.error }
+    }
+
+    // 6. 되돌려 읽기 (0.8.0 §L·§M·§N). exit 0 은 성공이 아니다.
+    let mismatches: string[] = []
+    if (this.#scm.verify && review) {
+      const read = await this.#scm.verify(action, { resultRef: result.resultRef })
+      if (!read.unsupported) {
+        const comparable = Object.keys(review.expected).filter(
+          (key) => key !== 'action' && key !== 'target' && read.observed[key] !== undefined,
+        )
+        const verified = verifyAgainst(review.expected, read.observed, comparable)
+        mismatches = comparable.length === 0 ? ['nothing could be read back to compare'] : verified.mismatches
+      }
+    }
+
+    // 7. 소비 기록 — 성공한 Grant는 다시 쓸 수 없다
     const executedAt = this.#now()
     const executed = await applyTransition(this.#store, 'grant', grant.id, (g) =>
       transitionGrant(g, 'EXECUTED', 'executor', { resultRef: result.resultRef, consumedAt: executedAt }),
     )
     if (!executed.ok) return { ok: false, reason: 'CLAIMED_BY_OTHER' }
 
-    // 6. 요청이 근거였다면 그 요청을 닫는다 — 외부에 무엇이 남았는지 요청에서 바로
+    // 8. 요청이 근거였다면 그 요청을 닫는다 — 외부에 무엇이 남았는지 요청에서 바로
     //    따라갈 수 있어야 한다. 세션이 근거인 경우에는 닫을 요청이 없고, 그 자취는
     //    아래 History 와 세션 자신의 기록에 남는다.
     if (claimed.entity.requestId) {
@@ -114,10 +180,25 @@ export class Executor {
     await this.#store.appendHistory({
       at: executedAt,
       actor: this.#runId,
-      kind: 'external_action',
+      kind: mismatches.length > 0 ? 'external_action_unverified' : 'external_action',
       ref: grant.id,
-      detail: `${grant.action} → ${grant.target} = ${result.resultRef}`,
+      detail:
+        mismatches.length > 0
+          ? `${grant.action} → ${grant.target} = ${result.resultRef} (unverified: ${mismatches.join('; ')})`
+          : `${grant.action} → ${grant.target} = ${result.resultRef}`,
     })
+
+    // 나간 것은 나갔다 — Grant 는 소비됐다. 그러나 밖에서 기대한 것이 읽히지 않으면
+    // 성공이라고 적지 않는다.
+    if (mismatches.length > 0) {
+      return {
+        ok: false,
+        reason: 'NOT_VERIFIED',
+        detail: mismatches.join('; '),
+        resultRef: result.resultRef,
+        mismatches,
+      }
+    }
 
     return { ok: true, grant: executed.entity, resultRef: result.resultRef }
   }
@@ -151,4 +232,14 @@ export class Executor {
     await applyTransition(this.#store, 'grant', grantId, (g) => transitionGrant(g, to, 'executor'))
     await this.#store.appendHistory({ at, actor: this.#runId, kind: `grant_${to.toLowerCase()}`, ref: grantId, detail })
   }
+}
+
+/**
+ * 이 실패가 "나가지 않았다" 인가, "모른다" 인가 (0.8.0 §P).
+ *
+ * 시간이 끊기거나 연결이 죽은 자리에서는 요청이 도착했는지 알 수 없다. 그 상태를 실패로
+ * 적고 재시도하면 같은 것이 두 번 나갈 수 있으므로, 모르는 것은 모른다고 적는다.
+ */
+function uncertain(error: string): boolean {
+  return /timeout|timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|socket hang up|aborted|network/i.test(error)
 }

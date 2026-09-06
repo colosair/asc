@@ -248,6 +248,22 @@ export const ExecutionGrant = z.object({
   /** 게시 직전 Drift Guard가 대조할 기준 (OM §11.9). */
   snapshot: z.array(CanonicalSnapshot).default([]),
   threadLastEventId: z.string().optional(),
+  /**
+   * 승인이 못 박은 사실 (0.8.0 §L).
+   *
+   * 가지 이름은 그대로인데 내용이 달라질 수 있다 — "이 브랜치를 올려" 는 승인 시점의
+   * 그 commit 에 대한 것이었다. 실행 직전 재검수가 이 값과 지금을 견주고, 다르면 나가지
+   * 않는다. 없는 경우도 있다(모든 행위가 SHA 를 갖지는 않는다) — 없으면 그 항목은 보지
+   * 않을 뿐, 없는 것을 맞다고 치지 않는다.
+   */
+  basis: z
+    .object({
+      sourceSha: z.string().optional(),
+      remoteBaseline: z.string().optional(),
+      /** 이 결합이 가리키는 신원. 대상이 여기서 벗어나면 관리 범위 밖이다. */
+      resource: z.string().optional(),
+    })
+    .optional(),
   allowedWrites: z.array(z.string()).default([]), // 명시된 것 외 모든 write 금지
   claimedBy: z.string().optional(),
   consumedAt: Timestamp.optional(),

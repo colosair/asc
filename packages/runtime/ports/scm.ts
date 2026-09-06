@@ -5,6 +5,7 @@
 // (OM §11.5). Monitor는 이 Port의 읽기만 쓴다.
 
 import type { CanonicalSnapshot } from '../core/model/entities.ts'
+import type { RemoteFacts } from '../core/execution/remote-review.ts'
 
 /** 스레드(Issue/PR/Review 등) 하나의 현재 상태. Drift Guard가 대조하는 값이다. */
 export type ThreadSnapshot = {
@@ -45,6 +46,26 @@ export interface ScmPort {
 
   getThread(reference: string): Promise<ThreadSnapshot>
   getBaselines(queries: readonly BaselineQuery[]): Promise<CanonicalSnapshot[]>
+
+  /**
+   * 이 행위를 하기 전에 밖에서 읽히는 사실 (0.8.0 §D). **mutation 0** 이다.
+   *
+   * 판정은 하지 않는다 — 본 것을 그대로 돌려주고, 판정은 Core 의 Remote Review 가 한다.
+   * 그래야 사람이 보는 검수와 Agent 가 따르는 검수가 같은 판정이 된다.
+   */
+  review?(action: ExternalAction): Promise<RemoteFacts>
+
+  /**
+   * 행위 뒤의 되돌려 읽기 (0.8.0 §L·§M·§N). **mutation 0** 이다.
+   *
+   * 명령이 0 으로 끝났다는 것과 밖에 그것이 있다는 것은 다르다. 여기서 읽은 사실이
+   * 기대치와 다르면 호출자는 성공이라고 적지 않는다.
+   */
+  verify?(action: ExternalAction, result: { resultRef: string }): Promise<{
+    observed: Record<string, string | undefined>
+    /** 이 통로가 이 행위의 되돌림을 지원하지 않으면 그 사실을 그대로 말한다. */
+    unsupported?: boolean
+  }>
 
   /**
    * 외부 쓰기. Grant를 검증하고 Drift Guard를 통과시킨 Executor만 호출한다 —

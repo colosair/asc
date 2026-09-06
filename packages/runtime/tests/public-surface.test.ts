@@ -129,8 +129,10 @@ describe('Execution Mode — 명령 표면 (§10·§11·§12)', () => {
     const root = await attachedRoot()
     const asked = await run(['mode', '--json', '--root', root])
     assert.equal(asked.code, 0)
-    const status = JSON.parse(asked.out) as { mode: string; autoReadiness: { ready: boolean } }
-    assert.equal(status.mode, 'AUTO', '기록이 없으면 0.7 과 같은 상태다')
+    const status = JSON.parse(asked.out) as { mode: string; chosen?: boolean; autoReadiness: { ready: boolean } }
+    // 0.8.0 보정 §B — 고른 적이 없는 workspace 는 AUTO 가 아니다. AUTO 는 사람이 고르고
+    // readiness 를 통과한 결과로만 존재한다.
+    assert.equal(status.mode, 'MANUAL')
 
     const lowered = await run(['mode', 'manual', '--json', '--root', root])
     assert.equal(lowered.code, 0)
@@ -191,8 +193,10 @@ describe('work 는 기존 경로 위의 표면이다 (§34·§70)', () => {
     assert.match(body, /runProgress\('show'/, 'status 는 기존 진행 표시를 쓴다')
     assert.match(body, /runSession\('done'/, 'finish 는 기존 handoff 를 쓴다')
     assert.match(body, /runController\('collect'/, 'finish 가 거두는 것까지 한다')
-    assert.match(body, /runGrant\('issue'/, 'publish 는 Grant 를 지난다')
+    assert.match(body, /runGrant\(\s*'issue'/, 'publish 는 Grant 를 지난다')
     assert.match(body, /runGrant\('run'/, 'publish 는 Executor 를 지난다')
+    // 그 앞에 읽기만 하는 검수가 선다 (0.8.0 §D).
+    assert.match(body, /reviewExternalAction\(/, 'publish 는 나가기 전에 사실을 검수한다')
     // 새 저장소·새 entity 를 만들지 않는다.
     assert.doesNotMatch(body, /new MarkdownStateStore|store\.put\('work/)
   })

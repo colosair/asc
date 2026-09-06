@@ -184,11 +184,12 @@ import {
   type AutoReadiness,
   type ReadinessAxis,
 } from '../core/policy/execution-mode.ts'
+import { reviewExternalAction, reviewLines, type ReviewOutcome } from '../core/execution/remote-review.ts'
 import type { ResolvedBinding } from '../core/binding/types.ts'
 import type { Adapter } from '../ports/adapter.ts'
 import type { ResolvedRuntime } from '../core/resolver/load.ts'
 import { SessionRuntime } from '../core/runtime/session.ts'
-import { Checkpoint, Handoff, SessionRole, type Session } from '../core/model/entities.ts'
+import { Checkpoint, Handoff, SessionRole, type ExecutionGrant, type Session } from '../core/model/entities.ts'
 import { archiveLock, bootstrapGuard, buildLock, compareLock, loadLayers, resolveRuntime } from '../core/resolver/load.ts'
 import { ProfileSourceError } from '../core/resolver/profile-source.ts'
 import { renderAscMd, renderControllerMd } from '../core/resolver/render.ts'
@@ -213,6 +214,7 @@ Work
   asc work start [WORK]     start or resume the work, inside a contract
   asc work status [S-ID]    where it is right now
   asc work publish          send the approved result outside
+  asc work publish --review read the target, the SHA and the binding — change nothing
   asc work finish [S-ID]    hand off, close, collect — one command
   asc work pause|resume|inspect [S-ID]
 
@@ -828,6 +830,7 @@ function parseArgsOrThrow(argv: string[]) {
       revision: { type: 'string' },
       expect: { type: 'string' },
       advanced: { type: 'boolean', default: false },
+      review: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   })
@@ -1532,6 +1535,17 @@ async function runRuntimeSelect(
   if (mode !== 'package' && mode !== 'development') {
     console.error('Usage: asc runtime use package | asc runtime use development <checkout>')
     return 2
+  }
+
+  // 도는 build 를 바꾸는 것은 guard·검수·실행 경로를 통째로 바꾸는 것이다 (§J).
+  // AUTO 인 자리에서는 Controller 의 결정이다.
+  if (mode === 'development') {
+    const gated = await guardedByController(
+      '`asc runtime use development`',
+      await discoverRoot(process.cwd(), values.root as string | undefined),
+      values,
+    )
+    if (gated !== null) return gated
   }
 
   const selection =
@@ -2645,6 +2659,13 @@ async function runHost(
     }
 
     case 'uninstall': {
+      // host 설치물을 걷어내는 것은 AUTO 의 enforcement 를 걷어내는 것과 같다 (§J).
+      const gated = await guardedByController(
+        '`asc host claude uninstall`',
+        await discoverRoot(process.cwd(), values.root as string | undefined),
+        values,
+      )
+      if (gated !== null) return gated
       const outcome = await uninstall(paths)
       for (const path of outcome.removed) console.log(`removed: ${path}`)
       for (const keep of outcome.kept) console.log(`kept: ${keep.path} — ${keep.reason}`)
@@ -4545,11 +4566,35 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
       : { axis: 'controller', state: 'MISSING', detail: 'no approver is known — `asc setup identity`' },
   )
 
-  // ③ external executor — 승인된 것이 실제로 나갈 통로가 조립되는가.
-  // ④ provider capability — 그 통로가 무엇을 할 수 있다고 말하는가.
-  //    **설정 파일이 있다는 것으로 답하지 않는다** (§62·§63): 조립 결과와 supports() 가 근거다.
+  // ③ binding — 이 작업이 어느 원격을 가리키는지 하나로 풀리는가 (§K).
+  // ④ external executor — 승인된 것이 실제로 나갈 통로가 조립되는가.
+  // ⑤ provider capability — 그 통로가 무엇을 할 수 있다고 말하는가.
+  // ⑥⑦ review · verify — 나가기 전에 읽고, 나간 뒤에 되돌려 읽을 수 있는가 (§C).
+  //
+  // **설정 파일이 있다는 것으로 답하지 않는다** (§62·§63): 조립 결과와 supports() 가 근거다.
+  // 그리고 control-plane 하나로 끝내지 않는다 — AUTO 는 관리된 쓰기 **경로 전체**가
+  // 쓸 수 있다는 뜻이고, 그 경로에 마디가 빠져 있으면 AUTO 는 나갈 길이 없는 상태다.
   const composed = root ? await composedPorts(runtime).catch(() => null) : null
   const outward = composed?.scm ?? null
+  const declared = runtime?.layers.profile.bindings ?? []
+  const writeBindings = declared.filter((binding) => !outward || binding.adapter === outward.id)
+  axes.push(
+    !root
+      ? { axis: 'binding', state: 'MISSING', detail: 'not attached' }
+      : declared.length === 0
+        ? { axis: 'binding', state: 'MISSING', detail: 'the profile declares no binding' }
+        : writeBindings.length === 1
+          ? { axis: 'binding', state: 'READY', detail: `${writeBindings[0]!.adapter}:${writeBindings[0]!.resource}` }
+          : writeBindings.length === 0
+            ? { axis: 'binding', state: 'DEGRADED', detail: 'no declared binding matches the write path' }
+            : {
+                axis: 'binding',
+                state: 'DEGRADED',
+                detail: `more than one binding could be the write target (${writeBindings
+                  .map((binding) => `${binding.adapter}:${binding.resource}`)
+                  .join(', ')})`,
+              },
+  )
   axes.push(
     outward
       ? { axis: 'executor', state: 'READY', detail: outward.id }
@@ -4564,6 +4609,20 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
         : actions.length > 0
           ? { axis: 'provider', state: 'READY', detail: actions.join(', ') }
           : { axis: 'provider', state: 'DEGRADED', detail: `${outward.id} supports none of the known actions` },
+  )
+  axes.push(
+    !outward
+      ? { axis: 'review', state: 'MISSING', detail: 'no outward path to review with' }
+      : outward.review
+        ? { axis: 'review', state: 'READY', detail: 'the write path can be read before it is used' }
+        : { axis: 'review', state: 'MISSING', detail: `${outward.id} cannot read the target before writing` },
+  )
+  axes.push(
+    !outward
+      ? { axis: 'verify', state: 'MISSING', detail: 'no outward path to verify with' }
+      : outward.verify
+        ? { axis: 'verify', state: 'READY', detail: 'what goes out can be read back' }
+        : { axis: 'verify', state: 'MISSING', detail: `${outward.id} cannot read back what it wrote` },
   )
 
   // ⑤ guard — 마지막이다. 나갈 길을 확인하기 전에 막는 쪽을 켜지 않는다 (§9).
@@ -4670,7 +4729,7 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
           build: 'code' in build ? { error: build } : build,
           installation: host.status,
           setup,
-          executionMode: mode?.mode ?? null,
+          executionMode: mode ? { mode: mode.mode, chosen: mode.chosen } : null,
           autoReadiness: { ready: readiness.ready, axes: readiness.axes },
           external,
           work: sessions.map((session) => ({ id: session.id, status: session.status, role: session.role })),
@@ -4693,7 +4752,9 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   console.log(resolutionLine(resolution))
   console.log(renderSetup(setup))
   console.log('')
-  console.log(`Execution Mode: ${mode?.mode ?? '(not attached)'}`)
+  console.log(
+    `Execution Mode: ${mode ? `${mode.mode}${mode.chosen ? '' : ' (never chosen — nothing is being enforced)'}` : '(not attached)'}`,
+  )
   // AUTO 는 HITL 의 반대가 아니다 — 실행을 누가 하느냐일 뿐이라는 것을 화면이 말한다.
   console.log('  Mode decides who executes. It never decides what a person must approve.')
   for (const axis of readiness.axes) {
@@ -4727,6 +4788,57 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   console.log(`Next: ${next}`)
   // 진단이지 실패가 아니다 — 막힌 것이 있어도 0이다.
   return 0
+}
+
+/**
+ * 이 사람이 이 workspace 의 Controller 인가 (0.8.0 §J).
+ *
+ * **새 approval system 을 만들지 않는다** — 이미 있는 것을 그대로 쓴다: `identities.json`
+ * 의 매핑과 override 의 controller identities. 여기서 하는 일은 그 둘에 대고 `--as` 를
+ * 견주는 것뿐이다.
+ *
+ * 이 함수가 지키는 자리는 하나다: enforcement 를 낮추거나 걷어내는 명령. Guard 는 그
+ * 명령들을 통과시키고(E-02), 거절은 Core 인 여기서 한다.
+ */
+async function controllerAuthority(
+  root: string,
+  runtime: ResolvedRuntime | undefined,
+  values: Record<string, unknown>,
+): Promise<{ ok: boolean; known: number; names: string[] }> {
+  const approvers = await loadIdentityMap(root)
+  const names = [...new Set([...Object.keys(approvers), ...Object.keys(runtime?.controllerIdentities ?? {})])]
+  const actor = values.as as string | undefined
+  if (actor === undefined) return { ok: false, known: names.length, names }
+  if (names.includes(actor)) return { ok: true, known: names.length, names }
+  const binding = new LocalIdentityBinding(approvers)
+  const verified = await Promise.all(
+    names.map((name) => binding.verify({ channel: 'local', actor, authorizedApprover: name })),
+  )
+  return { ok: verified.some(Boolean), known: names.length, names }
+}
+
+/**
+ * 이 명령이 AUTO 의 안전 경계를 실질적으로 걷어내는가 — 그렇다면 Controller 의 자리다.
+ *
+ * Host 가 `Bash(asc:*)` 를 허용한 것은 **ASC 가 갇히지 않게 하려는 것**이지, Agent 가
+ * 자기를 감시하는 것을 스스로 떼어내라는 뜻이 아니다 (§J).
+ */
+async function guardedByController(
+  what: string,
+  root: string | null,
+  values: Record<string, unknown>,
+): Promise<number | null> {
+  if (!root) return null
+  const store = new MarkdownStateStore(root)
+  const mode = await readExecutionMode(store.scope('policy')).catch(() => null)
+  if (mode?.mode !== 'AUTO') return null
+  const authority = await controllerAuthority(root, await attachedRuntime(root), values)
+  if (authority.ok) return null
+  console.error(`This workspace runs in AUTO. ${what} takes ASC's enforcement away with it,`)
+  console.error('so it is a controller decision — say who is deciding with `--as <actor>`.')
+  if (authority.names.length > 0) console.error(`Known: ${authority.names.join(', ')}`)
+  console.error('To step down to MANUAL first: `asc mode manual --as <actor>`')
+  return 2
 }
 
 /**
@@ -4797,26 +4909,18 @@ async function runMode(
     return 0
   }
 
-  // AUTO → MANUAL 은 enforcement 를 낮추는 전환이다 (§11). Controller 권한을 Core 가 본다.
+  // AUTO → MANUAL 은 enforcement 를 낮추는 전환이다 (§11·§J). Controller 권한을 Core 가 본다.
   //
-  // 승인 권한자가 **한 명도 없는** 설치에서는 견줄 대상이 없다. 그때까지 이 문을 잠그면
-  // 공식 출구가 사라지고, 출구 없는 AUTO 는 이번 릴리스가 금지한 바로 그 상태다 (§16).
-  const approvers = await loadIdentityMap(root)
-  const known = new Set<string>([...Object.keys(approvers), ...Object.keys(runtime?.controllerIdentities ?? {})])
-  if (known.size > 0) {
-    const actor = values.as as string | undefined
-    const binding = new LocalIdentityBinding(approvers)
-    const verified =
-      actor !== undefined &&
-      (known.has(actor) ||
-        (await Promise.all([...known].map((name) => binding.verify({ channel: 'local', actor, authorizedApprover: name })))).some(
-          Boolean,
-        ))
-    if (!verified) {
-      console.error('Lowering enforcement is a controller decision — say who is deciding: `asc mode manual --as <actor>`')
-      console.error(`Known: ${[...known].join(', ')}`)
-      return 2
-    }
+  // **AUTO 에서는 예외가 없다.** Host 가 `Bash(asc:*)` 를 허용한다는 사실이 Agent 에게
+  // 안전 경계를 스스로 푸는 길을 주어서는 안 된다 — Guard 는 이 명령을 통과시키고,
+  // 거절은 여기서 Core 가 한다. 아직 AUTO 가 아닌 자리에서는 견줄 대상이 없을 수 있고,
+  // 그때까지 문을 잠그면 공식 출구가 사라진다.
+  const authority = await controllerAuthority(root, runtime, values)
+  if (current.mode === 'AUTO' ? !authority.ok : authority.known > 0 && !authority.ok) {
+    console.error('Lowering enforcement is a controller decision — say who is deciding: `asc mode manual --as <actor>`')
+    if (authority.names.length > 0) console.error(`Known: ${authority.names.join(', ')}`)
+    else console.error('No approver is mapped in this workspace — `asc setup identity` names one.')
+    return 2
   }
   const record = await writeExecutionMode(scope, 'MANUAL', values.as as string | undefined)
   show(record, { applied: 'true' })
@@ -4895,6 +4999,13 @@ async function runUninstall(command: string | undefined, values: Record<string, 
   const installed = await detectStableInstall(nodeProcessRunner, RELEASE_VERSION)
   const home = ascHome()
 
+  // **돌고 있는 일을 몰래 버리지 않는다** (0.8.0 §Q). uninstall 은 제품을 걷어내는
+  // 명령이지 일을 끝내는 명령이 아니다 — 살아 있는 세션이나 물리 결합이 있으면 그것을
+  // 어떻게 할지는 사람이 정한다. 새 lifecycle 상태를 만들지 않고, 이미 있는 상태를 읽는다.
+  const here = await discoverRoot(process.cwd(), values.root as string | undefined)
+  const live = here ? await liveWork(here) : { sessions: [], bindings: [] }
+  const busy = live.sessions.length > 0 || live.bindings.length > 0
+
   if (command === 'plan') {
     const payload = {
       remove: {
@@ -4903,6 +5014,7 @@ async function runUninstall(command: string | undefined, values: Record<string, 
         runtime: installed.installedVersion ?? null,
       },
       preserve: { state: home, note: 'profiles, workspaces, sessions, audit, evidence and identities all stay' },
+      ...(busy ? { blockedBy: { sessions: live.sessions, bindings: live.bindings } } : {}),
     }
     if (values.json) console.log(JSON.stringify(payload, null, 2))
     else {
@@ -4911,9 +5023,29 @@ async function runUninstall(command: string | undefined, values: Record<string, 
       if (host.status !== 'NOT_INSTALLED') console.log('  the ASC files and hook registration in ~/.claude')
       if (installed.installedVersion) console.log(`  the installed runtime (${RUNTIME_PACKAGE}@${installed.installedVersion})`)
       console.log(`Would keep: ${home} — profiles, workspaces, sessions, audit, evidence, identities`)
+      if (busy) {
+        console.log('')
+        console.log('Would refuse: work is still running here —')
+        for (const id of live.sessions) console.log(`  session ${id}`)
+        for (const id of live.bindings) console.log(`  a run is holding ${id}`)
+      }
     }
     return 0
   }
+
+  if (busy) {
+    console.error('Work is still running in this workspace, and uninstalling would abandon it:')
+    for (const id of live.sessions) console.error(`  session ${id}`)
+    for (const id of live.bindings) console.error(`  a physical run is holding ${id}`)
+    console.error('')
+    console.error(`Finish or pause it first: \`asc work finish ${live.sessions[0] ?? '<S-ID>'} --verified "…" --next "…"\``)
+    console.error('Nothing was removed.')
+    return 2
+  }
+
+  // AUTO 에서 이 명령은 enforcement 를 통째로 걷어낸다 — Controller 의 자리다 (§J).
+  const gated = await guardedByController('`asc uninstall`', here, values)
+  if (gated !== null) return gated
 
   let worst = 0
   if (adapter) {
@@ -4953,6 +5085,26 @@ async function runUninstall(command: string | undefined, values: Record<string, 
   console.log('Profiles, workspaces, sessions, audit, evidence and identities are untouched.')
   console.log(`Install it again later and they are all still there: ${portableCommand(['setup', 'apply'])}`)
   return worst
+}
+
+/**
+ * 지금 이 workspace 에서 돌고 있는 일. **읽기만 한다.**
+ *
+ * 두 가지를 본다: 아직 끝나지 않은 논리 세션과, 그 세션을 집고 있는 물리 Run. 어느
+ * 하나라도 있으면 제품을 걷어내는 것은 그 일을 버리는 것이 된다.
+ */
+async function liveWork(root: string): Promise<{ sessions: string[]; bindings: string[] }> {
+  try {
+    const store = new MarkdownStateStore(root)
+    const sessions = (await store.list('session'))
+      .filter((session) => session.status === 'ACTIVE' || session.status === 'PAUSED')
+      .map((session) => session.id)
+    const held = (await claudeBindings(store).current()).map((binding) => binding.logicalSessionId)
+    return { sessions, bindings: held.filter((id) => !sessions.includes(id)) }
+  } catch {
+    // 읽지 못한 것을 "없다" 로 적지 않는다 — 모르면 막는 쪽이 안전하다.
+    return { sessions: ['(could not be read)'], bindings: [] }
+  }
 }
 
 /**
@@ -5025,22 +5177,95 @@ async function runWork(
     }
 
     // 밖으로 내보낸다. Grant 를 없애는 것이 아니라 그 위에 서는 공식 표면이다 (§42).
+    //
+    // 순서가 계약이다 (0.8.0 §D):
+    //
+    //   읽기만 하는 원격 검수 → 결정권 → Grant → 원자적 CLAIM → 실행 직전 재검수
+    //   → 외부 변경 한 번 → 되돌려 읽기 → 감사
+    //
+    // 앞의 검수는 **승인을 다시 받는 자리가 아니다** (§I). 사람이 "게시해" 라고 한 것은
+    // 결정권을 이미 해결했다. 여기서 보는 것은 사실이다 — 그 대상이 이 결합의 원격인지,
+    // 승인한 commit 이 아직 그 commit 인지, 같은 것이 이미 올라가 있지는 않은지.
     case 'publish': {
+      if (!values.action || !values.target) {
+        console.error('Usage: asc work publish [S-ID] --action <key> --target <ref> --body-file <path> --as <actor>')
+        console.error('       asc work publish … --review    # read the facts, change nothing')
+        return 2
+      }
+      const outward = await externalWritePort(runtime)
+      if (!outward) {
+        console.error('밖으로 내보낼 통로가 없다 — 이 행위를 수행할 결합이 Profile 에 없다.')
+        console.error('지금 무엇이 풀리는지: asc status')
+        return 2
+      }
+      const payload = values['body-file']
+        ? await readFile(values['body-file'] as string, 'utf8').catch(() => null)
+        : ''
+      if (payload === null) {
+        console.error(`내용을 읽지 못했다: ${String(values['body-file'])}`)
+        return 2
+      }
+      const action = { action: values.action as string, target: values.target as string, payload }
+
+      // ① 읽기만 하는 검수. MANUAL 이든 AUTO 든 같은 판정이고, 화면만 다르다 (§E).
+      const bound = bindingIdentity(runtime, outward.id)
+      const facts = outward.review
+        ? await outward.review(action)
+        : { provider: outward.id, capability: outward.supports?.(action.action) ?? true, unknown: ['this write path cannot be read before use'] }
+      const review = reviewExternalAction({
+        action: action.action,
+        target: action.target,
+        facts,
+        ...(bound ? { basis: { resource: bound } } : {}),
+      })
+      for (const line of reviewLines(review)) console.log(line)
+      for (const [key, value] of Object.entries(facts.observed ?? {})) {
+        if (value !== undefined) console.log(`  ${key}: ${value}`)
+      }
+
+      // 읽기만 물었으면 여기서 끝이다 — 이 경로로는 아무것도 나가지 않는다.
+      if (values.review) return review.verdict === 'NOT_EXECUTABLE' ? 1 : 0
+
+      if (review.verdict !== 'READY') {
+        console.error('')
+        console.error(
+          review.verdict === 'NOT_EXECUTABLE'
+            ? 'This cannot go out as it stands. Nothing was sent.'
+            : 'Facts here need a person to look — nothing was sent. Widen or correct the action, then run it again.',
+        )
+        return 1
+      }
+
       const session = await currentSession()
       if (!session) {
         console.error('Which session? `asc work publish --session <S-ID> ...`')
         return 2
       }
-      if (!values.action || !values.target || !values['body-file'] || !values.as) {
-        console.error('Usage: asc work publish [S-ID] --action <key> --target <ref> --body-file <path> --as <actor>')
-        console.error('The body is what a person approved sending. It is not written here.')
+      if (!values['body-file'] || !values.as) {
+        // **호출됐다는 사실이 승인이 아니다** (§R). 내보낼 내용은 사람이 준 것이어야 하고,
+        // 누가 정했는지는 이름으로 남아야 한다. 그 둘이 없으면 Grant 는 만들어지지 않는다.
+        console.error('--body-file <path> 와 --as <actor> 가 필요하다 — 내보낼 내용과 그것을 정한 사람이다.')
+        console.error('Agent 가 스스로 부른 것은 승인이 아니다.')
         return 2
       }
+
+      // ② 승인이 딛고 선 사실을 못 박는다 (§L). 가지 이름이 아니라 그때의 commit 이다.
+      const basis = {
+        ...(facts.observed?.['local.head'] ? { sourceSha: facts.observed['local.head'] } : {}),
+        ...(facts.observed?.['remote.sha'] ? { remoteBaseline: facts.observed['remote.sha'] } : {}),
+        ...(bound ? { resource: bound } : {}),
+      }
       const grantId = (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`
-      // ① 승인 근거 → Grant. 발급 자체가 승인 권한자 확인을 지난다 (OM §11.5·§11.6).
-      const issued = await runGrant('issue', undefined, { ...values, session, 'grant-id': grantId }, store, root, runtime)
+      const issued = await runGrant(
+        'issue',
+        undefined,
+        { ...values, session, 'grant-id': grantId, basis },
+        store,
+        root,
+        runtime,
+      )
       if (issued !== 0) return issued
-      // ② Grant → Executor → provider → read-back → audit. 한 번 쓰고 소진된다.
+      // ③ Grant → CLAIM → 재검수 → 실행 1회 → 되돌려 읽기 → 감사. 한 번 쓰고 소진된다.
       return runGrant('run', grantId, values, store, root, runtime)
     }
 
@@ -6067,6 +6292,18 @@ async function runCoordinationPublish(
   }))
   const workReference = typeof values.work === 'string' ? values.work : undefined
 
+  // **밖을 바꾸기 전에 계약을 집는다** (0.8.0 §O). 예전에는 게시가 성공한 **뒤에**
+  // CLAIM 했다 — 그 사이에 다른 Run 이 같은 계약으로 들어오면 같은 글이 두 번 나갈 수
+  // 있었다. 원자적 CLAIM 을 통과한 하나만 게시로 넘어간다. 게시가 실패하면 그 계약은
+  // 태워진다: 같은 승인으로 다시 시도하지 않는 것이 이 계약의 뜻이다.
+  const claimed = await applyTransition(store, 'grant', grantId, (g) =>
+    transitionGrant(g, 'CLAIMED', 'executor', { claimedBy: `cli-${process.pid}` }),
+  )
+  if (!claimed.ok) {
+    console.error(`${grantId} 를 집지 못했다 — 다른 Run 이 이미 집었거나 상태가 움직였다.`)
+    return 1
+  }
+
   const outcome = await publishOnce(
     {
       queryId,
@@ -6079,20 +6316,14 @@ async function runCoordinationPublish(
   )
 
   if (outcome.ok) {
-    // 한 번 쓴 계약은 다시 쓰이지 않는다 (OM §11.5 single_use). 게시가 실제로 나간
-    // 뒤에 옮긴다 — 먼저 옮기면 실패한 게시가 계약만 태운다.
+    // 한 번 쓴 계약은 다시 쓰이지 않는다 (OM §11.5 single_use).
     const consumedAt = new Date().toISOString()
-    const claimed = await applyTransition(store, 'grant', grantId, (g) =>
-      transitionGrant(g, 'CLAIMED', 'executor', { claimedBy: `cli-${process.pid}` }),
+    await applyTransition(store, 'grant', grantId, (g) =>
+      transitionGrant(g, 'EXECUTED', 'executor', {
+        resultRef: outcome.identity.objectId,
+        consumedAt,
+      }),
     )
-    if (claimed.ok) {
-      await applyTransition(store, 'grant', grantId, (g) =>
-        transitionGrant(g, 'EXECUTED', 'executor', {
-          resultRef: outcome.identity.objectId,
-          consumedAt,
-        }),
-      )
-    }
     const recorded = await recordPublication(coordinationLedger(store), outcome)
     if (values.json) {
       console.log(JSON.stringify({ publish: outcome, recorded: recorded.ok }, null, 2))
@@ -6104,6 +6335,16 @@ async function runCoordinationPublish(
     return 0
   }
 
+  // 집은 계약은 나가지 않았어도 소진된 것으로 닫는다 — 같은 승인으로 다시 시도하지
+  // 않기 위해서다. 무엇이 실패했는지는 History 에 남는다.
+  await applyTransition(store, 'grant', grantId, (g) => transitionGrant(g, 'INVALIDATED', 'executor'))
+  await store.appendHistory({
+    at: new Date().toISOString(),
+    actor: `cli-${process.pid}`,
+    kind: 'grant_invalidated',
+    ref: grantId,
+    detail: publishLine(outcome),
+  })
   if (values.json) console.log(JSON.stringify({ publish: outcome }, null, 2))
   else console.error(publishLine(outcome))
   return 1
@@ -6406,6 +6647,9 @@ async function runGrant(
         const forSession = await grants.issueForSession({
           grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
           sessionId: fromSession,
+          // 검수가 읽어 온 사실을 승인에 못 박는다 (0.8.0 §L). 없으면 없는 대로 둔다 —
+          // 없는 기준선을 지어내면 재검수가 아무것도 지키지 못한다.
+          ...(values.basis ? { basis: values.basis as ExecutionGrant['basis'] } : {}),
           issuedBy: values.as as string,
           channel: 'local',
           action: values.action as string,
@@ -6479,7 +6723,16 @@ async function runGrant(
         console.log(`EXECUTED — ${outcome.resultRef}`)
         return 0
       }
+      // 실패의 종류를 뭉개지 않는다 (0.8.0 §P) — 다음 행동이 저마다 다르다.
       console.error(`${outcome.reason}${'detail' in outcome ? `: ${outcome.detail}` : ''}`)
+      if (outcome.reason === 'UNCERTAIN') {
+        console.error('밖에 나갔는지 알 수 없다. 다시 실행하지 마라 — 먼저 원격을 읽어 확인하고,')
+        console.error('그 뒤에 사람이 새 Grant 를 낸다. 이 Grant 는 집힌 채로 남아 재사용되지 않는다.')
+      }
+      if (outcome.reason === 'NOT_VERIFIED') {
+        console.error(`나간 것: ${outcome.resultRef} — 그러나 되돌려 읽은 것이 기대와 다르다.`)
+        console.error('성공으로 적지 않는다. 원격을 직접 확인하라.')
+      }
       return 1
     }
 
@@ -6487,6 +6740,18 @@ async function runGrant(
       console.error(`Unknown grant command: ${command ?? '(none)'}\n\n${USAGE}`)
       return 2
   }
+}
+
+/**
+ * 이 작업이 가리키는 원격의 신원 (0.8.0 §K).
+ *
+ * **deny-list 가 아니다.** 검수가 "이 대상이 우리가 맡은 그 원격인가" 를 묻기 위한
+ * 기준점이고, 어긋나면 Agent 가 스스로 범위를 넓히는 대신 사람에게 올라간다.
+ * 결합이 여럿이면 고르지 않는다 — 고르는 순간 그것이 곧 조용한 범위 확장이다.
+ */
+function bindingIdentity(runtime: ResolvedRuntime | undefined, adapterId: string): string | undefined {
+  const declared = (runtime?.layers.profile.bindings ?? []).filter((binding) => binding.adapter === adapterId)
+  return declared.length === 1 ? declared[0]!.resource : undefined
 }
 
 /**

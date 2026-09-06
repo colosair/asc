@@ -10,7 +10,7 @@
 // 돌린다** — 설치될 물건 그대로가 아니면 이 Gate 는 아무것도 지키지 않는다.
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -41,10 +41,15 @@ const READY: ReadinessAxis[] = [
 ]
 
 describe('Execution Mode — 기록과 기본값', () => {
-  it('기록이 없으면 AUTO 다 — 조용히 보호를 푸는 쪽으로 기울지 않는다', async () => {
+  it('T-01 — 기록이 없으면 AUTO 가 아니다. 고른 적이 없다는 것까지 말한다', async () => {
+    // AUTO 는 사람이 고르고 readiness 를 통과한 결과로만 존재한다 (E-01). 기록이 없다는
+    // 사실은 그 둘 중 어느 것도 증명하지 않으므로, 그 자리에서 강제를 켜면 한 번도
+    // 검사되지 않은 enforcement 가 서는 것이다.
     const scope = new MemoryStateStore().scope('policy')
-    assert.equal((await readExecutionMode(scope)).mode, 'AUTO')
-    assert.equal(DEFAULT_EXECUTION_MODE, 'AUTO')
+    const state = await readExecutionMode(scope)
+    assert.equal(state.mode, 'MANUAL')
+    assert.equal(state.chosen, false, '기본값과 사람이 고른 MANUAL 은 다른 사실이다')
+    assert.equal(DEFAULT_EXECUTION_MODE, 'MANUAL')
   })
 
   it('정한 것은 그대로 읽힌다 — 누가 언제 정했는지까지', async () => {
@@ -52,7 +57,7 @@ describe('Execution Mode — 기록과 기본값', () => {
     const written = await writeExecutionMode(scope, 'MANUAL', 'controller-a', NOW)
     assert.equal(written.mode, 'MANUAL')
     const read = await readExecutionMode(scope)
-    assert.deepEqual(read, { mode: 'MANUAL', since: NOW, by: 'controller-a' })
+    assert.deepEqual(read, { mode: 'MANUAL', since: NOW, by: 'controller-a', chosen: true })
   })
 })
 
@@ -85,17 +90,20 @@ describe('E-01 — 나갈 길이 없으면 AUTO 가 아니다', () => {
 })
 
 describe('guard 는 mode 를 읽는다 (§69)', () => {
+  /**
+   * hook 을 실제 프로세스로 돌린다. **통과한 경우의 stderr 도 읽는다** — MANUAL 의 조언은
+   * 통과하면서 남기는 말이라, 실패 경로에서만 stderr 를 보면 그 말을 영영 검사하지 못한다.
+   */
   async function invokeHook(input: Record<string, unknown>): Promise<{ code: number; stderr: string }> {
     const dir = await tempDir('asc-mode-hook-')
     const script = join(dir, 'guard-hook.mjs')
     await writeFile(script, hookScript(), 'utf8')
-    try {
-      execFileSync('node', [script], { input: JSON.stringify(input), timeout: 10_000 })
-      return { code: 0, stderr: '' }
-    } catch (error) {
-      const failure = error as { status?: number; stderr?: Buffer }
-      return { code: failure.status ?? 1, stderr: failure.stderr?.toString() ?? '' }
-    }
+    const child = spawnSync(process.execPath, [script], {
+      input: JSON.stringify(input),
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+    return { code: child.status ?? 1, stderr: child.stderr ?? '' }
   }
 
   /** 관리 대상 세션 하나가 있는 프로젝트. mode 를 주면 그 mode 로 적는다. */
@@ -160,9 +168,22 @@ describe('guard 는 mode 를 읽는다 (§69)', () => {
     }
   })
 
-  it('mode 기록이 없으면 0.7 과 같이 막는다 — 조용한 안전 변경이 없다', async () => {
+  it('T-01 — mode 기록이 없으면 강제하지 않는다. 대신 그 사실을 말한다', async () => {
+    // 검사되지 않은 AUTO 는 만들지 않는다 (§B). ASC 가 꺼진 것이 아니다 — 일 관리·검수·
+    // 감사는 그대로 돌고, 이 자리에서 달라지는 것은 강제 라우팅 하나다.
     const cwd = await project()
-    assert.equal((await invokeHook(bash(cwd, 'git push origin main'))).code, 2)
+    const outcome = await invokeHook(bash(cwd, 'git push origin main'))
+    assert.equal(outcome.code, 0)
+    assert.match(outcome.stderr, /MANUAL/)
+  })
+
+  it('T-05 — MANUAL 에서 밖으로 나가는 쓰기에는 조언이 붙는다 (막지는 않는다)', async () => {
+    const cwd = await project('MANUAL')
+    const outcome = await invokeHook(bash(cwd, 'glab mr create --fill'))
+    assert.equal(outcome.code, 0)
+    // 검수는 Guard 가 아니라 Remote Review 의 일이다 — 그 자리를 그대로 가리킨다.
+    assert.match(outcome.stderr, /asc work publish --review/)
+    assert.match(outcome.stderr, /asc mode auto/)
   })
 })
 

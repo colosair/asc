@@ -83,6 +83,18 @@ export class GlabApiClient implements GitLabReader, GitLabWriter {
       return { ok: false, status: 0, data: null, error: String((error as Error).message ?? error).slice(0, 200) }
     }
   }
+
+  async put<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>> {
+    const fields = Object.entries(body).flatMap(([key, value]) =>
+      value === undefined ? [] : ['-f', `${key}=${String(value)}`],
+    )
+    try {
+      const stdout = await this.#run('glab', ['api', '--method', 'PUT', path.replace(/^\//, ''), ...fields])
+      return { ok: true, status: 200, data: JSON.parse(stdout) as T }
+    } catch (error) {
+      return { ok: false, status: 0, data: null, error: String((error as Error).message ?? error).slice(0, 200) }
+    }
+  }
 }
 
 /**
@@ -101,6 +113,14 @@ export class GlabApiClient implements GitLabReader, GitLabWriter {
  */
 export interface GitLabWriter {
   post<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>>
+  /**
+   * GitLab 의 merge 는 `PUT /merge_requests/:iid/merge` 다 (공식 계약).
+   *
+   * 예전에는 POST 로 보냈다. 그 경로는 승인이 끝난 뒤에 실패하고, 실패한 것이 정말 나가지
+   * 않았는지는 그 자리에서 알 수 없다 — 통로가 없는 것과 잘못된 통로로 부르는 것은 다르고,
+   * 후자가 더 나쁘다. 통로가 없으면 없다고 말할 수 있게 optional 로 둔다.
+   */
+  put?<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>>
 }
 
 export interface GitLabReader {
@@ -136,8 +156,20 @@ export class GitLabClient implements GitLabReader, GitLabWriter {
   }
 
   async post<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>> {
+    return this.#write('POST', path, body)
+  }
+
+  async put<T>(path: string, body: Record<string, unknown>): Promise<GitLabResponse<T>> {
+    return this.#write('PUT', path, body)
+  }
+
+  async #write<T>(
+    method: 'POST' | 'PUT',
+    path: string,
+    body: Record<string, unknown>,
+  ): Promise<GitLabResponse<T>> {
     const response = await this.#fetch(`${this.#baseUrl}${path}`, {
-      method: 'POST',
+      method,
       headers: {
         accept: 'application/json',
         'content-type': 'application/json',

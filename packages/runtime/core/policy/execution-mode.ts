@@ -39,20 +39,31 @@ export const ExecutionModeRecord = z.object({
 export type ExecutionModeRecord = z.infer<typeof ExecutionModeRecord>
 
 /**
- * 기록이 없으면 AUTO 다.
+ * 지금 이 workspace 의 실행 축. `chosen` 은 **사람이 골랐는가** 다.
  *
- * 0.7 까지 붙어 있던 workspace 는 전부 enforcement 가 켜진 상태로 돌았다. 기본값을
- * MANUAL 로 두면 그 workspace 들이 **말없이 보호가 풀린 채** 0.8 로 넘어온다 — 조용한
- * 안전 변경이야말로 이번 릴리스가 금지한 것이다 (Phase E).
- *
- * 이것이 "출구 없는 AUTO" 를 만들지 않는 이유는 §14 다: Guard 는 ASC control-plane 을
- * 절대 막지 않고, `asc mode manual` 은 언제나 실행 가능하다.
+ * 상태가 셋이 아니다 — mode 는 여전히 MANUAL·AUTO 둘이고, `chosen` 은 기록이 있느냐를
+ * 그대로 옮긴 값이다. 새 상태를 만들지 않으면서 "아직 정하지 않았다" 를 말할 수 있어야
+ * 화면이 사람에게 정확히 무엇을 물을지 정한다.
  */
-export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'AUTO'
+export type ExecutionModeState = ExecutionModeRecord & { chosen: boolean }
 
-export async function readExecutionMode(scope: ScopedStore): Promise<ExecutionModeRecord> {
+/**
+ * 기록이 없으면 AUTO 가 **아니다**.
+ *
+ * 처음에는 반대로 두었다: 0.7 workspace 가 말없이 보호를 잃지 않게 하려는 것이었다.
+ * 그 결정은 이 릴리스의 상위 계약과 충돌한다 — AUTO 는 사람이 고르고 readiness 를 통과한
+ * 결과로만 존재할 수 있고(E-01), 기록이 없다는 사실은 그 둘 중 어느 것도 증명하지 않는다.
+ * 기록 없이 AUTO 로 읽으면 readiness 를 한 번도 거치지 않은 enforcement 가 켜진다.
+ *
+ * 그래서 기록이 없는 workspace 는 hard enforcement 없이 돈다. ASC 가 꺼지는 것이 아니다 —
+ * 일 관리·결정권·검수·감사는 그대로 살아 있고, Guard 만 강제하지 않는다 (§F).
+ */
+export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'MANUAL'
+
+export async function readExecutionMode(scope: ScopedStore): Promise<ExecutionModeState> {
   const raw = await scope.get(EXECUTION_MODE_KEY)
-  return raw ? ExecutionModeRecord.parse(JSON.parse(raw)) : { mode: DEFAULT_EXECUTION_MODE }
+  if (!raw) return { mode: DEFAULT_EXECUTION_MODE, chosen: false }
+  return { ...ExecutionModeRecord.parse(JSON.parse(raw)), chosen: true }
 }
 
 export async function writeExecutionMode(
@@ -76,8 +87,11 @@ export async function writeExecutionMode(
 export const READINESS_AXES = [
   'control-plane',
   'controller',
+  'binding',
   'executor',
   'provider',
+  'review',
+  'verify',
   'guard',
   'host',
 ] as const
@@ -110,6 +124,16 @@ export type AutoReadiness = {
  *
  * **READY 가 아닌 것은 전부 막는다.** UNKNOWN 을 READY 로 뭉개면 그 판정이 곧 사람이
  * 나갈 길이 없는 AUTO 로 들어가는 근거가 된다 — 0.7.1 실측에서 실제로 일어난 일이다.
+ *
+ * 그리고 control-plane 하나로 끝내지 않는다. AUTO 는 "관리된 외부 쓰기 경로가 실제로
+ * 쓸 수 있는 상태" 를 뜻하므로, 그 경로의 모든 마디가 서 있어야 한다:
+ *
+ * ```text
+ * AUTO = control-plane usable
+ *        AND managed executor usable      (binding · executor · provider)
+ *        AND review/verify path usable    (검수 전 · 읽기 되돌림 후)
+ *        AND Guard usable
+ * ```
  */
 export function judgeAutoReadiness(observed: readonly ReadinessAxis[]): AutoReadiness {
   const order = new Map(READINESS_AXES.map((axis, index) => [axis, index]))

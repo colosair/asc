@@ -38,6 +38,15 @@ function runGuard(hook: string, home: string, payload: unknown): GuardResult {
 async function managedRuntime(root: string, physicalSessionId: string): Promise<void> {
   const dir = join(root, 'adapters', 'claude-code')
   await mkdir(dir, { recursive: true })
+  // 0.8.0 보정: 기록 없는 workspace 는 AUTO 가 아니다 (§B). 강제를 검사하려면 이 자리가
+  // AUTO 라고 적혀 있어야 한다 — guard 가 읽는 그 파일 형태 그대로 쓴다.
+  const policy = join(root, 'adapters', 'policy')
+  await mkdir(policy, { recursive: true })
+  await writeFile(
+    join(policy, 'execution-mode.json'),
+    JSON.stringify({ key: 'execution-mode', value: JSON.stringify({ mode: 'AUTO', since: NOW, by: 'controller-a' }) }),
+    'utf8',
+  )
   const binding = { logicalSessionId: 'S-20260826-01', provider: 'claude-code', physicalSessionId, updatedAt: NOW }
   await writeFile(
     join(dir, `runtime-binding-S-20260826-01.json`),
@@ -135,8 +144,8 @@ describe('B-46 Gate — guard가 역색인으로 workspace를 찾는다 (C-11 §
   })
 })
 
-describe('B-46 Gate — 조건부 fail-closed (C-11 §4)', () => {
-  it('등록됐는데 runtime을 읽지 못하면 보호 대상 명령을 막는다', async () => {
+describe('B-46 Gate — runtime 을 읽지 못하면 말은 하되 막지는 않는다 (0.8.0 §B)', () => {
+  it('실행 축을 확인할 수 없다는 사실을 말한다 — 고르지 않은 강제를 켜지 않는다', async () => {
     const { home, project, hook, cleanup } = await scratch()
     try {
       const id = newWorkspaceId()
@@ -151,9 +160,13 @@ describe('B-46 Gate — 조건부 fail-closed (C-11 §4)', () => {
         }),
       )
 
+      // 0.7 에서는 여기서 막았다. mode 가 그 runtime 안에 있으므로, 읽지 못한 상태의
+      // 차단은 **사람이 고른 적 없는 enforcement** 를 켜는 것이 된다 — 그래서 이제는
+      // 통과시키고 무엇이 깨졌는지 말한다. 조용히 넘어가지도 않는다.
       const result = runGuard(hook, home, push(project))
-      assert.equal(result.code, 2, '조용히 열리면 관리 대상의 외부 write가 그냥 나간다')
-      assert.match(result.stderr, /runtime을 읽지 못했다/)
+      assert.equal(result.code, 0)
+      assert.match(result.stderr, /runtime 을 읽지 못했다/)
+      assert.match(result.stderr, /asc status/)
     } finally {
       await cleanup()
     }
