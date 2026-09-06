@@ -118,6 +118,8 @@ describe('P0 — 제로베이스 경로 (CLI)', () => {
         HOME: join(base, 'home'),
         USERPROFILE: join(base, 'home'),
         ASC_HOME: ascHome,
+        // 기계 서비스는 HOME 으로 격리되지 않는다 — 검사가 진짜 등록을 남기지 않게 한다.
+        ASC_SERVICE: 'off',
         NO_COLOR: '1',
       },
       cleanup: () => rm(base, { recursive: true, force: true }),

@@ -4284,7 +4284,9 @@ async function serviceRuntime(): Promise<ServiceRuntimeResolution> {
   const stable = await globalRuntimeEntry()
   const check = await checkNodeRuntime(nodeRuntimeDeps())
   return resolveServiceRuntime({
-    runningEntry: fileURLToPath(import.meta.url),
+    // **checkout 은 등록물이 가리킬 자리가 아니다.** 지금 도는 것을 후보로 쓰는 것은 그것이
+    // 설치된 패키지일 때뿐이고, 아니면 전역 설치본만 남는다 — 없으면 등록하지 않는다.
+    runningEntry: runningFromInstalledPackage() ? fileURLToPath(import.meta.url) : '/dev/null/not-installed',
     runningNode: process.execPath,
     runningNodeVersion: process.version,
     ...(stable ? { stableEntry: stable } : {}),
