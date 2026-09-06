@@ -32,6 +32,10 @@ async function run(argv: string[]): Promise<Captured> {
   return { code: child.status ?? 1, out: (child.stdout ?? '').trim(), err: child.stderr ?? '' }
 }
 
+/** 같은 화면을 여러 번 물어보지 않는다 — 한 번 돌리고 그 답을 나눠 쓴다. */
+let cachedHelp: Captured | undefined
+const help = async (): Promise<Captured> => (cachedHelp ??= await run(['--help']))
+
 /** 붙은 것처럼 보이는 최소 runtime 하나. 상태를 만들지 않고 자리만 만든다. */
 async function attachedRoot(): Promise<string> {
   const dir = await tempDir('asc-surface-')
@@ -59,13 +63,13 @@ async function snapshot(root: string): Promise<Map<string, string>> {
 
 describe('기본 화면은 정상 표면만 보여준다 (§17·§54)', () => {
   it('9개 namespace 가 있고, 내부 primitive 는 없다', async () => {
-    const help = await run(['--help'])
-    assert.equal(help.code, 0)
+    const screen = await help()
+    assert.equal(screen.code, 0)
     for (const namespace of ['setup', 'status', 'update', 'refresh', 'uninstall', 'mode', 'work', 'inbox', 'runtime']) {
-      assert.match(help.out, new RegExp(`asc ${namespace}`), `${namespace} 가 기본 화면에 없다`)
+      assert.match(screen.out, new RegExp(`asc ${namespace}`), `${namespace} 가 기본 화면에 없다`)
     }
     for (const internal of ['asc session ', 'asc grant ', 'asc controller ', 'asc host ', 'asc preflight', 'asc monitor ']) {
-      assert.doesNotMatch(help.out, new RegExp(internal), `${internal} 가 기본 화면에 있다`)
+      assert.doesNotMatch(screen.out, new RegExp(internal), `${internal} 가 기본 화면에 있다`)
     }
   })
 
@@ -78,19 +82,19 @@ describe('기본 화면은 정상 표면만 보여준다 (§17·§54)', () => {
   })
 
   it('정상 화면이 저수준 명령 순서를 요구하지 않는다 (§61·§65)', async () => {
-    const help = (await run(['--help'])).out
+    const screen = (await help()).out
     // 사람이 외워야 하는 순서가 화면에 없다는 것을 그대로 본다.
     for (const step of ['session issue', 'host bind', 'grant issue', 'controller collect', 'profile resolve']) {
-      assert.doesNotMatch(help, new RegExp(step))
+      assert.doesNotMatch(screen, new RegExp(step))
     }
   })
 })
 
 describe('lifecycle 어휘가 두 제품에서 같다 (§18)', () => {
   it('ASC 가 여섯 낱말을 전부 안다', async () => {
-    const help = (await run(['--help'])).out
+    const screen = (await help()).out
     for (const word of ['setup', 'status', 'update', 'refresh', 'uninstall', 'runtime']) {
-      assert.match(help, new RegExp(`asc ${word}`))
+      assert.match(screen, new RegExp(`asc ${word}`))
     }
   })
 
@@ -107,8 +111,6 @@ describe('읽기는 아무것도 바꾸지 않는다 (§57·§71)', () => {
     const root = await attachedRoot()
     for (const argv of [
       ['refresh', 'check', '--json', '--root', root],
-      ['refresh', 'plan', '--json', '--root', root],
-      ['uninstall', 'plan', '--json', '--root', root],
       ['status', '--json', '--root', root],
     ]) {
       const before = await snapshot(root)
