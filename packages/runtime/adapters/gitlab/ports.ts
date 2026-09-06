@@ -94,6 +94,20 @@ abstract class GitLabBase {
  * 할 일 목록(todo)으로 증분을 받는다. GitHub의 알림과 같은 자리이고, 같은 한계를 갖는다 —
  * 지정이 빠지면 오지 않는다. 그래서 Inventory가 따로 있다.
  */
+/**
+ * 두 시각 중 늦은 것. ISO 문자열이지만 **문자열 비교를 하지 않는다** — 이 API 는 계정 설정에
+ * 따라 `+09:00` 과 `Z` 를 섞어 돌려주고, 그 둘은 사전순과 시간순이 다르다. 해석이 안 되는
+ * 값은 비교하지 않고 있는 쪽을 택한다.
+ */
+export function laterOf(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b
+  if (!b) return a
+  const ta = Date.parse(a)
+  const tb = Date.parse(b)
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return a >= b ? a : b
+  return tb > ta ? b : a
+}
+
 export class GitLabEventSource extends GitLabBase implements EventSource {
   override readonly id = 'gitlab-todo'
 
@@ -102,15 +116,20 @@ export class GitLabEventSource extends GitLabBase implements EventSource {
   }
 
   async drain(cursor: Cursor): Promise<EventBatch> {
-    const parsed = cursor ? (JSON.parse(cursor) as { since?: string; page?: string }) : {}
+    const parsed = cursor ? (JSON.parse(cursor) as { since?: string; page?: string; highWater?: string }) : {}
     const params = new URLSearchParams({ per_page: String(this.perPage) })
     if (parsed.page) params.set('page', parsed.page)
 
     const response = await this.client.get<TodoPayload[]>(`/todos?${params}`)
     if (!response.ok || !response.data) return { events: [], cursor }
 
+    // 이번 회차(페이지 전체)에서 본 가장 늦은 시각. **반환 순서를 믿지 않는다** — 이 목록은
+    // 최신순으로 오므로 마지막 항목이 가장 오래된 것이었고, 그것을 다음 기준선으로 삼자
+    // 커서가 옛 시각에 고정돼 같은 것을 매 회차 다시 읽었다. 기준선은 뒤로 가지 않는다.
+    let highWater = parsed.highWater ?? parsed.since
     const events: RawEvent[] = []
     for (const todo of response.data) {
+      highWater = laterOf(highWater, todo.updated_at)
       // 기준선 이전 것은 버린다. provider가 since를 지원하지 않아 여기서 거른다 —
       // 겹쳐 읽고 key로 중복을 거르는 편이 놓치는 것보다 싸다 (OM §10.5).
       if (parsed.since && todo.updated_at < parsed.since) continue
@@ -132,8 +151,13 @@ export class GitLabEventSource extends GitLabBase implements EventSource {
     }
 
     const next = response.nextPage
-      ? JSON.stringify({ ...(parsed.since ? { since: parsed.since } : {}), page: response.nextPage })
-      : JSON.stringify({ since: events.at(-1)?.detectedAt ?? parsed.since })
+      ? JSON.stringify({
+          ...(parsed.since ? { since: parsed.since } : {}),
+          page: response.nextPage,
+          ...(highWater ? { highWater } : {}),
+        })
+      : // 페이지를 다 돌았으면 기준선은 지금까지 본 최대값이다 — 이전 기준선보다 앞서지 않는다.
+        JSON.stringify(highWater ? { since: highWater } : {})
 
     return { events, cursor: next, ...(response.nextPage ? { hasMore: true } : {}) }
   }
