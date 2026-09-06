@@ -102,8 +102,13 @@ export class GitHubScm implements ScmPort {
    * 승인된 단일 행위. 아는 action만 수행하며, 그 외에는 아무것도 하지 않는다 —
    * Grant의 allowedWrites 검사(Executor)에 더해 Adapter도 자기 몫으로 닫아 둔다.
    */
+  /** 이 통로가 아는 행위. execute 의 분기와 같은 목록이어야 한다. */
+  supports(action: string): boolean {
+    return action === 'github.issue_comment.create'
+  }
+
   async execute(action: ExternalAction): Promise<ExternalActionResult> {
-    if (action.action !== 'github.issue_comment.create') {
+    if (!this.supports(action.action)) {
       return { ok: false, error: `unsupported action: ${action.action}` }
     }
     const ref = parseThreadRef(this.#expand(action.target))

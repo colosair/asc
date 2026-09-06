@@ -914,7 +914,7 @@ async function runParsedCommand(
   if (group === 'query') return runQuery(command, target, values, store, guard.runtime)
   if (group === 'progress') return runProgress(command, target, values, store)
   if (group === 'preflight') return runPreflight(values, store, guard.runtime)
-  if (group === 'grant') return runGrant(command, target, values, store, root)
+  if (group === 'grant') return runGrant(command, target, values, store, root, guard.runtime)
   if (group === 'monitor') return runMonitor(command, values, store, renderer, guard.runtime)
 
   if (group === 'runtime') return runRuntime(command, values, store, renderer, guard.runtime)
@@ -5609,6 +5609,7 @@ async function runGrant(
   values: Record<string, unknown>,
   store: MarkdownStateStore,
   root: string,
+  runtime?: ResolvedRuntime,
 ): Promise<number> {
   switch (command) {
     case 'issue': {
@@ -5616,6 +5617,23 @@ async function runGrant(
         console.error('Usage: asc grant issue REQ-0042 --action <key> --target <ref> --as <actor>')
         return 2
       }
+      // **할 수 없는 일을 승인시키지 않는다** (0.7.0 / F-3).
+      //
+      // 예전에는 아무 action 으로나 Grant 가 발급되고, 사람이 승인한 **뒤에** 실행에서
+      // "unsupported action" 이 나왔다. 승인의 의미가 그 자리에서 무너진다 — 사람은
+      // 나갈 것에 동의했는데 나갈 수 없는 것이었다.
+      const outward = await externalWritePort(runtime)
+      if (!outward) {
+        console.error('밖으로 내보낼 통로가 없다 — 이 행위를 수행할 결합이 Profile 에 없다.')
+        console.error('지금 무엇이 풀리는지: asc setup status')
+        return 2
+      }
+      if (outward.supports && !outward.supports(values.action as string)) {
+        console.error(`'${String(values.action)}' 를 수행할 수 있는 통로가 없다 (${outward.id}).`)
+        console.error('승인 뒤에 실패하는 것보다 지금 멈추는 편이 낫다 — 발급하지 않았다.')
+        return 2
+      }
+
       // 발급도 승인 권한자만 할 수 있다 — 외부로 나가는 권한이 여기서 만들어지기 때문이다
       const grants = new GrantService(store, new LocalIdentityBinding(await loadIdentityMap(root)))
       const issued = await grants.issue({
@@ -5642,19 +5660,24 @@ async function runGrant(
         console.error('Usage: asc grant run G-0001')
         return 2
       }
-      const token = await discoverToken()
-      if (!token) {
-        console.error('No GitHub token found. Set ASC_GITHUB_TOKEN, or run `gh auth login`.')
-        return 2
-      }
       const grant = await store.get('grant', target)
       if (!grant) {
         console.error(`${target} was not found.`)
         return 1
       }
-      // 이 한 번이 실제로 밖에 나간다. 계약이 지정한 대상·내용 그대로이며,
-      // 직전에 대상 상태를 다시 확인한다.
-      const scm = new GitHubScm({ client: new GitHubClient({ token }), defaultRepo: repoOf(grant.target) })
+      // **어느 provider 로 나갈지는 여기서 고르지 않는다** (C-09 · B-49).
+      //
+      // 예전에는 이 자리에서 GitHub client 를 직접 만들었다. 관측 경로는 진작 결합으로
+      // 풀리고 있었는데 실행 경로만 한 갈래에 묶여 있어서, 코드가 다른 곳에 있는
+      // 프로젝트에서는 승인이 끝난 **뒤에야** 실행할 통로가 없다는 것이 드러났다.
+      const scm = await externalWritePort(runtime)
+      if (!scm) {
+        console.error(
+          '밖으로 내보낼 통로가 없다 — Profile bindings 에 외부 쓰기를 제공하는 결합이 필요하다.',
+        )
+        console.error('지금 무엇이 풀리는지: asc setup status')
+        return 2
+      }
       const outcome = await new Executor({
         store,
         scm,
@@ -5673,6 +5696,39 @@ async function runGrant(
       console.error(`Unknown grant command: ${command ?? '(none)'}\n\n${USAGE}`)
       return 2
   }
+}
+
+/**
+ * 승인된 행위가 실제로 나갈 통로 (C-09 · OM §11.5).
+ *
+ * 조립은 Composition 의 몫이다 — 이 자리에서 provider 를 알면 provider 교체가 다시 CLI
+ * 수술이 된다. 없으면 `null` 이고, 없는 것을 있는 척하지 않는다.
+ */
+async function externalWritePort(runtime?: ResolvedRuntime): Promise<ScmPort | null> {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const adapters = monitorAdapters()
+  const declared = runtime?.layers.profile.bindings ?? []
+  const plan = await composeBindings({
+    context: { projectRoot, env: process.env },
+    adapters,
+    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+  })
+  const ports = await buildRuntimePorts({
+    plan,
+    roles: rolesFor(plan, declared),
+    repoRoot: projectRoot,
+    ...(runtime?.layers.profile.canonical.sources
+      ? {
+          sourceRefs: Object.fromEntries(
+            runtime.layers.profile.canonical.sources
+              .filter((source): source is typeof source & { ref: string } => typeof source.ref === 'string')
+              .map((source) => [source.id, { ref: source.ref }]),
+          ),
+        }
+      : {}),
+    endpointFor: (binding) => endpointOf(adapters, binding),
+  })
+  return ports.scm ?? null
 }
 
 /** `owner/repo#19` 에서 저장소만. 짧은 참조를 풀 때 쓴다. */
