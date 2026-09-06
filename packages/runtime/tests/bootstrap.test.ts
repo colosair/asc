@@ -151,7 +151,7 @@ describe('B-27 Gate — 감지는 결정이 아니다 (C-06 §2)', () => {
       profileId: 'pilot-local',
     })
     assert.deepEqual(plan.profile, { kind: 'GIVEN', id: 'pilot-local' })
-    assert.ok(plan.steps.includes('asc init --profile pilot-local'))
+    assert.ok(plan.steps.includes('asc setup --profile pilot-local'))
     // Profile은 정해졌지만 정책 질문은 남는다 — 찾아 주는 것과 정하는 것은 다르다
     assert.ok(plan.undecided.every((u) => !u.includes('어떤 Profile로 붙일지')))
   })
@@ -217,7 +217,7 @@ describe('B-27 Gate — 진입 프로토콜 (C-06 §3)', () => {
   it('asc skill이 순서를 담되 막힌 것을 대신 열지 않는다', () => {
     const text = skillText()
     assert.match(text, /ASC로 진행해/)
-    assert.match(text, /asc setup status/)
+    assert.match(text, /asc status/)
     assert.match(text, /a person chooses/)
     assert.match(text, /Do not open what is blocked/)
     assert.match(text, /The user does not need to know this sequence/)

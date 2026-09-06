@@ -59,6 +59,7 @@ import { readHeartbeat } from '../adapters/claude-code/observer.ts'
 import { workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
 import { applyHostReport, assessReadiness, probe, type CapabilityName } from '../adapters/claude-code/probe.ts'
 import {
+  controlPlaneAccess,
   defaultPaths,
   install,
   installReportLines,
@@ -175,11 +176,23 @@ import { EscalationLedger, escalationLines } from '../core/runtime/escalation.ts
 import { deriveExecutionState, executionLine } from '../core/runtime/execution-state.ts'
 import { buildFinalReport, renderFinalReport } from '../core/runtime/report.ts'
 import { FreezeLedger, freezeLines, judgeAction } from '../core/policy/remote-freeze.ts'
+import {
+  ExecutionMode,
+  enforcementOf,
+  judgeAutoReadiness,
+  modeLine,
+  readExecutionMode,
+  writeExecutionMode,
+  type AutoReadiness,
+  type ExecutionModeState,
+  type ReadinessAxis,
+} from '../core/policy/execution-mode.ts'
+import { reviewExternalAction, reviewLines, type ReviewOutcome } from '../core/execution/remote-review.ts'
 import type { ResolvedBinding } from '../core/binding/types.ts'
 import type { Adapter } from '../ports/adapter.ts'
 import type { ResolvedRuntime } from '../core/resolver/load.ts'
 import { SessionRuntime } from '../core/runtime/session.ts'
-import { Checkpoint, Handoff, SessionRole, type Session } from '../core/model/entities.ts'
+import { Checkpoint, Handoff, SessionRole, type ExecutionGrant, type Session } from '../core/model/entities.ts'
 import { archiveLock, bootstrapGuard, buildLock, compareLock, loadLayers, resolveRuntime } from '../core/resolver/load.ts'
 import { ProfileSourceError } from '../core/resolver/profile-source.ts'
 import { renderAscMd, renderControllerMd } from '../core/resolver/render.ts'
@@ -189,20 +202,58 @@ import { loadIdentityMap } from './identity-config.ts'
 
 const USAGE = `asc — Agent Session Control
 
+Lifecycle
+  asc setup                 make this machine and this project ready to use
+  asc status                what is set up, what is running, what is blocked
+  asc update                install the newest release and verify it
+  asc refresh               re-converge this runtime's own integration
+  asc uninstall             remove the product; your state stays
+
+Execution
+  asc mode                  who executes: MANUAL (you) or AUTO (ASC)
+  asc mode auto             turn on managed execution — refuses unless the path is usable
+  asc mode manual           step back to advisory. Recorded, with who said so
+
+Work
+  asc work start [WORK]     start or resume the work, inside a contract
+  asc work status [S-ID]    where it is right now
+  asc work publish          send the approved result outside
+  asc work publish --review read the target, the SHA and the binding — change nothing
+  asc work finish [S-ID]    hand off, close, collect — one command
+  asc work pause|resume|inspect [S-ID]
+
+Human decisions
+  asc inbox                 what is waiting for a person
+  asc inbox show <REQUEST_ID>
+  asc inbox decide <REQUEST_ID> <approve|revise|defer|dismiss|queue> --as <actor>
+
+Runtime
+  asc runtime status        which build is in use, and whether it observes
+  asc runtime use package | development <checkout>
+
+Options
+  --json          machine-readable output. stdout is a single JSON document
+  --as <actor>    who is deciding. Must be mapped as an approver
+  --root <path>   runtime directory (otherwise: registered workspace, then repo-local .asc)
+
+  asc help --advanced    the internal primitives these commands are built on
+`
+
+const ADVANCED_USAGE = `asc — advanced surface
+
+These are the primitives the public commands are built on. A healthy path does not
+require them: \`setup\` · \`status\` · \`work\` · \`inbox\` · \`mode\` cover normal use.
+They stay because recovery, diagnosis and scripting need them.
+
   asc proceed [--session <id>] [--work <WORK-ID>] [--goal <text>] [--json]
 
-  asc inbox list   [--all] [--priority P0|P1|P2] [--json]
-  asc inbox show   <REQUEST_ID> [--json]
   asc inbox trace  <REQUEST_ID> [--json]   # how it got here — an exploratory trace
   asc inbox digest [--flush] [--json]      # batched view (P0 stays separate)
   asc inbox latest [--priority P0|P1|P2] [--json]
-  asc inbox decide <REQUEST_ID> <approve|revise|defer|dismiss|queue> --as <actor>
-                   [--revision <text>] [--expect <version>]
 
   asc grant issue <REQUEST_ID> --action <key> --target <ref> --as <actor>
                   [--grant-id <id>] [--expires <iso>]
   asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>
-                        # what a session produced, sent out because a person said so
   asc grant run   <GRANT_ID> [--run-id <id>]
 
   asc monitor scan      [--backfill] [--as <controller>]   # fast path
@@ -222,13 +273,11 @@ const USAGE = `asc — Agent Session Control
   asc runtime service [status] [--json]    # the machine's persistent registration
   asc runtime service install|uninstall [--interval-min <n>]
   asc runtime stop                         # ask the background runtime to finish its pass
-  asc runtime status [--json]              # which build is in use, and whether it observes
-  asc runtime use package
-  asc runtime use development <checkout>   # run a built checkout instead
 
-  asc update                               # install the newest release and verify it
-  asc update check [--json]                # what is installed, what is published
-  asc update plan  [--json]                # what would be done, changing nothing
+  asc update check|plan [--json]           # what is installed, what is published
+  asc refresh check|plan [--json]          # what integration is behind, changing nothing
+  asc uninstall plan [--json]              # what would be removed, and what stays
+
   asc front [status] [--json]
   asc front open [--json]                  # a host session opened here — what is waiting
   asc escalate open <S-ID> --predicate <p>... --question <t> --blocked <node>...
@@ -242,39 +291,31 @@ const USAGE = `asc — Agent Session Control
   asc thaw
   asc workspace list
   asc workspace migrate [--force]
-  asc init [--profile <id>] [--preset <id>] [--install <path>]
-           [--scope local|project] [--workspace <W-id>]
-                        # without --profile: report what was detected, then stop
 
   asc setup status [--json]
   asc setup identity [--role controller|monitor|both] [--actor <channel:actor>]
-                        # 지금 이 사람을 승인 권한자로 세우고 재고정까지 한다
   asc setup plan   [--profile <id>] [--scope local|project] [--json]
-                        # says what it would change — changes nothing
   asc setup apply  [--profile <id>] [--scope local|project] [--json]
-  asc setup apply --json   # non-interactive apply. stdout is a single JSON document
 
   asc session plan  [--id <S-ID>] [--role <role>] [--goal <text>] [--boundary <glob>...]
                     [--criteria <text>...] [--owner <role>] [--provenance <f>=<STATUS>[:<src>]...]
                     [--json]        # is this draft issuable? changes nothing
   asc session issue <ID> --role <role> --goal <text> [--block <id>]
                          [--parent <S-ID>] [--issued-by <principal>]
-  asc session pause  <S-ID> --position <t> --next <t> [--physical <id>]
-                            [--judgment <t>] [--blocker <t>] [--risk <t>] [--evidence <ref>]
   asc session validate <target S-ID> --validator <validator S-ID> --result PASS|FAIL [--finding <t>]
   asc session audit  <S-ID>
   asc session report <S-ID> [--json]
   asc session decision <S-ID> --class <c> --selected <t> --why <t>... --evidence <ref>...
                               [--alternative <t>...] [--ownership <scope>...] [--verification <t>...]
-                        [--boundary <glob>...] [--exception <item>...]
-                        [--criteria <text>...] [--owner <role>]
-                        [--domain <decision-domain>...] [--authority <domain>=<role>...]
-                        [--dependency <text>...]
+                              [--boundary <glob>...] [--exception <item>...]
+                              [--criteria <text>...] [--owner <role>]
+                              [--domain <decision-domain>...] [--authority <domain>=<role>...]
+                              [--dependency <text>...]
   asc session start  <ID>
   asc session pause  <ID> --position <text> --next <text> [--done <task>...]
   asc session resume <ID>
   asc session done   <ID> --verified <text> --next <text> [--done <task>...]
-                        [--changed <path>...] [--unresolved <text>...] [--physical <id>]
+                          [--changed <path>...] [--unresolved <text>...] [--physical <id>]
   asc session list
 
   asc controller collect
@@ -295,7 +336,6 @@ const USAGE = `asc — Agent Session Control
   asc coordination [status] [--json]   # what was asked outside, and whether it reached anyone
   asc coordination publish --grant <G-ID> --query <ID> --title <text> --body-file <path>
                    [--audience <who>] [--known <objectId>] [--work <ref>] [--json]
-                        # publishing is an outward write — it goes through an approved grant
   asc coordination observe [--json]    # did anything come back on what we published
 
   asc progress show   [<S-ID>]
@@ -312,7 +352,6 @@ const USAGE = `asc — Agent Session Control
   asc host claude contract <S-ID>
 
 Options
-  --root <path>   runtime directory (otherwise: registered workspace, then repo-local .asc)
   --json          machine-readable output
   --as <actor>    who is deciding. Must be mapped as an approver
   --revision      what was changed, when approving with revisions
@@ -326,7 +365,7 @@ Options
   --write         actually write the artefacts (default: preview)
   --role          planner|researcher|implementer|verifier
   --goal          the single goal of this session
-  --work          work item to investigate before proposing a contract (asc proceed)
+  --work          work item to investigate before proposing a contract
   --actor         who you are, as <channel>:<actor> (asc setup identity)
   --boundary      write scope (must be narrower than the Profile's)
   --exception     SOFT DENY item allowed for this session only
@@ -338,10 +377,7 @@ Options
   --decision      does a person need to decide: none|later|now
   --verifier      independent verification state: none|running|pass|fail
   --terminal      final report — stays as the closing screen after collect
-
-decide assumes a person is operating it, and only checks that the name given with --as
-is registered as an approver. Approval is not permission to publish: anything reaching an
-external system goes out through a separate Execution Grant.`
+`
 
 /**
  * 지금 여기가 어느 ASC runtime인가. **모든 명령이 같은 문을 지난다** (C-11 §3, B-45).
@@ -541,7 +577,7 @@ const DECISION_ERROR: Record<string, string> = {
   NOT_FOUND: '요청을 찾지 못했다.',
   FORBIDDEN_ACTOR:
     '승인 권한자가 아니다. .asc/identities.json 에 `"이름": ["local:계정"]` 형태로 매핑을 추가하라 ' +
-    '(현재 상태는 `asc setup status`).',
+    '(현재 상태는 `asc status`).',
   NOT_ALLOWED_DECISION: '이 요청이 허용하지 않는 결정이다.',
   EXPIRED: '만료된 요청이다.',
   ALREADY_DECIDED: '이미 결정된 요청이다.',
@@ -584,7 +620,7 @@ function explainConfigError(error: unknown): string | null {
   const path = failure?.path ? ` (${failure.path})` : ''
   switch (failure?.code) {
     case 'ENOENT':
-      return `That profile is not there${path}. \`asc setup status\` lists what is.`
+      return `That profile is not there${path}. \`asc status\` lists what is.`
     case 'EISDIR':
       return `A profile has to be a file, and that is a directory${path}.`
     case 'EACCES':
@@ -797,6 +833,8 @@ function parseArgsOrThrow(argv: string[]) {
       expires: { type: 'string' },
       revision: { type: 'string' },
       expect: { type: 'string' },
+      advanced: { type: 'boolean', default: false },
+      review: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   })
@@ -809,10 +847,16 @@ async function runParsedCommand(
   argv: string[],
 ): Promise<number> {
   const [group, command, target, extra] = positionals
-  if (values.help || group === undefined) {
-    console.log(USAGE)
+  // 기본 화면은 정상 표면만 보여준다. 내부 primitive 는 물어본 사람에게만 (§54).
+  if (values.help || group === undefined || group === 'help') {
+    console.log(values.advanced || command === 'advanced' ? ADVANCED_USAGE : USAGE)
     return 0
   }
+
+  // 옛 이름은 그대로 돌되 새 이름을 말한다 (§58·§59). **명령이 실제로 돌기 전에** 말한다 —
+  // 뒤에서 말하면 그 명령이 다른 이유로 멈췄을 때 사람은 이름이 바뀐 것을 끝내 모른다.
+  const renamed = RENAMED[group === 'progress' && command === 'show' ? 'progress show' : group]
+  if (renamed) console.error(`Deprecated. Use \`${renamed}\`.`)
 
   // **지원 하한을 먼저 답한다** (C-14 §3). `engines` 는 npm에게 하는 말이라 기본값에서
   // 경고로만 나가고, 그러면 "경고 뒤에 그래도 돌아감"이 된다 — 사용자는 자기가 지원
@@ -850,6 +894,8 @@ async function runParsedCommand(
   // 기계 수준 명령과 같은 자리에 둔다.
   const machineLevelRuntime =
     group === 'update' ||
+    // 제품을 걷어내는 일도 갈아 끼우는 일과 같다 — 없애려는 그 build 로 넘기지 않는다.
+    group === 'uninstall' ||
     (group === 'runtime' &&
     (command === 'use' ||
       command === 'status' ||
@@ -861,7 +907,6 @@ async function runParsedCommand(
     const redispatched = await redispatchIfNeeded(argv)
     if (redispatched !== null) return redispatched
   }
-  if (group === 'init') return runInit(values)
 
   if (group === 'workspace') return runWorkspace(command, values)
 
@@ -879,6 +924,21 @@ async function runParsedCommand(
   // 갈아 끼우는 일은 붙은 프로젝트와 무관하다 — 어느 자리에서 쳐도 같은 답이어야 한다.
   if (group === 'update') return runUpdate(command, values)
 
+  // 이 runtime 이 소유한 integration 만 지금 상태로 되맞춘다. 버전은 그대로다.
+  if (group === 'refresh') return runRefresh(command, values)
+
+  // 제품과 제품이 심은 것을 걷어낸다. 사용자 상태는 남는다.
+  if (group === 'uninstall') return runUninstall(command, values)
+
+  // 첫 진단 표면. 붙지 않은 자리에서도 답해야 한다.
+  if (group === 'status') return runStatus(values)
+
+  // `asc init` 의 자리는 `asc setup` 이 이어받았다. 옛 이름은 두 minor 동안 그대로 답한다 —
+  // **하던 일을 그대로 하면서** 새 이름을 말한다 (§58). 같은 이름에 다른 동작을 넣으면
+  // 그것은 alias 가 아니라 조용한 계약 변경이다: `asc init --profile <id>` 는 이 저장소를
+  // 붙이는 명령이고, `asc setup` 은 기계까지 준비시키는 더 넓은 명령이다.
+  if (group === 'init') return runInit(values)
+
   // setup은 **붙기 전에도** 답을 줘야 한다. 아래 discoverRoot 실패는 exit 2로 끊는데,
   // 그러면 "아직 안 붙었다"를 확인하려고 부른 명령이 안 붙었다는 이유로 죽는다.
   if (group === 'setup') return runSetup(command, values, entry)
@@ -892,7 +952,7 @@ async function runParsedCommand(
   // 순서가 뒤집힌다. 나머지 profile 명령은 아래 attach 경로에 그대로 남는다.
   if (group === 'profile' && command === 'adopt') return runProfileAdopt(values, entry)
 
-  if (!['inbox', 'grant', 'monitor', 'runtime', 'front', 'coordination', 'freeze', 'thaw', 'escalate', 'profile', 'session', 'controller', 'proceed', 'progress', 'preflight', 'closure', 'query'].includes(group)) {
+  if (!['inbox', 'grant', 'monitor', 'runtime', 'front', 'coordination', 'freeze', 'thaw', 'escalate', 'profile', 'session', 'controller', 'proceed', 'progress', 'preflight', 'closure', 'query', 'mode', 'work'].includes(group)) {
     console.error(`Unknown command: ${group}\n\n${USAGE}`)
     return 2
   }
@@ -910,16 +970,32 @@ async function runParsedCommand(
 
   if (group === 'profile') return runProfile(command, values, root)
 
+  // 실행을 누가 하는가 (Axis C). Agent Management 도 Decision Authority 도 바꾸지 않는다.
+  //
+  // **lock drift 앞에서도 답해야 한다** (E-02·§16). enforcement 를 낮추는 공식 출구가
+  // 설정이 어긋났다는 이유로 막히면 그것이 곧 출구 없는 AUTO 다. 그래서 아래 bootstrap
+  // 문보다 앞에 선다 — 권한 판정은 이 명령 안에서 Core 가 그대로 한다.
+  if (group === 'mode') return runMode(command, values, store, root, await attachedRuntime(root))
+
   // attach된 프로젝트라면 Run을 시작하기 전에 지금 설정이 lock과 같은지 본다 (OM §4.9)
   const guard = await checkBootstrap(root)
   if (guard.code !== 0) return guard.code
 
-  if (group === 'proceed') return runProceed(values, store, root, guard.runtime)
+  // 정상 작업 표면. 안쪽 단계는 그대로 남고, 사람이 그 순서를 외우지 않는다.
+  if (group === 'work') return runWork(command, target, values, store, root, guard.runtime)
+
+  if (group === 'proceed') {
+    return withDeprecation('asc work start', values, () => runProceed(values, store, root, guard.runtime))
+  }
   if (group === 'session') return runSession(command, target, values, store, guard.runtime)
   if (group === 'controller') return runController(command, values, store, guard.runtime)
   if (group === 'closure') return runClosure(command, target, values, store)
   if (group === 'query') return runQuery(command, target, values, store, guard.runtime)
-  if (group === 'progress') return runProgress(command, target, values, store)
+  if (group === 'progress') {
+    return command === 'show'
+      ? withDeprecation('asc work status', values, () => runProgress(command, target, values, store))
+      : runProgress(command, target, values, store)
+  }
   if (group === 'preflight') return runPreflight(values, store, guard.runtime)
   if (group === 'grant') return runGrant(command, target, values, store, root, guard.runtime)
   if (group === 'monitor') return runMonitor(command, values, store, renderer, guard.runtime)
@@ -938,7 +1014,9 @@ async function runParsedCommand(
   // 원격을 얼린다·녹인다. 로컬 작업은 얼리지 않는다 (지시 §27).
   if (group === 'freeze' || group === 'thaw') return runFreeze(group, command, values, store)
 
-  switch (command) {
+  // 남은 것은 inbox 다. 이름만 치면 목록이다 — 사람이 물은 것은 "무엇이 기다리는가" 이고,
+  // 그 답을 얻으려고 하위 명령을 하나 더 외우게 하지 않는다 (§49).
+  switch (command ?? 'list') {
     case 'list': {
       const items = await operator.list({ all: Boolean(values.all), ...(priority ? { priority } : {}) })
       console.log(values.json ? JSON.stringify(items, null, 2) : renderer.renderList(items).text)
@@ -1367,7 +1445,7 @@ async function runInit(values: Record<string, unknown>): Promise<number> {
   // 이 출력은 지나가면 끝이므로 다시 보는 법도 함께 알린다 (B-21).
   console.log(`\n${renderSetup(await inspectSetup(ascRoot))}`)
   console.log('\nAttached. Issue the first session with `asc session issue`.')
-  console.log('You can see this summary again any time with `asc setup status`.')
+  console.log('You can see this summary again any time with `asc status`.')
   return 0
 }
 
@@ -1528,7 +1606,10 @@ async function runSetup(
   if (command === 'plan' || command === 'apply') return runSetupLifecycle(command, values, entry)
   if (command === 'identity') return runSetupIdentity(values)
   if (values.agent) return runSetupLifecycle('apply', values, entry)
-  if (command !== undefined && command !== 'status') {
+  // `asc setup` 은 **준비시키는** 명령이다 (§19). 진단은 `asc status` 가 맡는다 —
+  // 같은 이름이 어제는 보고 오늘은 바꾸는 것이면 사람이 둘 중 무엇인지 매번 확인해야 한다.
+  if (command === undefined) return runSetupLifecycle('apply', values, entry)
+  if (command !== 'status') {
     console.error(`Unknown setup command: ${command}\n\n${USAGE}`)
     return 2
   }
@@ -1959,7 +2040,7 @@ async function jamVersion(projectRoot: string): Promise<string | undefined> {
  * `npm` 을 shim으로 부르지 않는다.
  *
  * Windows에서 `npm` 은 `npm.cmd` 이고, Node는 보안 수정 이후 shell 없이 `.cmd` 를 실행하지
- * 않는다 — 그대로 두면 `asc setup status` 가 전역 설치를 조회하지 못하고 "설치 안 됨"으로
+ * 않는다 — 그대로 두면 `asc status` 가 전역 설치를 조회하지 못하고 "설치 안 됨"으로
  * 잘못 답한다. shell을 켜는 것은 답이 아니다(인자가 escape 없이 이어붙는다). npm의 진입
  * JS를 찾아 지금 도는 node로 직접 돌리면 세 OS에서 같은 실행 경로가 된다.
  *
@@ -2036,7 +2117,7 @@ async function runSetupIdentity(values: Record<string, unknown>): Promise<number
   // drift 때문에 profile 을 못 읽어 영영 못 닫는다.
   const attachedProfile = (values.profile as string | undefined) ?? (await lockedProfileId(root))
   if (!attachedProfile) {
-    console.error('붙어 있는 Profile 을 알 수 없다 — `asc setup status` 를 보고, 필요하면 --profile 로 지목하라.')
+    console.error('붙어 있는 Profile 을 알 수 없다 — `asc status` 를 보고, 필요하면 --profile 로 지목하라.')
     return 1
   }
 
@@ -4400,6 +4481,708 @@ const serviceInterval = (values: Record<string, unknown>): number =>
  *
  * 순서는 계획이 정하고(`planUpdate`), 여기서는 그대로 실행한다.
  */
+/**
+ * 옛 이름으로 들어온 명령. **하던 일은 그대로 하고**, 새 이름을 알려 준다 (§58·§59).
+ *
+ * `--json` 은 문서 하나라는 계약이 있다 — 그래서 안내를 그 문서 **안에** 넣는다.
+ * 사람에게는 stderr 한 줄이다. stdout 은 옛 형태 그대로 남아야 기존 스크립트가 안 깨진다.
+ */
+async function withDeprecation(
+  replacement: string,
+  values: Record<string, unknown>,
+  run: () => Promise<number>,
+): Promise<number> {
+  if (!values.json) return run()
+  const captured: string[] = []
+  const log = console.log
+  console.log = (...parts: unknown[]) => void captured.push(parts.join(' '))
+  let code: number
+  try {
+    code = await run()
+  } finally {
+    console.log = log
+  }
+  const text = captured.join('\n')
+  let document: unknown
+  try {
+    document = JSON.parse(text)
+  } catch {
+    document = undefined
+  }
+  if (document !== undefined && document !== null && !Array.isArray(document) && typeof document === 'object') {
+    console.log(JSON.stringify({ ...(document as Record<string, unknown>), deprecated: true, replacement }, null, 2))
+  } else if (text) {
+    // 문서 하나가 아니면 형태를 바꾸지 않는다 — 안내는 이미 stderr 로 나갔다.
+    console.log(text)
+  }
+  return code
+}
+
+/** 옛 이름 → 새 이름. 두 minor 동안 여기 남는다 (§58). */
+const RENAMED: Record<string, string> = {
+  init: 'asc setup',
+  proceed: 'asc work start',
+  'progress show': 'asc work status',
+}
+
+/**
+ * AUTO 로 갈 수 있는지 판정할 재료를 **이미 관측되는 사실에서** 모은다 (§8).
+ *
+ * 새 health 저장소를 만들지 않는다. 여기 있는 것은 전부 다른 명령이 이미 보여 주는 것이고,
+ * 이 함수는 그것을 한 판정에 모으기만 한다.
+ */
+async function observeReadiness(root: string | null, runtime?: ResolvedRuntime): Promise<ReadinessAxis[]> {
+  // ① 관리된 쓰기 경로가 조립되는가. 없으면 AUTO 는 막기만 하고 내보내지는 못하는 mode 다.
+  //    **설정 파일이 있다는 것으로 답하지 않는다** — Composition 이 실제로 만든 Port 가 근거다.
+  const outward = root ? await composedPorts(runtime).then((ports) => ports.scm ?? null).catch(() => null) : null
+  const axes: ReadinessAxis[] = [
+    outward
+      ? { axis: 'executor', state: 'READY', detail: outward.id }
+      : { axis: 'executor', state: 'MISSING', detail: 'no binding provides an outward write path' },
+  ]
+
+  // ② 막을 것을 실제로 막을 수 있는가. hook 이 없으면 AUTO 는 이름뿐이다.
+  const host = await verifyInstall(hostPaths())
+  axes.push({
+    axis: 'guard',
+    state:
+      host.status === 'INSTALLED_CURRENT'
+        ? 'READY'
+        : host.hookRegistered
+          ? 'DEGRADED'
+          : 'MISSING',
+    detail: host.status,
+  })
+
+  // ③ 그 상태에서 사람이 ASC 를 계속 부를 수 있는가 — 0.7.1 이 갇혔던 자리다.
+  const access = await controlPlaneAccess(hostPaths())
+  axes.push({
+    axis: 'control-plane',
+    state: access.denied ? 'BLOCKED_BY_HOST' : access.allowed ? 'READY' : 'MISSING',
+    ...(access.detail ? { detail: access.detail } : {}),
+  })
+  return axes
+}
+
+/** provider 에게 "이걸 할 수 있는가" 를 물을 때 쓰는 행위 목록. 화면 표시용이다. */
+const EXTERNAL_ACTIONS = [
+  'git.push',
+  'coordination.publish',
+  'gitlab.mr.create',
+  'gitlab.mr.merge',
+  'gitlab.note.create',
+  'gitlab.issue.update',
+  'github.issue_comment.create',
+] as const
+
+/**
+ * `asc status` — 처음 묻는 자리 (§21·§22).
+ *
+ * **새 SSOT 를 만들지 않는다.** 여기 나오는 사실은 전부 다른 곳이 이미 아는 것이고,
+ * 이 명령은 그것들을 한 화면에 모은다. 그리고 증거보다 강하게 말하지 않는다:
+ * 붙어 있다는 것이 건강하다는 뜻이 아니고, AUTO 라는 것이 나갈 길이 있다는 뜻이 아니다.
+ */
+async function runStatus(values: Record<string, unknown>): Promise<number> {
+  const resolution = await resolveRoot(process.cwd(), values.root as string | undefined)
+  const root = resolution.kind === 'UNRESOLVED' ? null : resolution.root
+  const setup = root
+    ? await inspectSetup(root)
+    : assessSetup({
+        attachment: 'UNATTACHED',
+        hasApprovers: false,
+        hasControllerIdentities: false,
+        hasMonitorIdentities: false,
+        hasScmToken: await hasToken(),
+      })
+  const runtime = root ? await attachedRuntime(root) : undefined
+  const host = await verifyInstall(hostPaths())
+  const selection = await readRuntimeSelection(ascHome())
+  const build = await resolveRuntimeTarget(selection)
+  const service = await serviceHealth(values)
+  const background = await backgroundHere(values)
+
+  const store = root ? new MarkdownStateStore(root) : null
+  const mode = store ? await readExecutionMode(store.scope('policy')) : null
+  const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
+  // 밖을 읽을 수 있는가 · 밖에 쓸 수 있는가. 두 답 모두 조립 결과에서 나온다.
+  const ports = root ? await composedPorts(runtime).catch(() => null) : null
+  const external = {
+    read: ports?.eventSource?.id ?? ports?.inventory?.id ?? null,
+    write: ports?.scm
+      ? {
+          id: ports.scm.id,
+          // 할 수 있는 행위와, 그 중 되돌려 읽을 수 있는 행위. 둘은 다른 사실이고,
+          // 화면이 그것을 뭉개면 사람이 확인되지 않는 쓰기를 확인된 것으로 읽는다.
+          actions: EXTERNAL_ACTIONS.filter((action) => ports.scm!.supports?.(action) ?? false),
+          verifiable: EXTERNAL_ACTIONS.filter((action) => ports.scm!.verifies?.(action) ?? false),
+        }
+      : null,
+    unavailable: ports?.unavailable ?? [],
+  }
+  const sessions = store
+    ? (await store.list('session')).filter((session) => session.status === 'ACTIVE' || session.status === 'PAUSED')
+    : []
+  const waiting = store ? await new LocalOperator({ store }).list({}) : []
+
+  // 무엇이 지금 걸려 있는가. 사실에서만 뽑는다 — 여기서 추측을 만들지 않는다.
+  const degraded: string[] = []
+  if (setup.attachment !== 'READY' && root) degraded.push(`attachment ${setup.attachment}`)
+  if (host.status !== 'INSTALLED_CURRENT') degraded.push(`host integration ${host.status}`)
+  if (mode?.mode === 'AUTO' && !readiness.ready) {
+    for (const axis of readiness.blocking) degraded.push(`AUTO ${axis.axis} ${axis.state}`)
+  }
+  if (service?.action === 'install') degraded.push('this machine has no persistent registration')
+
+  const next = ((): string => {
+    if (!root) return 'asc setup'
+    if (setup.attachment === 'LOCK_DRIFT') return 'asc setup — the configuration moved away from the lock'
+    if (host.status !== 'INSTALLED_CURRENT' && host.status !== 'INSTALLED_MODIFIED') return 'asc refresh'
+    if (mode?.mode === 'AUTO' && !readiness.ready) {
+      return 'asc mode manual — or fix what AUTO needs, then `asc mode auto`'
+    }
+    if (waiting.length > 0) return 'asc inbox'
+    if (sessions.length > 0) return `asc work status ${sessions[0]!.id}`
+    return 'asc work start <WORK>'
+  })()
+
+  if (values.json) {
+    console.log(
+      JSON.stringify(
+        {
+          version: RELEASE_VERSION,
+          runtime: resolution,
+          build: 'code' in build ? { error: build } : build,
+          installation: host.status,
+          setup,
+          executionMode: mode ? { mode: mode.mode, chosen: mode.chosen } : null,
+          autoReadiness: { ready: readiness.ready, axes: readiness.axes },
+          external,
+          work: sessions.map((session) => ({ id: session.id, status: session.status, role: session.role })),
+          awaitingHuman: waiting.length,
+          ...(service ? { service } : {}),
+          ...(background ? { background } : {}),
+          degraded,
+          nextAction: next,
+        },
+        null,
+        2,
+      ),
+    )
+    return 0
+  }
+
+  console.log(`asc ${RELEASE_VERSION}`)
+  if (!('code' in build)) console.log(runtimeSelectionLine(build))
+  console.log(`Installation: ${host.status}`)
+  console.log(resolutionLine(resolution))
+  console.log(renderSetup(setup))
+  console.log('')
+  console.log(
+    `Execution Mode: ${mode ? `${mode.mode}${mode.chosen ? '' : ' (never chosen — nothing is being enforced)'}` : '(not attached)'}`,
+  )
+  // AUTO 는 HITL 의 반대가 아니다 — 실행을 누가 하느냐일 뿐이라는 것을 화면이 말한다.
+  console.log('  Mode decides who executes. It never decides what a person must approve.')
+  for (const axis of readiness.axes) {
+    console.log(`  ${axis.state.padEnd(16)} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
+  }
+  console.log(readiness.ready ? '  AUTO READY' : '  AUTO NOT AVAILABLE')
+  if (root) {
+    console.log('')
+    console.log(`External read:  ${external.read ?? 'none assembled'}`)
+    console.log(
+      `External write: ${external.write ? `${external.write.id} — ${external.write.actions.join(', ') || 'no known action'}` : 'none assembled'}`,
+    )
+    if (external.write) {
+      console.log(`  read-back available for: ${external.write.verifiable.join(', ') || 'nothing'}`)
+    }
+    for (const reason of external.unavailable.slice(0, 3)) console.log(`  ${reason}`)
+  }
+  console.log('')
+  if (sessions.length > 0) {
+    console.log('Work in progress:')
+    for (const session of sessions) console.log(`  ${session.id} ${session.status} — ${session.goal ?? ''}`)
+  } else if (root) {
+    console.log('Work in progress: none')
+  }
+  if (waiting.length > 0) console.log(`Waiting for a person: ${waiting.length} (asc inbox)`)
+  if (service) console.log(`Background: ${service.line}`)
+  if (background) for (const line of renderBackground(background)) console.log(line)
+  if (degraded.length > 0) {
+    console.log('')
+    console.log('Degraded:')
+    for (const reason of degraded) console.log(`  - ${reason}`)
+  }
+  console.log('')
+  console.log(`Next: ${next}`)
+  // 진단이지 실패가 아니다 — 막힌 것이 있어도 0이다.
+  return 0
+}
+
+/**
+ * `asc mode` — 실행을 누가 하는가 (Axis C).
+ *
+ * 이 명령이 바꾸는 것은 **실행 경로 하나**다. 세션의 주인·범위·진행도, 무엇을 사람이
+ * 결정해야 하는지도 바꾸지 않는다 (AM-02 · H-01 · H-02).
+ */
+async function runMode(
+  command: string | undefined,
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  root: string,
+  runtime?: ResolvedRuntime,
+): Promise<number> {
+  const scope = store.scope('policy')
+  const current = await readExecutionMode(scope)
+  const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
+
+  const show = (state: ExecutionModeState, extra: Record<string, unknown> = {}): void => {
+    if (values.json) {
+      console.log(
+        JSON.stringify(
+          {
+            mode: state.mode ?? null,
+            chosen: state.chosen,
+            ...(state.degraded ? { degraded: state.degraded } : {}),
+            enforcement: enforcementOf(state),
+            autoReadiness: { ready: readiness.ready, axes: readiness.axes },
+            ...extra,
+          },
+          null,
+          2,
+        ),
+      )
+      return
+    }
+    console.log(modeLine(state))
+    for (const axis of readiness.axes) {
+      console.log(`  ${axis.state.padEnd(16)} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
+    }
+    console.log(readiness.ready ? '  AUTO READY' : '  AUTO NOT AVAILABLE')
+    for (const [key, value] of Object.entries(extra)) console.log(`${key}: ${String(value)}`)
+  }
+
+  if (command === undefined || command === 'status') {
+    show(current)
+    return 0
+  }
+
+  if (command !== 'manual' && command !== 'auto') {
+    console.error(`Unknown mode: ${command} — use \`asc mode manual\` or \`asc mode auto\`.`)
+    return 2
+  }
+  const wanted: ExecutionMode = command === 'auto' ? 'AUTO' : 'MANUAL'
+
+  if (wanted === 'AUTO') {
+    // E-01 — 나갈 길이 실제로 열려 있을 때만 켠다. 하나라도 아니면 **지금 mode 를 그대로 둔다**.
+    if (!readiness.ready) {
+      if (values.json) {
+        console.log(
+          JSON.stringify(
+            {
+              mode: current.mode ?? null,
+              chosen: current.chosen,
+              requested: 'AUTO',
+              applied: false,
+              autoReadiness: { ready: false, axes: readiness.axes },
+            },
+            null,
+            2,
+          ),
+        )
+      } else {
+        console.error('AUTO is not available — the approved execution path is not usable here:')
+        for (const axis of readiness.blocking) {
+          console.error(`  ${axis.state} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
+        }
+        console.error(`Staying in ${current.mode ?? 'the current state'}. Nothing was changed.`)
+      }
+      return 1
+    }
+    const record = await writeExecutionMode(scope, 'AUTO', values.as as string | undefined)
+    await store.appendHistory({
+      at: record.since ?? new Date().toISOString(),
+      actor: (values.as as string | undefined) ?? 'unattributed',
+      kind: 'execution_mode',
+      ref: 'execution-mode',
+      detail: `${current.mode ?? current.degraded ?? 'unknown'} → AUTO`,
+    })
+    show({ ...record, chosen: true }, { applied: 'true' })
+    return 0
+  }
+
+  // MANUAL 로 내려가는 것은 **막지 않는다**.
+  //
+  // 이전 회차에는 여기에 Request → Inbox → 승인 → 소진을 세워 뒀다. 그것은 같은 셸을
+  // 쥔 Agent 를 막으려는 장치였는데, 같은 셸이면 `asc inbox decide` 도 칠 수 있다 —
+  // 실제로 그 안내를 우리가 화면에 찍어 주고 있었다. 막지 못하는 것을 막는 척하면서
+  // 사람에게만 세 걸음을 물리는 구조였다. ASC 의 위협 모델은 "협조적이지만 실수하는
+  // Agent" 이고, 적대적 Agent 로부터 ASC 자신을 지키는 일은 Host/OS 신뢰 경계의 몫이다.
+  //
+  // 대신 **크게 남긴다**: 누가 그렇게 했다고 말하는지, 언제 바뀌었는지가 기록에 남고
+  // 화면에 나온다. 실수하는 Agent 에게 필요한 것은 잠금이 아니라 드러남이다.
+  const record = await writeExecutionMode(scope, 'MANUAL', values.as as string | undefined)
+  await store.appendHistory({
+    at: record.since ?? new Date().toISOString(),
+    actor: (values.as as string | undefined) ?? 'unattributed',
+    kind: 'execution_mode',
+    ref: 'execution-mode',
+    detail: `${current.mode ?? current.degraded ?? 'unknown'} → MANUAL`,
+  })
+  show({ ...record, chosen: true }, { applied: 'true' })
+  return 0
+}
+
+/**
+ * `asc refresh` — 버전은 그대로 두고, 이 runtime 이 소유한 integration 만 지금 상태로
+ * 되맞춘다 (§26·§27).
+ *
+ * ```text
+ * refresh != setup        Profile·workspace·identity 를 다시 추론하지 않는다
+ * refresh != repair-all   session·binding·grant·inbox 를 건드리지 않는다
+ * refresh != reset        지우고 다시 만들지 않는다
+ * ```
+ *
+ * 그래서 이 함수가 부르는 것은 둘뿐이다: host 설치물, 기계 등록물.
+ */
+async function runRefresh(command: string | undefined, values: Record<string, unknown>): Promise<number> {
+  if (command !== undefined && command !== 'check' && command !== 'plan') {
+    console.error(`Unknown refresh command: ${command}\n\n${USAGE}`)
+    return 2
+  }
+  const host = await verifyInstall(hostPaths())
+  const access = await controlPlaneAccess(hostPaths())
+  const service = await serviceHealth(values)
+
+  const steps: string[] = []
+  if (host.status !== 'INSTALLED_CURRENT') steps.push(`host integration (${host.status})`)
+  if (!access.allowed && !access.denied) steps.push('control-plane allow rule')
+  if (service && (service.action === 'reinstall' || service.action === 'update')) steps.push(`service registration (${service.action})`)
+
+  if (command === 'check' || command === 'plan') {
+    if (values.json) {
+      console.log(JSON.stringify({ version: RELEASE_VERSION, host: host.status, controlPlane: access, ...(service ? { service } : {}), steps }, null, 2))
+    } else {
+      for (const line of installReportLines(host)) console.log(line)
+      if (service) console.log(service.line)
+      console.log(steps.length === 0 ? 'Nothing to converge.' : `Would converge: ${steps.join(', ')}`)
+    }
+    return 0
+  }
+
+  let worst = 0
+  // 사람이 고친 설치물은 덮지 않는다 — 그 규칙은 host install 이 그대로 진다 (L-5).
+  worst = Math.max(worst, await runHost('claude', 'install', undefined, { ...values, json: false }))
+  worst = Math.max(worst, await convergeService(values))
+
+  // 마지막은 언제나 확인이다. 계획했던 것이 실제로 사라졌는가.
+  const after = await verifyInstall(hostPaths())
+  for (const line of installReportLines(after)) console.log(line)
+  if (after.status !== 'INSTALLED_CURRENT' && after.status !== 'INSTALLED_MODIFIED') {
+    console.error('refresh: the host integration is still not current.')
+    return 1
+  }
+  console.log(`asc ${RELEASE_VERSION} — integration is current. Version unchanged.`)
+  return worst
+}
+
+/**
+ * `asc uninstall` — 제품과 제품이 심은 것을 걷어낸다. **사용자 상태는 남는다** (§30·§32).
+ *
+ * 순서가 계약이다: 등록물 → host 설치물 → 확인 → 설치본. 설치본을 먼저 지우면 그 다음
+ * 단계를 수행할 실행물이 없다.
+ *
+ * `~/.asc` 는 지우지 않는다. purge 표면은 만들지 않는다 — 지울 이유가 실제로 확인되기
+ * 전까지 되돌릴 수 없는 명령을 두지 않는다.
+ */
+async function runUninstall(command: string | undefined, values: Record<string, unknown>): Promise<number> {
+  if (command !== undefined && command !== 'plan') {
+    console.error(`Unknown uninstall command: ${command}\n\n${USAGE}`)
+    return 2
+  }
+  const host = await verifyInstall(hostPaths())
+  const adapter = serviceAdapter()
+  const installed = await detectStableInstall(nodeProcessRunner, RELEASE_VERSION)
+  const home = ascHome()
+
+  // **돌고 있는 일을 몰래 버리지 않는다** (0.8.0 §Q). uninstall 은 제품을 걷어내는
+  // 명령이지 일을 끝내는 명령이 아니다 — 살아 있는 세션이나 물리 결합이 있으면 그것을
+  // 어떻게 할지는 사람이 정한다. 새 lifecycle 상태를 만들지 않고, 이미 있는 상태를 읽는다.
+  const here = await discoverRoot(process.cwd(), values.root as string | undefined)
+  const live = here ? await liveWork(here) : { sessions: [], bindings: [] }
+  const busy = live.sessions.length > 0 || live.bindings.length > 0
+
+  if (command === 'plan') {
+    const payload = {
+      remove: {
+        service: adapter?.id ?? null,
+        hostIntegration: host.status !== 'NOT_INSTALLED',
+        runtime: installed.installedVersion ?? null,
+      },
+      preserve: { state: home, note: 'profiles, workspaces, sessions, audit, evidence and identities all stay' },
+      ...(busy ? { blockedBy: { sessions: live.sessions, bindings: live.bindings } } : {}),
+    }
+    if (values.json) console.log(JSON.stringify(payload, null, 2))
+    else {
+      console.log('Would remove:')
+      if (adapter) console.log(`  the persistent registration (${adapter.id})`)
+      if (host.status !== 'NOT_INSTALLED') console.log('  the ASC files and hook registration in ~/.claude')
+      if (installed.installedVersion) console.log(`  the installed runtime (${RUNTIME_PACKAGE}@${installed.installedVersion})`)
+      console.log(`Would keep: ${home} — profiles, workspaces, sessions, audit, evidence, identities`)
+      if (busy) {
+        console.log('')
+        console.log('Would refuse: work is still running here —')
+        for (const id of live.sessions) console.log(`  session ${id}`)
+        for (const id of live.bindings) console.log(`  a run is holding ${id}`)
+      }
+    }
+    return 0
+  }
+
+  if (busy) {
+    console.error('Work is still running in this workspace, and uninstalling would abandon it:')
+    for (const id of live.sessions) console.error(`  session ${id}`)
+    for (const id of live.bindings) console.error(`  a physical run is holding ${id}`)
+    console.error('')
+    console.error(`Finish or pause it first: \`asc work finish ${live.sessions[0] ?? '<S-ID>'} --verified "…" --next "…"\``)
+    console.error('Nothing was removed.')
+    return 2
+  }
+
+  let worst = 0
+  if (adapter) {
+    await adapter.uninstall().catch((error: unknown) => {
+      console.error(`service: could not unregister with ${adapter.id}: ${String(error)}`)
+      worst = 1
+    })
+    console.log(`service: unregistered (${adapter.id})`)
+  }
+
+  const removedHost = await uninstall(hostPaths())
+  for (const path of removedHost.removed) console.log(`removed: ${path}`)
+  for (const keep of removedHost.kept) console.log(`kept: ${keep.path} — ${keep.reason}`)
+
+  const afterHost = await verifyInstall(hostPaths())
+  if (afterHost.hookRegistered) {
+    console.error('host: an ASC hook registration is still in settings.json.')
+    worst = 1
+  }
+
+  // 설치본은 마지막이다. 개발 checkout 에서 돌고 있으면 그것은 우리가 설치한 것이 아니다.
+  if (!installed.installedVersion) {
+    console.log('runtime: nothing was installed by npm on this machine.')
+  } else {
+    const removal = await nodeProcessRunner('npm', ['uninstall', '-g', RUNTIME_PACKAGE])
+    if (!removal.ok) {
+      console.error(`runtime: could not remove ${RUNTIME_PACKAGE} — ${removal.stderr.trim() || removal.stdout.trim()}`)
+      console.error(`Remove it directly: npm uninstall -g ${RUNTIME_PACKAGE}`)
+      worst = 1
+    } else {
+      console.log(`runtime: removed ${RUNTIME_PACKAGE}@${installed.installedVersion}`)
+    }
+  }
+
+  console.log('')
+  console.log(`Your state stays: ${home}`)
+  console.log('Profiles, workspaces, sessions, audit, evidence and identities are untouched.')
+  console.log(`Install it again later and they are all still there: ${portableCommand(['setup', 'apply'])}`)
+  return worst
+}
+
+/**
+ * 지금 이 workspace 에서 돌고 있는 일. **읽기만 한다.**
+ *
+ * 두 가지를 본다: 아직 끝나지 않은 논리 세션과, 그 세션을 집고 있는 물리 Run. 어느
+ * 하나라도 있으면 제품을 걷어내는 것은 그 일을 버리는 것이 된다.
+ */
+async function liveWork(root: string): Promise<{ sessions: string[]; bindings: string[] }> {
+  try {
+    const store = new MarkdownStateStore(root)
+    const sessions = (await store.list('session'))
+      .filter((session) => session.status === 'ACTIVE' || session.status === 'PAUSED')
+      .map((session) => session.id)
+    const held = (await claudeBindings(store).current()).map((binding) => binding.logicalSessionId)
+    return { sessions, bindings: held.filter((id) => !sessions.includes(id)) }
+  } catch {
+    // 읽지 못한 것을 "없다" 로 적지 않는다 — 모르면 막는 쪽이 안전하다.
+    return { sessions: ['(could not be read)'], bindings: [] }
+  }
+}
+
+/**
+ * `asc work` — 정상 작업 표면 (§34~§42).
+ *
+ * **새 Work entity 를 만들지 않는다.** 이 함수 아래에서 도는 것은 전부 기존 경로다 —
+ * 계약 초안·세션·물리 결합·preflight·진행·handoff·collect·Grant·Executor. 달라지는 것은
+ * 사람이 그 순서를 외우지 않아도 된다는 것 하나다.
+ */
+async function runWork(
+  command: string | undefined,
+  target: string | undefined,
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  root: string,
+  runtime?: ResolvedRuntime,
+): Promise<number> {
+  /** 지금 도는 세션. 지목이 없으면 하나일 때만 고른다 — 여럿이면 고르지 않는다. */
+  const currentSession = async (): Promise<string | null> => {
+    if (target) return target
+    if (values.session) return values.session as string
+    const active = (await store.list('session')).filter((session) => session.status === 'ACTIVE')
+    if (active.length === 1) return active[0]!.id
+    if (active.length === 0) return null
+    console.error(`More than one session is active — say which: ${active.map((session) => session.id).join(', ')}`)
+    return null
+  }
+
+  switch (command) {
+    // 일을 시작한다. 안에서 도는 것: work ingress → 계약 초안 → 발급/재개 → 물리 결합 → preflight.
+    case 'start':
+      return runProceed({ ...values, ...(target ? { work: target } : {}) }, store, root, runtime)
+
+    case 'status':
+      return runProgress('show', target ?? (values.session as string | undefined), values, store)
+
+    case 'inspect': {
+      const session = await currentSession()
+      if (!session) {
+        console.error('Which session? `asc work inspect <S-ID>`')
+        return 2
+      }
+      // 계약·범위·완료조건·결정권·검증·감사가 한 화면에 있어야 한다 (§38).
+      const report = await runSession('report', session, values, store, runtime)
+      if (report !== 0) return report
+      return runSession('audit', session, values, store, runtime)
+    }
+
+    case 'pause':
+    case 'resume': {
+      const session = await currentSession()
+      if (!session) {
+        console.error(`Which session? \`asc work ${command} <S-ID>\``)
+        return 2
+      }
+      return runSession(command, session, values, store, runtime)
+    }
+
+    // 끝낸다. 사람이 두 단계를 알아야 하는 구조를 여기서 끝낸다 (§41).
+    case 'finish': {
+      const session = await currentSession()
+      if (!session) {
+        console.error('Which session? `asc work finish <S-ID> --verified <text> --next <text>`')
+        return 2
+      }
+      const done = await runSession('done', session, values, store, runtime)
+      if (done !== 0) return done
+      // handoff 가 쓰였으면 거두는 것까지가 이 명령의 몫이다 — 상태·차단 해제·보관.
+      return runController('collect', values, store, runtime)
+    }
+
+    // 밖으로 내보낸다. Grant 를 없애는 것이 아니라 그 위에 서는 공식 표면이다 (§42).
+    //
+    // 순서가 계약이다 (0.8.0 §D):
+    //
+    //   읽기만 하는 원격 검수 → 결정권 → Grant → 원자적 CLAIM → 실행 직전 재검수
+    //   → 외부 변경 한 번 → 되돌려 읽기 → 감사
+    //
+    // 앞의 검수는 **승인을 다시 받는 자리가 아니다** (§I). 사람이 "게시해" 라고 한 것은
+    // 결정권을 이미 해결했다. 여기서 보는 것은 사실이다 — 그 대상이 이 결합의 원격인지,
+    // 승인한 commit 이 아직 그 commit 인지, 같은 것이 이미 올라가 있지는 않은지.
+    case 'publish': {
+      if (!values.action || !values.target) {
+        console.error('Usage: asc work publish [S-ID] --action <key> --target <ref> --body-file <path> --as <actor>')
+        console.error('       asc work publish … --review    # read the facts, change nothing')
+        return 2
+      }
+      const outward = await externalWritePort(runtime)
+      if (!outward) {
+        console.error('밖으로 내보낼 통로가 없다 — 이 행위를 수행할 결합이 Profile 에 없다.')
+        console.error('지금 무엇이 풀리는지: asc status')
+        return 2
+      }
+      const payload = values['body-file']
+        ? await readFile(values['body-file'] as string, 'utf8').catch(() => null)
+        : ''
+      if (payload === null) {
+        console.error(`내용을 읽지 못했다: ${String(values['body-file'])}`)
+        return 2
+      }
+      const action = { action: values.action as string, target: values.target as string, payload }
+
+      // ① 읽기만 하는 검수. MANUAL 이든 AUTO 든 같은 판정이고, 화면만 다르다 (§E).
+      const bound = bindingIdentity(runtime, outward.id)
+      const facts = outward.review
+        ? await outward.review(action)
+        : {
+            provider: outward.id,
+            capability: outward.supports?.(action.action) ?? true,
+            verifiable: outward.verifies?.(action.action) ?? false,
+            unknown: ['this write path cannot be read before use'],
+          }
+      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'))) === 'ENFORCE'
+      const review = reviewExternalAction({
+        action: action.action,
+        target: action.target,
+        facts,
+        ...(bound ? { basis: { resource: bound } } : {}),
+        ...(enforcing ? { requireVerification: true } : {}),
+      })
+      for (const line of reviewLines(review)) console.log(line)
+      for (const [key, value] of Object.entries(facts.observed ?? {})) {
+        if (value !== undefined) console.log(`  ${key}: ${value}`)
+      }
+
+      // 읽기만 물었으면 여기서 끝이다 — 이 경로로는 아무것도 나가지 않는다.
+      if (values.review) return review.verdict === 'NOT_EXECUTABLE' ? 1 : 0
+
+      if (review.verdict !== 'READY') {
+        console.error('')
+        console.error(
+          review.verdict === 'NOT_EXECUTABLE'
+            ? 'This cannot go out as it stands. Nothing was sent.'
+            : 'Facts here need a person to look — nothing was sent. Widen or correct the action, then run it again.',
+        )
+        return 1
+      }
+
+      const session = await currentSession()
+      if (!session) {
+        console.error('Which session? `asc work publish --session <S-ID> ...`')
+        return 2
+      }
+      if (!values['body-file'] || !values.as) {
+        // **호출됐다는 사실이 승인이 아니다** (§R). 내보낼 내용은 사람이 준 것이어야 하고,
+        // 누가 정했는지는 이름으로 남아야 한다. 그 둘이 없으면 Grant 는 만들어지지 않는다.
+        console.error('--body-file <path> 와 --as <actor> 가 필요하다 — 내보낼 내용과 그것을 정한 사람이다.')
+        console.error('Agent 가 스스로 부른 것은 승인이 아니다.')
+        return 2
+      }
+
+      // ② 승인이 딛고 선 사실을 못 박는다 (§L). 가지 이름이 아니라 그때의 commit 이다.
+      const basis = {
+        ...(facts.observed?.['local.head'] ? { sourceSha: facts.observed['local.head'] } : {}),
+        ...(facts.observed?.['remote.sha'] ? { remoteBaseline: facts.observed['remote.sha'] } : {}),
+        ...(bound ? { resource: bound } : {}),
+      }
+      const grantId = (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`
+      const issued = await runGrant(
+        'issue',
+        undefined,
+        { ...values, session, 'grant-id': grantId, basis },
+        store,
+        root,
+        runtime,
+      )
+      if (issued !== 0) return issued
+      // ③ Grant → CLAIM → 재검수 → 실행 1회 → 되돌려 읽기 → 감사. 한 번 쓰고 소진된다.
+      return runGrant('run', grantId, values, store, root, runtime)
+    }
+
+    default:
+      console.error(`Unknown work command: ${command ?? '(none)'}\n\n${USAGE}`)
+      return 2
+  }
+}
+
 async function runUpdate(command: string | undefined, values: Record<string, unknown>): Promise<number> {
   if (command !== undefined && command !== 'check' && command !== 'plan') {
     console.error(`Unknown update command: ${command}\n\n${USAGE}`)
@@ -4488,10 +5271,9 @@ async function applyUpdate(plan: UpdatePlan, values: Record<string, unknown>): P
   // 말하면서 옛 내용을 다시 쓴 것이다.
   //
   // 사람이 고친 것을 덮지 않는 규칙은 그쪽(`host claude install`)이 그대로 진다.
-  worst = Math.max(worst, await refreshHost())
-
-  // 등록물이 낡았으면 지금 형태로 수렴시킨다. 기존 STALE→수렴 경로를 그대로 쓴다.
-  worst = Math.max(worst, await convergeService(values))
+  // 새 build 가 자기 integration 을 맞춘다 — 그것이 `asc refresh` 이고, update 는 그것을
+  // 부를 뿐이다 (§25). 두 명령이 각자 host 를 갱신하면 언젠가 서로 다른 것을 쓴다.
+  worst = Math.max(worst, await refreshWithNewRuntime())
 
   // 마지막은 언제나 확인이다.
   const health = await detectStableInstall(nodeProcessRunner, target)
@@ -4547,25 +5329,35 @@ function diffState(before: Map<string, string>, after: Map<string, string>): str
 }
 
 /**
- * 새 build 에게 host 설치물을 자기 내용으로 맞추게 한다.
+ * 새 build 에게 자기 integration 을 맞추게 한다 — 곧 새 build 의 `asc refresh` 다 (§25).
  *
- * 지금 도는 프로세스로 부르지 않는 이유는 하나다 — 이 프로세스는 교체되기 전의 build 다.
+ * 지금 도는 프로세스로 부르지 않는 이유는 하나다: 이 프로세스는 교체되기 **전의** build 이고,
+ * 그 build 가 만들어 내는 hook·skill 은 옛 내용이다. 0.7.0 에서 실제로 그랬다 — update 가
+ * "host: …/SKILL.md" 를 적고 끝났는데 probe 는 여전히 INSTALLED_STALE 이었다.
+ *
  * 전역 실행물을 못 찾으면 갱신하지 않고 그 사실을 말한다. 조용히 건너뛰면 낡은 hook 이
  * 새 runtime 옆에 남고, 그 조합은 아무도 시험한 적이 없다.
  */
-async function refreshHost(): Promise<number> {
+async function refreshWithNewRuntime(): Promise<number> {
   const entry = await globalRuntimeEntry()
   if (!entry) {
-    console.error('host: could not find the installed runtime to refresh with — run `asc host claude install`')
+    console.error('refresh: could not find the installed runtime to refresh with — run `asc refresh`')
     return 1
   }
-  const child = spawnSync(process.execPath, [entry, 'host', 'claude', 'install'], { encoding: 'utf8' })
+  const child = spawnSync(process.execPath, [entry, 'refresh'], { encoding: 'utf8' })
   const output = `${child.stdout ?? ''}${child.stderr ?? ''}`
   for (const line of output.split('\n')) {
-    if (line.startsWith('installed:') || line.startsWith('skipped:')) console.log(`host: ${line}`)
+    if (
+      line.startsWith('installed:') ||
+      line.startsWith('skipped:') ||
+      line.startsWith('service:') ||
+      line.startsWith('Install state:')
+    ) {
+      console.log(`refresh: ${line}`)
+    }
   }
   if (child.status !== 0) {
-    console.error(`host: refresh failed${output.trim() ? ` — ${output.trim().split('\n').at(-1)}` : ''}`)
+    console.error(`refresh: failed${output.trim() ? ` — ${output.trim().split('\n').at(-1)}` : ''}`)
     return 1
   }
   return 0
@@ -5408,6 +6200,18 @@ async function runCoordinationPublish(
   }))
   const workReference = typeof values.work === 'string' ? values.work : undefined
 
+  // **밖을 바꾸기 전에 계약을 집는다** (0.8.0 §O). 예전에는 게시가 성공한 **뒤에**
+  // CLAIM 했다 — 그 사이에 다른 Run 이 같은 계약으로 들어오면 같은 글이 두 번 나갈 수
+  // 있었다. 원자적 CLAIM 을 통과한 하나만 게시로 넘어간다. 게시가 실패하면 그 계약은
+  // 태워진다: 같은 승인으로 다시 시도하지 않는 것이 이 계약의 뜻이다.
+  const claimed = await applyTransition(store, 'grant', grantId, (g) =>
+    transitionGrant(g, 'CLAIMED', 'executor', { claimedBy: `cli-${process.pid}` }),
+  )
+  if (!claimed.ok) {
+    console.error(`${grantId} 를 집지 못했다 — 다른 Run 이 이미 집었거나 상태가 움직였다.`)
+    return 1
+  }
+
   const outcome = await publishOnce(
     {
       queryId,
@@ -5420,20 +6224,14 @@ async function runCoordinationPublish(
   )
 
   if (outcome.ok) {
-    // 한 번 쓴 계약은 다시 쓰이지 않는다 (OM §11.5 single_use). 게시가 실제로 나간
-    // 뒤에 옮긴다 — 먼저 옮기면 실패한 게시가 계약만 태운다.
+    // 한 번 쓴 계약은 다시 쓰이지 않는다 (OM §11.5 single_use).
     const consumedAt = new Date().toISOString()
-    const claimed = await applyTransition(store, 'grant', grantId, (g) =>
-      transitionGrant(g, 'CLAIMED', 'executor', { claimedBy: `cli-${process.pid}` }),
+    await applyTransition(store, 'grant', grantId, (g) =>
+      transitionGrant(g, 'EXECUTED', 'executor', {
+        resultRef: outcome.identity.objectId,
+        consumedAt,
+      }),
     )
-    if (claimed.ok) {
-      await applyTransition(store, 'grant', grantId, (g) =>
-        transitionGrant(g, 'EXECUTED', 'executor', {
-          resultRef: outcome.identity.objectId,
-          consumedAt,
-        }),
-      )
-    }
     const recorded = await recordPublication(coordinationLedger(store), outcome)
     if (values.json) {
       console.log(JSON.stringify({ publish: outcome, recorded: recorded.ok }, null, 2))
@@ -5445,6 +6243,16 @@ async function runCoordinationPublish(
     return 0
   }
 
+  // 집은 계약은 나가지 않았어도 소진된 것으로 닫는다 — 같은 승인으로 다시 시도하지
+  // 않기 위해서다. 무엇이 실패했는지는 History 에 남는다.
+  await applyTransition(store, 'grant', grantId, (g) => transitionGrant(g, 'INVALIDATED', 'executor'))
+  await store.appendHistory({
+    at: new Date().toISOString(),
+    actor: `cli-${process.pid}`,
+    kind: 'grant_invalidated',
+    ref: grantId,
+    detail: publishLine(outcome),
+  })
   if (values.json) console.log(JSON.stringify({ publish: outcome }, null, 2))
   else console.error(publishLine(outcome))
   return 1
@@ -5719,7 +6527,7 @@ async function runGrant(
       const outward = await externalWritePort(runtime)
       if (!outward) {
         console.error('밖으로 내보낼 통로가 없다 — 이 행위를 수행할 결합이 Profile 에 없다.')
-        console.error('지금 무엇이 풀리는지: asc setup status')
+        console.error('지금 무엇이 풀리는지: asc status')
         return 2
       }
       if (outward.supports && !outward.supports(values.action as string)) {
@@ -5730,6 +6538,16 @@ async function runGrant(
 
       // 발급도 승인 권한자만 할 수 있다 — 외부로 나가는 권한이 여기서 만들어지기 때문이다
       const grants = new GrantService(store, new LocalIdentityBinding(await loadIdentityMap(root)))
+
+      // **범위를 계약에 못 박는다** (0.8.0 보정 P1-3). 이 결합이 가리키는 원격이 곧 이
+      // 승인의 실행 범위다 — 행위 하나를 승인했다는 사실이 다른 저장소까지 열어 주지
+      // 않는다. 호출자가 이미 근거를 준 경우에는 그것을 그대로 둔다.
+      const scoped = ((): ExecutionGrant['basis'] | undefined => {
+        const given = values.basis as ExecutionGrant['basis'] | undefined
+        const bound = bindingIdentity(runtime, outward.id)
+        if (given?.resource || !bound) return given
+        return { ...(given ?? {}), resource: bound }
+      })()
 
       if (fromSession) {
         // 사람이 지금 내보내라고 한 것이 승인이다. 그 말과 함께 온 내용이 payload 이고,
@@ -5747,6 +6565,10 @@ async function runGrant(
         const forSession = await grants.issueForSession({
           grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
           sessionId: fromSession,
+          // 검수가 읽어 온 사실을 승인에 못 박는다 (0.8.0 §L). 없으면 없는 대로 둔다 —
+          // 없는 기준선을 지어내면 재검수가 아무것도 지키지 못한다. 범위(resource)만은
+          // 결합에서 채운다: 그것이 이 승인이 미치는 곳의 경계다.
+          ...(scoped ? { basis: scoped } : {}),
           issuedBy: values.as as string,
           channel: 'local',
           action: values.action as string,
@@ -5771,6 +6593,7 @@ async function runGrant(
       const issued = await grants.issue({
         grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
         requestId: target,
+        ...(scoped ? { basis: scoped } : {}),
         issuedBy: values.as as string,
         channel: 'local',
         action: values.action as string,
@@ -5807,20 +6630,32 @@ async function runGrant(
         console.error(
           '밖으로 내보낼 통로가 없다 — Profile bindings 에 외부 쓰기를 제공하는 결합이 필요하다.',
         )
-        console.error('지금 무엇이 풀리는지: asc setup status')
+        console.error('지금 무엇이 풀리는지: asc status')
         return 2
       }
+      // 강제가 서 있는 자리에서는 되돌려 읽을 수 없는 행위를 실행하지 않는다 (P1-2).
+      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'))) === 'ENFORCE'
       const outcome = await new Executor({
         store,
         scm,
         runId: (values['run-id'] as string) ?? `cli-${process.pid}`,
+        ...(enforcing ? { requireVerification: true } : {}),
       }).run(target)
 
       if (outcome.ok) {
         console.log(`EXECUTED — ${outcome.resultRef}`)
         return 0
       }
+      // 실패의 종류를 뭉개지 않는다 (0.8.0 §P) — 다음 행동이 저마다 다르다.
       console.error(`${outcome.reason}${'detail' in outcome ? `: ${outcome.detail}` : ''}`)
+      if (outcome.reason === 'UNCERTAIN') {
+        console.error('밖에 나갔는지 알 수 없다. 다시 실행하지 마라 — 먼저 원격을 읽어 확인하고,')
+        console.error('그 뒤에 사람이 새 Grant 를 낸다. 이 Grant 는 집힌 채로 남아 재사용되지 않는다.')
+      }
+      if (outcome.reason === 'NOT_VERIFIED') {
+        console.error(`나간 것: ${outcome.resultRef} — 그러나 되돌려 읽은 것이 기대와 다르다.`)
+        console.error('성공으로 적지 않는다. 원격을 직접 확인하라.')
+      }
       return 1
     }
 
@@ -5831,12 +6666,35 @@ async function runGrant(
 }
 
 /**
+ * 이 작업이 가리키는 원격의 신원 (0.8.0 §K).
+ *
+ * **deny-list 가 아니다.** 검수가 "이 대상이 우리가 맡은 그 원격인가" 를 묻기 위한
+ * 기준점이고, 어긋나면 Agent 가 스스로 범위를 넓히는 대신 사람에게 올라간다.
+ * 결합이 여럿이면 고르지 않는다 — 고르는 순간 그것이 곧 조용한 범위 확장이다.
+ */
+function bindingIdentity(runtime: ResolvedRuntime | undefined, adapterId: string): string | undefined {
+  const declared = (runtime?.layers.profile.bindings ?? []).filter((binding) => binding.adapter === adapterId)
+  return declared.length === 1 ? declared[0]!.resource : undefined
+}
+
+/**
  * 승인된 행위가 실제로 나갈 통로 (C-09 · OM §11.5).
  *
  * 조립은 Composition 의 몫이다 — 이 자리에서 provider 를 알면 provider 교체가 다시 CLI
  * 수술이 된다. 없으면 `null` 이고, 없는 것을 있는 척하지 않는다.
  */
 async function externalWritePort(runtime?: ResolvedRuntime): Promise<ScmPort | null> {
+  return (await composedPorts(runtime)).scm ?? null
+}
+
+/**
+ * 이 workspace 의 결합이 지금 실제로 조립되는가 (§62·§63).
+ *
+ * **선언이 아니라 조립 결과가 근거다.** 토큰 하나가 환경에 있다는 사실로 "외부 쓰기 가능"
+ * 이라고 적으면, 그 표시는 실제 실행 경로와 어긋난 채로 사람을 안심시킨다 — 0.7 의 D-01 이
+ * 그 형태였다. 여기서 나오는 것은 Composition 이 만든 Port 와, 만들지 못한 이유다.
+ */
+async function composedPorts(runtime?: ResolvedRuntime): Promise<Awaited<ReturnType<typeof buildRuntimePorts>>> {
   const { root: projectRoot } = await discoverProjectRoot(process.cwd())
   const adapters = monitorAdapters()
   const declared = runtime?.layers.profile.bindings ?? []
@@ -5860,7 +6718,7 @@ async function externalWritePort(runtime?: ResolvedRuntime): Promise<ScmPort | n
       : {}),
     endpointFor: (binding) => endpointOf(adapters, binding),
   })
-  return ports.scm ?? null
+  return ports
 }
 
 /** `owner/repo#19` 에서 저장소만. 짧은 참조를 풀 때 쓴다. */
@@ -5874,7 +6732,7 @@ const GRANT_ERROR: Record<string, string> = {
   NOT_APPROVED: '아직 승인되지 않은 요청이다. 승인 먼저 받아야 한다.',
   FORBIDDEN_ISSUER:
     '계약을 발급할 권한이 없다. .asc/identities.json 에 `"이름": ["local:계정"]` 형태로 매핑을 추가하라 ' +
-    '(현재 상태는 `asc setup status`).',
+    '(현재 상태는 `asc status`).',
   NO_PAYLOAD: '내보낼 내용이 없다.',
   SESSION_NOT_FOUND: '그 세션을 찾지 못했다.',
   SESSION_NOT_RUNNABLE: '아직 시작하지 않은 세션이다 — 내보낼 결과가 없다.',

@@ -180,21 +180,23 @@ describe('갱신은 새 build 가 한다 (0.7.1)', () => {
     // 쓴 것이다 — 이 프로세스의 hookScript() 는 옛 내용을 만든다.
     const source = await readFile(CLI, 'utf8')
     const start = source.indexOf('async function applyUpdate(')
-    const end = source.indexOf('async function refreshHost(')
+    const end = source.indexOf('async function refreshWithNewRuntime(')
     assert.ok(start > 0 && end > start)
     const block = source.slice(start, end)
 
     assert.ok(!/\binstall\(hostPaths\(\)/.test(block), 'update 가 자기 build 로 host 를 쓴다')
-    assert.match(block, /refreshHost\(\)/)
+    assert.match(block, /refreshWithNewRuntime\(\)/)
   })
 
   it('갱신은 전역 실행물을 통해 나간다', async () => {
     const source = await readFile(CLI, 'utf8')
-    const start = source.indexOf('async function refreshHost(')
+    const start = source.indexOf('async function refreshWithNewRuntime(')
     const block = source.slice(start, source.indexOf('\n}', start))
 
     assert.match(block, /globalRuntimeEntry\(\)/, '새로 설치된 자리를 찾는다')
-    assert.match(block, /'host', 'claude', 'install'/)
+    // 새 build 가 부르는 것은 그 build 의 `asc refresh` 다 — update 와 refresh 가 각자
+    // host 를 갱신하면 언젠가 서로 다른 것을 쓴다 (§25).
+    assert.match(block, /\[entry, 'refresh'\]/)
     // 못 찾으면 조용히 넘어가지 않는다 — 낡은 hook 이 새 runtime 옆에 남는다
     assert.match(block, /could not find the installed runtime/)
   })

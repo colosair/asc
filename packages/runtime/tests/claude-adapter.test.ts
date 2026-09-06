@@ -36,6 +36,7 @@ import {
 } from '../adapters/claude-code/probe.ts'
 import { inboxSkillText, reviewSkillText, skillBundle, skillText } from '../adapters/claude-code/skill.ts'
 import { MarkdownStateStore } from '../adapters/markdown/state-store.ts'
+import { writeExecutionMode } from '../core/policy/execution-mode.ts'
 import { MemoryStateStore } from '../adapters/memory/state-store.ts'
 
 const NOW = '2026-08-23T18:00:00+09:00'
@@ -125,9 +126,16 @@ describe('guard hook(3층) — 실행 직전 차단', () => {
     }
   }
 
-  async function attachedProject(): Promise<{ project: string; store: MarkdownStateStore }> {
+  /**
+   * 붙은 프로젝트 하나. **mode 를 명시한다** — 0.8.0 보정에서 기록 없는 workspace 는
+   * AUTO 가 아니게 됐다(§B). 강제를 검사하려면 그 강제를 켠 상태를 만들어야 한다.
+   */
+  async function attachedProject(
+    mode: 'MANUAL' | 'AUTO' = 'AUTO',
+  ): Promise<{ project: string; store: MarkdownStateStore }> {
     const project = await tempDir('asc-hookproj-')
     const store = await MarkdownStateStore.open(join(project, '.asc'))
+    await writeExecutionMode(store.scope('policy'), mode, 'controller-a', NOW)
     return { project, store }
   }
 
@@ -162,7 +170,7 @@ describe('guard hook(3층) — 실행 직전 차단', () => {
     )
     assert.equal(outcome.code, 2)
     assert.match(outcome.stderr, /논리 세션 밖에서 나갈 수 없다/)
-    assert.match(outcome.stderr, /asc proceed/, '다음 걸음을 그대로 준다')
+    assert.match(outcome.stderr, /asc work start/, '다음 걸음을 그대로 준다')
   })
 
   it('미등록 세션이라도 읽기는 막지 않는다', async () => {
@@ -246,7 +254,7 @@ describe('guard hook(3층) — 실행 직전 차단', () => {
       cwd: project,
     })
     assert.equal(blocked.code, 2, '계약 안에서는 승인 경로로만 나간다')
-    assert.match(blocked.stderr, /ASC-managed/)
+    assert.match(blocked.stderr, /AUTO 로 관리되는 세션/)
 
     assert.equal(await bindings.release('S-20260823-01', 'claude-abc'), true)
 
@@ -731,7 +739,7 @@ describe('worker 계약문(1층)과 skill', () => {
     const text = skillText()
     assert.match(text, /ASC로 진행해/)
     assert.match(text, /\/asc/)
-    assert.match(text, /asc proceed --json/)
+    assert.match(text, /asc work start/)
     assert.match(text, /Do not pick one yourself/)
     assert.match(text, /Never issue automatically/)
     // 발급 권한은 사람의 것이되, Controller가 역할 범위로 위임할 수 있다 (OM §450 해석).
@@ -923,15 +931,32 @@ describe('F6 — 일이 시작되면 논리 세션 안에서 시작된다', () =
 
   it('S2 — 관리 밖 세션의 변경은 막히고, 다음 한 걸음이 함께 온다', () => {
     assert.match(script, /if \(isMutation && !managed\)/)
-    assert.match(script, /asc proceed --work <WORK-KEY> --json/)
+    assert.match(script, /asc work start <WORK-KEY>/)
     assert.match(script, /asc host claude bind <S-ID> --physical/)
     // 사람에게 "ASC 적용해" 라고 말하게 하지 않는다 — 명령은 agent 가 실행한다.
     assert.doesNotMatch(script, /console\.error[^)]*ASC 적용/)
   })
 
   it('S5 — 세션 안에 들어간 뒤에는 변경을 막지 않는다', () => {
-    // managed 이면 그 아래 금지 목록(Bash 명령)만 남는다.
-    assert.match(script, /if \(isMutation\) process\.exit\(0\)/)
+    // managed 이면 그 아래 금지 목록(Bash 명령)만 남는다. 0.8.0 에서 그 판정이
+    // AUTO 블록 안으로 들어갔고, 변경 도구는 그 분기에 들어가지 않는다.
+    assert.match(script, /\} else if \(!isMutation\) \{/)
+  })
+
+  it('S6 — MANUAL 은 아무것도 hard-block 하지 않는다 (0.8.0 Axis C)', () => {
+    // 막는 판정 전체가 AUTO 블록 안에 있다. MANUAL 에서는 그 문이 서지 않는다.
+    // 0.8.0 보정 P0-1 — 세 자리를 가른다: 고르지 않음 / 고른 값 / 읽지 못함.
+    assert.match(script, /const state = executionState\(ascRoot\)/)
+    assert.match(script, /if \(state\.enforcement === 'ADVISE'\) \{/)
+    assert.match(script, /if \(state\.degraded\) \{/)
+    assert.match(script, /if \(state\.mode === 'AUTO'\) \{/)
+    // 기록은 두 mode 모두에서 돈다 — 관리와 실행은 다른 축이다.
+    assert.match(script, /if \(managed\) \{\s*try \{\s*recordActivity/)
+  })
+
+  it('E-02 — ASC control-plane 은 어느 mode 에서도 막히지 않는다', () => {
+    assert.match(script, /function isControlPlane/)
+    assert.match(script, /if \(isControlPlane\(segment\.bare\)\) continue/)
   })
 
   it('ASC 와 무관한 프로젝트는 그대로 통과한다', () => {

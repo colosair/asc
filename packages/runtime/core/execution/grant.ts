@@ -25,6 +25,8 @@ export type IssueGrantInput = {
   /** 이 계약으로 허용되는 행위 목록. 비우면 `action` 하나만 허용된다. */
   allowedWrites?: string[]
   issuedAt: string
+  /** 승인이 딛고 선 사실 (0.8.0 §L). 실행 직전 재검수가 이 값과 지금을 견준다. */
+  basis?: ExecutionGrant['basis']
 }
 
 /**
@@ -54,6 +56,12 @@ export type IssueForSessionInput = {
   issuedAt: string
   /** 게시 직전 대조할 기준 (OM §11.9). 없으면 대조하지 않는다. */
   snapshot?: CanonicalSnapshot[]
+  /**
+   * 승인이 딛고 선 사실 (0.8.0 §L). 검수가 읽어 온 값을 그대로 못 박는다 — 실행 직전
+   * 재검수가 이 값과 지금을 견주므로, 승인은 "이 가지" 가 아니라 "이 commit" 에 대한
+   * 것이 된다.
+   */
+  basis?: ExecutionGrant['basis']
 }
 
 export type IssueFailure =
@@ -122,6 +130,7 @@ export class GrantService {
       payload,
       // 이 시점의 정본이 Drift Guard의 기준선이 된다 (OM §11.9)
       snapshot: request.snapshot,
+      ...(input.basis ? { basis: input.basis } : {}),
       ...(request.source.threadLastEventId !== undefined
         ? { threadLastEventId: request.source.threadLastEventId }
         : {}),
@@ -187,6 +196,7 @@ export class GrantService {
       payload: input.payload,
       snapshot: input.snapshot ?? [],
       allowedWrites: input.allowedWrites ?? [input.action],
+      ...(input.basis ? { basis: input.basis } : {}),
     })
 
     const created = await this.#store.create('grant', grant)

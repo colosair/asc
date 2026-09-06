@@ -64,7 +64,12 @@ describe('세션 결과가 밖으로 나가는 한 바퀴', () => {
   it('발급 → 통로 → 실행 → 소비', async () => {
     const store = new MemoryStateStore()
     await attachedSession(store)
-    const { client, calls } = surface({ '/projects/g%2Fp/merge_requests/19/notes': { id: 77 } })
+    // 0.8.0 보정 P1-2 — 실행 뒤에 그 글을 되돌려 읽는다. fixture 도 그 읽기에 답해야
+    // 한 바퀴가 끝난다: 읽지 못하면 그것이 곧 NOT_VERIFIED 다.
+    const { client, calls } = surface({
+      '/projects/g%2Fp/merge_requests/19/notes': { id: 77 },
+      '/projects/g%2Fp/merge_requests/19/notes/77': { id: 77, body: '작업 결과입니다' },
+    })
     const scm = new GitLabScm({ reader: client, writer: client, defaultProject: 'g/p' })
 
     const issued = await new GrantService(store, approver).issueForSession({
@@ -81,7 +86,10 @@ describe('세션 결과가 밖으로 나가는 한 바퀴', () => {
 
     const outcome = await new Executor({ store, scm, runId: 'run-1' }).run('G-0001')
     assert.equal(outcome.ok, true, outcome.ok ? '' : outcome.reason)
-    assert.deepEqual(calls.at(-1)!.body, { body: '작업 결과입니다' }, '승인된 내용 그대로 나간다')
+    const posted = calls.find((call) => call.body !== undefined)
+    assert.deepEqual(posted!.body, { body: '작업 결과입니다' }, '승인된 내용 그대로 나간다')
+    // 그 다음이 되돌려 읽기다 — 나갔다는 말은 읽어 본 뒤에 한다.
+    assert.ok(calls.at(-1)!.path.endsWith('/notes/77'))
 
     // 한 번 쓴 계약은 다시 쓰이지 않는다
     const again = await new Executor({ store, scm, runId: 'run-2' }).run('G-0001')

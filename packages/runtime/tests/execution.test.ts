@@ -236,7 +236,10 @@ describe('실행 — 한 번만, 그리고 확인 후에', () => {
     scm.failNextExecute('rate limited')
 
     const outcome = await executorOn(store, scm).run('G-0001')
-    assert.ok(!outcome.ok && outcome.reason === 'ACTION_FAILED')
+    // 0.8.0 에서 실패의 종류를 가른다 (§P): 밖이 거절한 것은 REJECTED 다 — 나가지
+    // 않았다는 것이 확인된 실패다. 나갔는지 **모르는** 실패는 UNCERTAIN 이고, 그때는
+    // 계약을 태우지도 않는다(재실행은 여전히 막힌다).
+    assert.ok(!outcome.ok && outcome.reason === 'REJECTED')
     // 정말 안 나갔는지 알 수 없으므로 같은 계약을 다시 쓰지 않는다
     assert.equal((await store.get('grant', 'G-0001'))!.status, 'INVALIDATED')
     assert.equal((await store.get('request', 'REQ-0042'))!.status, 'APPROVED')

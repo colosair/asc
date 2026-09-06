@@ -128,9 +128,16 @@ describe('B-58 Gate — guard는 완전 오프라인일 때만 읽기를 막는�
       }),
       'utf8',
     )
+    const policyDir = join(ascRoot, 'adapters', 'policy')
+    await mkdir(policyDir, { recursive: true })
+    // 이 파일들이 검사하는 것은 freeze 이지 Execution Mode 가 아니다. 0.8.0 보정에서
+    // 기록 없는 workspace 는 강제하지 않게 됐으므로(§B), 강제가 켜진 상태를 명시한다.
+    await writeFile(
+      join(policyDir, 'execution-mode.json'),
+      JSON.stringify({ key: 'execution-mode', value: JSON.stringify({ mode: 'AUTO', since: NOW, by: 'controller-a' }) }),
+      'utf8',
+    )
     if (freeze) {
-      const policyDir = join(ascRoot, 'adapters', 'policy')
-      await mkdir(policyDir, { recursive: true })
       await writeFile(
         join(policyDir, 'freeze-policy.json'),
         JSON.stringify({ key: 'freeze-policy', value: JSON.stringify(freeze) }),

@@ -152,7 +152,58 @@ function reconcileHooks(
   return { settings: changed.length > 0 ? { ...settings, hooks } : settings, changed }
 }
 
-type Manifest = { files: Record<string, string>; settingsHook: boolean; installedAt: string }
+/**
+ * ASC control-plane 을 Host 권한 계층에서 통과시키는 규칙 (E-02, 2층).
+ *
+ * 0.7.1 실측에서 raw 외부 write 는 ASC Guard 가 막고, 그 자리의 안전한 출구인
+ * `asc grant issue` 는 Host 의 권한 판정이 막았다. 막는 길과 나가는 길이 동시에 닫히면
+ * 사람이 갇힌다. Host 안에서 우리가 손댈 수 있는 자리는 이 한 줄뿐이다 — 우리 명령을
+ * 명시적으로 허용 목록에 올린다. **허용하는 것은 ASC CLI 뿐이고**, 실행 권한이 있는지는
+ * 그 다음에 Core 가 판정한다 (Guard allows, then Core decides).
+ */
+export const CONTROL_PLANE_ALLOW_RULES: readonly string[] = ['Bash(asc:*)']
+
+type Manifest = {
+  files: Record<string, string>
+  settingsHook: boolean
+  installedAt: string
+  /** 우리가 넣은 permission 허용 규칙. uninstall 은 이 목록만 걷는다. */
+  permissionAllow?: string[]
+}
+
+/**
+ * settings 의 permissions.allow 에 우리 규칙을 **더하기만** 한다. 남의 항목은 읽지도
+ * 고치지도 않는다. 이미 있으면 그대로 둔다 — 중복은 그 자체로 결함이다.
+ */
+function reconcileAllow(settings: Record<string, unknown>): { settings: Record<string, unknown>; added: string[] } {
+  const permissions = { ...((settings.permissions ?? {}) as Record<string, unknown>) }
+  const allow = [...((permissions.allow ?? []) as string[])]
+  const added = CONTROL_PLANE_ALLOW_RULES.filter((rule) => !allow.includes(rule))
+  if (added.length === 0) return { settings, added }
+  permissions.allow = [...allow, ...added]
+  return { settings: { ...settings, permissions }, added }
+}
+
+/** Host 가 ASC control-plane 을 실제로 실행할 수 있는가 (AUTO readiness 의 첫 축). */
+export type ControlPlaneAccess = {
+  allowed: boolean
+  /** deny 규칙이 우리 명령을 막고 있는가. 이것이 참이면 AUTO 는 활성화하지 않는다. */
+  denied: boolean
+  detail?: string
+}
+
+export async function controlPlaneAccess(paths: InstallPaths): Promise<ControlPlaneAccess> {
+  const settings = (await readJson(locate(paths).settings)) ?? {}
+  const permissions = (settings.permissions ?? {}) as { allow?: string[]; deny?: string[]; ask?: string[] }
+  const denied = (permissions.deny ?? []).filter((rule) => /^Bash\(\s*asc[\s:)]/.test(rule))
+  const allowed = CONTROL_PLANE_ALLOW_RULES.every((rule) => (permissions.allow ?? []).includes(rule))
+  if (denied.length > 0) return { allowed: false, denied: true, detail: `the host denies ${denied.join(', ')}` }
+  return {
+    allowed,
+    denied: false,
+    ...(allowed ? {} : { detail: 'the host has no allow rule for ASC commands — `asc refresh` adds it' }),
+  }
+}
 
 async function readJson(path: string): Promise<Record<string, unknown> | null> {
   try {
@@ -224,6 +275,16 @@ export async function install(
     written.push(`${where.settings} (${reconciled.changed.join(', ')} hook)`)
   }
   manifest.settingsHook = true
+
+  // control-plane 허용 규칙 (E-02). hook 등록과 같은 파일이지만 다른 계약이다 —
+  // hook 은 우리가 막는 자리이고, 이것은 우리가 **막히지 않는** 자리다.
+  const allowed = reconcileAllow((await readJson(where.settings)) ?? {})
+  if (allowed.added.length > 0) {
+    await mkdir(dirname(where.settings), { recursive: true })
+    await writeFile(where.settings, JSON.stringify(allowed.settings, null, 2) + '\n', 'utf8')
+    written.push(`${where.settings} (control-plane allow: ${allowed.added.join(', ')})`)
+  }
+  manifest.permissionAllow = [...new Set([...(manifest.permissionAllow ?? []), ...CONTROL_PLANE_ALLOW_RULES])]
 
   await mkdir(dirname(where.manifest), { recursive: true })
   await writeFile(where.manifest, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
@@ -392,6 +453,24 @@ export async function uninstall(paths: InstallPaths): Promise<UninstallOutcome> 
       if (Object.keys(hooks).length === 0) delete settings.hooks
       await writeFile(where.settings, JSON.stringify(settings, null, 2) + '\n', 'utf8')
       removed.push(`${where.settings} (${dropped.join(', ')} hook entry)`)
+    }
+  }
+
+  // 우리가 넣은 허용 규칙만 걷는다 — manifest 에 적힌 것만 대상이므로, 사람이 직접
+  // 넣어 둔 같은 규칙을 지우는 일은 생기지 않는다.
+  const mine = manifest.permissionAllow ?? []
+  if (mine.length > 0) {
+    const current = (await readJson(where.settings)) ?? {}
+    const permissions = (current.permissions ?? {}) as { allow?: string[] }
+    const before = permissions.allow ?? []
+    const allow = before.filter((rule) => !mine.includes(rule))
+    if (allow.length !== before.length) {
+      if (allow.length > 0) permissions.allow = allow
+      else delete permissions.allow
+      if (Object.keys(permissions).length === 0) delete current.permissions
+      else current.permissions = permissions
+      await writeFile(where.settings, JSON.stringify(current, null, 2) + '\n', 'utf8')
+      removed.push(`${where.settings} (control-plane allow)`)
     }
   }
 

@@ -162,7 +162,7 @@ describe('B-21 Gate — attachment 축은 따로 선다', () => {
 
   it('UNATTACHED는 gate를 나열하지 않는다 — 붙는 게 먼저다', () => {
     const text = renderSetup(assessSetup({ ...nothing, attachment: 'UNATTACHED' }))
-    assert.match(text, /asc init/)
+    assert.match(text, /asc setup/)
     assert.ok(!text.includes('Working now'))
   })
 
@@ -176,7 +176,7 @@ describe('B-21 Gate — attachment 축은 따로 선다', () => {
 describe('B-21 Gate — 되는 것은 되는 것으로', () => {
   it('설정이 전부 비어도 로컬 루프 전체가 ready에 있다', () => {
     const ready = assessSetup(nothing).ready.join('\n')
-    for (const surface of ['asc session', 'asc proceed', 'asc progress', 'asc preflight', 'asc closure']) {
+    for (const surface of ['asc work', 'asc work status', 'asc work inspect', 'asc inbox', 'asc mode', 'asc status']) {
       assert.ok(ready.includes(surface), `${surface} 가 되는 것 목록에 없다`)
     }
   })

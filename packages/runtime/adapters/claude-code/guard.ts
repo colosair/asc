@@ -167,6 +167,18 @@ export function segmentsOf(command: string): { bare: string; quoted: string[] }[
   return segments
 }
 
+/**
+ * 이 조각이 ASC control-plane 명령인가 (E-02).
+ *
+ * **Guard 는 ASC 자신의 명령을 절대 막지 않는다.** 막는 쪽과 나가는 쪽이 동시에 닫히면
+ * 사람이 갇힌다 — 0.7.1 실측에서 raw write 는 Guard 가, `asc grant issue` 는 Host 가 막아
+ * 나갈 길이 없었다. Guard 가 지는 몫은 이 한 줄로 끝난다: 우리 명령은 통과시킨다.
+ * 실행할 권한이 있는지는 그 다음에 Core 가 판정한다.
+ */
+function isControlPlane(bare: string): boolean {
+  return /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:[\w./~-]*\/)?asc(?:\.[cm]?js)?(?:\s|$)/.test(bare)
+}
+
 /** 이 조각이 다른 명령을 문자열로 받아 실행하는 자리인가. */
 function runsGivenText(bare: string): boolean {
   return /(^|\s)(?:sh|bash|zsh|dash|ksh)\s+(?:-[a-zA-Z]*\s+)*-c(\s|$)/.test(bare) || /(^|\s)eval(\s|$)/.test(bare)
@@ -184,6 +196,8 @@ export function forbiddenIn(
   patterns: readonly { pattern: RegExp; label: string }[],
 ): string | null {
   for (const segment of segmentsOf(command)) {
+    // ASC control-plane 은 판정 대상이 아니다 (E-02). 여기가 그 불변식이 사는 한 자리다.
+    if (isControlPlane(segment.bare)) continue
     for (const { pattern, label } of patterns) {
       if (pattern.test(segment.bare)) return label
     }
@@ -256,7 +270,7 @@ export function hookScript(): string {
   // **판정 로직을 두 번 쓰지 않는다.** 위 함수들의 소스를 그대로 실어 나른다 — 손으로
   // 옮겨 적으면 언젠가 hook 과 단위 검사가 서로 다른 것을 막는다. 그래서 저 함수들은
   // 바깥 식별자를 참조하지 않는다.
-  const logic = [segmentsOf, runsGivenText, forbiddenIn]
+  const logic = [segmentsOf, isControlPlane, runsGivenText, forbiddenIn]
     .map((fn) => fn.toString())
     .join('\n\n')
     .replace(/`/g, '\\`')
@@ -283,6 +297,39 @@ ${offlinePatterns}
 ]
 
 ${logic}
+
+/**
+ * 이 workspace 의 실행 축 (0.8.0 Axis C · 보정 P0-1).
+ *
+ * **세 자리를 가른다.** 두 개로 뭉치면 어느 쪽이든 한 번은 틀린다:
+ *
+ *   파일 없음            ADVISE   아무도 고르지 않았다. 검사되지 않은 강제를 켜지 않는다
+ *   파일 있고 AUTO       ENFORCE  사람이 고르고 readiness 를 통과한 상태다
+ *   파일 있고 MANUAL     ADVISE   사람이 고른 상태다
+ *   파일 있는데 못 읽음   ENFORCE  AUTO 였을 수도 있다 — 모르는 것을 여는 쪽으로 기울지 않는다
+ *
+ * 마지막 자리가 이 함수가 다시 쓰인 이유다. 예전에는 읽기 실패를 MANUAL 로 답했고,
+ * 그러면 저장돼 있던 AUTO 가 파일 손상·권한·I/O 하나로 조용히 풀린다 (fail-open).
+ * 여기서 강제한다고 해서 AUTO 라고 말하지는 않는다 — 화면에는 "읽지 못했다" 로 나간다.
+ */
+function executionState(ascRoot) {
+  const file = join(ascRoot, 'adapters', 'policy', 'execution-mode.json')
+  let raw
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch (error) {
+    // 없는 것과 못 읽는 것은 다르다. ENOENT 만 "고르지 않았다" 다.
+    if (error && error.code === 'ENOENT') return { enforcement: 'ADVISE', mode: 'MANUAL', chosen: false }
+    return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_UNREADABLE' }
+  }
+  try {
+    const mode = JSON.parse(JSON.parse(raw).value).mode
+    if (mode !== 'AUTO' && mode !== 'MANUAL') return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_INVALID' }
+    return { enforcement: mode === 'AUTO' ? 'ENFORCE' : 'ADVISE', mode, chosen: true }
+  } catch {
+    return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_INVALID' }
+  }
+}
 
 /**
  * 원격이 얼어 있는가. 얼어 있으면 완전 오프라인인지까지 본다.
@@ -385,15 +432,14 @@ const observedSessionId = String(input.session_id ?? '')
 // 등록된 workspace가 먼저다. 없으면 저장소 안 .asc 로 내려간다 (C-11 §3 우선순위).
 const registered = lookupWorkspace(cwd)
 if (registered === 'MISSING') {
-  // **조건부 fail-closed** (C-11 §4). 이 경로는 ASC가 맡은 곳인데 runtime을 읽지 못했다.
-  // 그대로 통과시키면 관리 대상 세션의 외부 write가 조용히 열린다 — 그게 가장 나쁘다.
-  const blocked = forbiddenIn(command, FORBIDDEN)
-  if (blocked) {
+  // 이 경로는 ASC가 맡은 곳인데 runtime을 읽지 못했다. **막지는 않는다** — mode 가 그
+  // runtime 안에 있으므로, 읽지 못한 상태에서 차단하면 고르지 않은 enforcement 를 켜는
+  // 것이 된다(0.8.0 §B). 대신 그 사실을 말한다: 무엇이 깨졌는지 사람이 알아야 한다.
+  if (forbiddenIn(command, FORBIDDEN)) {
     console.error(
-      \`[ASC guard] 이 경로는 ASC workspace로 등록돼 있는데 runtime을 읽지 못했다. \` +
-      \`'\${blocked}' 를 막는다 — asc setup status 로 확인하라.\`,
+      '[ASC] 이 경로는 ASC workspace 로 등록돼 있는데 runtime 을 읽지 못했다 — ' +
+      '실행 축(MANUAL/AUTO)을 확인할 수 없다. asc status 로 확인하라.',
     )
-    process.exit(2)
   }
   process.exit(0)
 }
@@ -403,40 +449,69 @@ const ascRoot = registered ? registered.root : findAscRoot(cwd)
 if (!ascRoot) process.exit(0)
 
 const managed = findManaged(ascRoot, observedSessionId)
+const state = executionState(ascRoot)
 
-// **일이 시작되는데 논리 세션이 없다** (F6). 사람이 "ASC 적용해" 라고 말해야 했던 자리다.
-// 여기서 막고 다음 한 걸음을 그대로 준다 — 그 명령을 실행하는 것은 agent 이고, 사람이
-// 아니다. 세션에 들어간 뒤에는 이 문이 다시 열린다.
-if (isMutation && !managed) {
-  const id = observedSessionId || '<this session id>'
-  console.error(
-    [
-      '[ASC] 이 workspace 는 ASC 가 관리한다. 파일을 바꾸기 전에 논리 세션 안에 들어가라.',
-      '  asc proceed --work <WORK-KEY> --json     # 작업 항목이 있으면',
-      '  asc proceed --json                       # 이어갈 세션을 고르거나 계약을 제안받는다',
-      '  asc host claude bind <S-ID> --physical ' + id,
-      '읽기·조회는 막지 않는다 — 막는 것은 관리 밖의 변경뿐이다.',
-    ].join('\\n'),
-  )
-  process.exit(2)
+// 관찰은 차단과 섞이지 않는다 — 실패해도 아래 판정에 닿지 않고, 두 mode 모두에서 돈다.
+// 일을 관리하는 것(Agent Management)은 실행을 누가 하느냐(Execution Mode)와 다른 축이다.
+if (managed) {
+  try {
+    recordActivity(ascRoot, managed, observedSessionId, String(input.tool_name ?? ''))
+  } catch {}
 }
 
-// **관리 대상 workspace 인데 이 Run 이 어느 계약에도 들어 있지 않다** (0.7.0 B-1).
+// 완전 오프라인 선언이 있을 때만 읽기까지 막는다 — 이것은 Execution Mode 가 아니라
+// 사람이 직접 켠 스위치이므로 두 mode 모두에 선다. 녹이려면 \`asc thaw\`.
+if (!isMutation) {
+  const freeze = freezePolicy(ascRoot)
+  if (freeze && freeze.frozen && freeze.denyRemoteRead) {
+    const offline = forbiddenIn(command, OFFLINE_ONLY)
+    if (offline) {
+      console.error(
+        \`[ASC guard] 완전 오프라인이다\${freeze.reason ? ' (' + freeze.reason + ')' : ''} — '\${offline}' 를 막는다. \` +
+        \`로컬 작업은 그대로 된다. 녹이려면 asc thaw.\`,
+      )
+      process.exit(2)
+    }
+  }
+}
+
+// ── MANUAL — 막지 않는다. 다만 말은 한다 (0.8.0 §F) ─────────────────────────
 //
-// 지금까지 여기서 통과시켰다. 그래서 결합이 사라지거나 아직 생기지 않은 상태의 세션은
-// 계약 밖에서 밖으로 쓸 수 있었다 — guard 가 있는데 열려 있는 상태이고, 그것이 가장 나쁘다.
-// 읽기는 그대로 통과한다. 막는 것은 밖으로 나가는 쓰기뿐이다.
-if (!managed) {
+// MANUAL 은 ASC OFF 가 아니다: 일 관리·결정권·검수·감사는 그대로 돈다. 달라지는 것은
+// 강제 라우팅 하나다. 그래서 이 자리의 guard 는 감시자가 아니라 조언자다 —
+// 밖으로 나가는 쓰기를 보면 한 줄 남기고 그대로 통과시킨다.
+//
+// **여기서 대상을 해석하지 않는다** (§H). 어느 프로젝트인지·어느 SHA 인지 판정하는 것은
+// Remote Review 의 일이고, 그 검수는 \`asc work publish --review\` 가 읽기만으로 보여 준다.
+if (state.enforcement === 'ADVISE') {
   const outward = forbiddenIn(command, FORBIDDEN)
   if (outward) {
-    const id = observedSessionId || '<this session id>'
     console.error(
       [
-        \`[ASC guard] 이 workspace 는 ASC 가 관리한다. '\${outward}' 는 논리 세션 밖에서 나갈 수 없다.\`,
-        '  asc proceed --work <WORK-KEY> --json     # 작업 항목이 있으면',
-        '  asc proceed --json                       # 이어갈 세션을 고르거나 계약을 제안받는다',
-        '  asc host claude bind <S-ID> --physical ' + id,
-        '읽기·조회는 막지 않는다 — 막는 것은 밖으로 나가는 쓰기뿐이다.',
+        \`[ASC] MANUAL — '\${outward}' 를 막지 않는다. 이 쓰기는 ASC 가 관리하는 경로 밖으로 나간다.\`,
+        '  asc work publish --review    # 대상·SHA·결합을 읽기만으로 검수한다',
+        '  asc mode auto                # 관리 경로로만 나가게 하려면',
+      ].join('\\n'),
+    )
+  }
+  process.exit(0)
+}
+
+// ── 실행 축 기록을 읽지 못했다 (P0-1) ────────────────────────────────────────
+//
+// AUTO 라고 말하지 않는다. 그러나 열어 두지도 않는다 — 저장돼 있던 것이 AUTO 였을 수 있고,
+// 그것을 파일 하나로 푸는 것이 fail-open 이다. ASC 명령은 위에서 이미 통과했으므로 복구
+// 경로는 그대로 열려 있다.
+if (state.degraded) {
+  const outward = forbiddenIn(command, FORBIDDEN)
+  if (outward) {
+    console.error(
+      [
+        \`[ASC guard] \${state.degraded} — 이 workspace 의 실행 축을 읽지 못했다.\`,
+        \`'\${outward}' 는 그 상태에서 나가지 않는다. 저장돼 있던 것이 AUTO 였을 수 있다.\`,
+        '  asc status                   # 무엇이 깨졌는지 본다',
+        '  asc mode                     # 지금 상태를 그대로 보여 준다',
+        'ASC 명령은 막히지 않는다 — 복구는 그쪽으로 한다.',
       ].join('\\n'),
     )
     process.exit(2)
@@ -444,33 +519,51 @@ if (!managed) {
   process.exit(0)
 }
 
-// 관찰은 여기서 끝난다 — 아래 차단 판정은 이 호출의 성패를 보지 않는다
-try {
-  recordActivity(ascRoot, managed, observedSessionId, String(input.tool_name ?? ''))
-} catch {}
-
-// 변경 도구는 여기까지다 — 아래 목록은 Bash 명령에 대한 것이다.
-if (isMutation) process.exit(0)
-
-const forbidden = forbiddenIn(command, FORBIDDEN)
-if (forbidden) {
-  console.error(
-    \`[ASC guard] '\${forbidden}' 는 ASC-managed 세션에서 금지다. \` +
-    \`외부 반영은 승인된 Execution Grant(asc grant run)로만 나간다.\`,
-  )
-  process.exit(2) // exit 2 = 도구 실행 차단
-}
-
-// 완전 오프라인 선언이 있을 때만 읽기까지 막는다. 로컬 작업은 얼리지 않는다.
-const freeze = freezePolicy(ascRoot)
-if (freeze && freeze.frozen && freeze.denyRemoteRead) {
-  const offline = forbiddenIn(command, OFFLINE_ONLY)
-  if (offline) {
+// ── AUTO 에서만 서는 문 ───────────────────────────────────────────────────────
+if (state.mode === 'AUTO') {
+  // **일이 시작되는데 논리 세션이 없다** (F6). 사람이 "ASC 적용해" 라고 말해야 했던 자리다.
+  // 여기서 막고 다음 한 걸음을 그대로 준다. 세션에 들어간 뒤에는 이 문이 다시 열린다.
+  if (isMutation && !managed) {
+    const id = observedSessionId || '<this session id>'
     console.error(
-      \`[ASC guard] 완전 오프라인이다\${freeze.reason ? ' (' + freeze.reason + ')' : ''} — '\${offline}' 를 막는다. \` +
-      \`로컬 작업은 그대로 된다. 녹이려면 asc thaw.\`,
+      [
+        '[ASC] 이 workspace 는 ASC 가 자동 실행(AUTO)으로 관리한다. 파일을 바꾸기 전에 논리 세션 안에 들어가라.',
+        '  asc work start <WORK-KEY>                # 작업 항목이 있으면',
+        '  asc work start                           # 이어갈 세션을 고르거나 계약을 제안받는다',
+        '읽기·조회는 막지 않는다 — 막는 것은 관리 밖의 변경뿐이다.',
+        '자동 실행을 원하지 않으면: asc mode manual',
+      ].join('\\n'),
     )
     process.exit(2)
+  }
+
+  // **관리 대상 workspace 인데 이 Run 이 어느 계약에도 들어 있지 않다** (0.7.0 B-1).
+  // 읽기는 그대로 통과한다. 막는 것은 밖으로 나가는 쓰기뿐이다.
+  if (!managed) {
+    const outward = forbiddenIn(command, FORBIDDEN)
+    if (outward) {
+      const id = observedSessionId || '<this session id>'
+      console.error(
+        [
+          \`[ASC guard] 이 workspace 는 AUTO 로 관리한다. '\${outward}' 는 논리 세션 밖에서 나갈 수 없다.\`,
+          '  asc work start <WORK-KEY>                # 작업 항목이 있으면',
+          '  asc work start                           # 이어갈 세션을 고르거나 계약을 제안받는다',
+          '  asc host claude bind <S-ID> --physical ' + id,
+          '자동 실행을 원하지 않으면: asc mode manual',
+        ].join('\\n'),
+      )
+      process.exit(2)
+    }
+  } else if (!isMutation) {
+    // 계약 안에서 도는 세션이다. 밖으로 나가는 것은 승인된 실행 경로로만 나간다.
+    const forbidden = forbiddenIn(command, FORBIDDEN)
+    if (forbidden) {
+      console.error(
+        \`[ASC guard] '\${forbidden}' 는 AUTO 로 관리되는 세션에서 금지다. \` +
+        \`외부 반영은 \\\`asc work publish\\\` 로 나간다 (승인된 Execution Grant).\`,
+      )
+      process.exit(2) // exit 2 = 도구 실행 차단
+    }
   }
 }
 

@@ -15,6 +15,8 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import type { CanonicalSnapshot } from '../../core/model/entities.ts'
+import type { RemoteFacts } from '../../core/execution/remote-review.ts'
+import { normalize } from '../../core/execution/remote-review.ts'
 import type {
   BaselineQuery,
   ExternalAction,
@@ -39,6 +41,20 @@ export const GITLAB_ACTIONS = [
   'git.push',
 ] as const
 
+/**
+ * 되돌려 읽을 수 있는 행위 (0.8.0 보정 P1-2).
+ *
+ * `coordination.publish` 가 여기 없는 이유는 그 실행이 이 통로가 아니라 조율 표면에서
+ * 나가기 때문이다 — 자기가 하지 않은 일을 확인했다고 말하지 않는다.
+ */
+export const VERIFIABLE_ACTIONS = [
+  'git.push',
+  'gitlab.mr.create',
+  'gitlab.mr.merge',
+  'gitlab.note.create',
+  'gitlab.issue.update',
+] as const
+
 export type GitLabScmDeps = {
   reader: GitLabReader
   writer: GitLabWriter
@@ -48,6 +64,8 @@ export type GitLabScmDeps = {
   sourceRefs?: Readonly<Record<string, { ref: string }>>
   /** `git.push` 를 수행할 자리. 없으면 push 는 할 수 없다고 답한다. */
   repoRoot?: string
+  /** 이 결합이 가리키는 원격 이름. 검수가 URL·신원을 읽을 자리다. */
+  remoteName?: string
   /** 테스트가 실제 git 을 부르지 않게 하는 통로. */
   git?: (args: readonly string[], cwd: string) => Promise<{ ok: boolean; detail: string }>
 }
@@ -59,6 +77,7 @@ export class GitLabScm implements ScmPort {
   #project: string | undefined
   #sourceRefs: Readonly<Record<string, { ref: string }>>
   #repoRoot: string | undefined
+  #remote: string
   #git: NonNullable<GitLabScmDeps['git']>
 
   constructor(deps: GitLabScmDeps) {
@@ -67,6 +86,7 @@ export class GitLabScm implements ScmPort {
     this.#project = deps.defaultProject
     this.#sourceRefs = deps.sourceRefs ?? {}
     this.#repoRoot = deps.repoRoot
+    this.#remote = deps.remoteName ?? 'origin'
     this.#git =
       deps.git ??
       (async (args, cwd) => {
@@ -123,6 +143,313 @@ export class GitLabScm implements ScmPort {
   /** 이 통로가 아는 행위. execute 의 분기와 같은 목록이어야 한다. */
   supports(action: string): boolean {
     return (GITLAB_ACTIONS as readonly string[]).includes(action)
+  }
+
+  /**
+   * 나가기 **전에** 읽히는 사실 (0.8.0 §D·§L·§M·§N). 판정은 하지 않는다 — Core 의
+   * Remote Review 가 이 사실로 판정한다. 여기서 쓰는 것은 하나도 없다.
+   */
+  async review(action: ExternalAction): Promise<RemoteFacts> {
+    return { verifiable: this.verifies(action.action), ...(await this.#review(action)) }
+  }
+
+  async #review(action: ExternalAction): Promise<RemoteFacts> {
+    const capability = this.supports(action.action)
+    switch (action.action) {
+      case 'git.push':
+        return this.#reviewPush(action, capability)
+      case 'gitlab.mr.create':
+        return this.#reviewCreateChange(action, capability)
+      case 'gitlab.mr.merge':
+        return this.#reviewMergeChange(action, capability)
+      case 'gitlab.note.create': {
+        const ref = parseRef(this.#expand(action.target))
+        if (!ref) {
+          return { provider: this.id, capability: false, target: action.target, unknown: ['unrecognized target'] }
+        }
+        return {
+          provider: this.id,
+          capability,
+          resource: ref.project,
+          target: action.target,
+          // 성공했다면 밖에 이 본문이 있어야 한다 — 실행 전에 적어 둔다.
+          observed: { 'expect.body': action.payload },
+        }
+      }
+      case 'gitlab.issue.update': {
+        const ref = parseRef(this.#expand(action.target))
+        if (!ref || ref.kind !== 'issue') {
+          return { provider: this.id, capability: false, target: action.target, unknown: ['unrecognized issue'] }
+        }
+        const expected: Record<string, string | undefined> = {}
+        try {
+          for (const [field, value] of Object.entries(JSON.parse(action.payload) as Record<string, unknown>)) {
+            expected[`expect.issue.${field}`] = String(value)
+          }
+        } catch {
+          return {
+            provider: this.id,
+            capability,
+            resource: ref.project,
+            target: action.target,
+            unknown: ['payload is not JSON'],
+          }
+        }
+        return { provider: this.id, capability, resource: ref.project, target: action.target, observed: expected }
+      }
+      default: {
+        const ref = parseRef(this.#expand(action.target))
+        return {
+          provider: this.id,
+          capability,
+          target: action.target,
+          ...(ref ? { resource: ref.project } : this.#project ? { resource: this.#project } : {}),
+        }
+      }
+    }
+  }
+
+  /** 되돌려 읽을 수 있는 행위. `execute` 의 분기와 이 목록이 갈리면 그것이 결함이다. */
+  verifies(action: string): boolean {
+    return (VERIFIABLE_ACTIONS as readonly string[]).includes(action)
+  }
+
+  /**
+   * 나간 **뒤에** 밖에서 읽히는 사실. 명령이 0 으로 끝났다는 것은 성공이 아니다.
+   */
+  async verify(
+    action: ExternalAction,
+    result: { resultRef: string },
+  ): Promise<{ observed: Record<string, string | undefined>; unsupported?: boolean }> {
+    switch (action.action) {
+      case 'git.push': {
+        if (!this.#repoRoot) return { observed: {}, unsupported: true }
+        const [remote, branch] = this.#pushTarget(action.target)
+        const listed = await this.#git(['ls-remote', remote, `refs/heads/${branch}`], this.#repoRoot)
+        return { observed: { sha: listed.ok ? listed.detail.split(/\s+/)[0] : undefined, target: `${remote}/${branch}` } }
+      }
+      case 'gitlab.mr.create': {
+        const iid = /!(\d+)/.exec(result.resultRef)?.[1]
+        const project = this.#projectOf(action.target)
+        if (!iid || !project) return { observed: {}, unsupported: true }
+        const mr = await this.#change(project, Number(iid))
+        return {
+          observed: {
+            resource: project,
+            sha: mr?.sha,
+            source: mr?.source_branch,
+            target: mr?.target_branch,
+            title: mr?.title,
+            state: mr?.state,
+          },
+        }
+      }
+      case 'gitlab.mr.merge': {
+        const ref = parseRef(this.#expand(action.target))
+        if (!ref || ref.kind !== 'change') return { observed: {}, unsupported: true }
+        const mr = await this.#change(ref.project, ref.iid)
+        return {
+          observed: {
+            resource: ref.project,
+            state: mr?.state,
+            sha: mr?.sha,
+            merge_commit: mr?.merge_commit_sha ?? mr?.squash_commit_sha,
+          },
+        }
+      }
+      case 'gitlab.note.create': {
+        // 글이 실제로 그 자리에 있는가. id 는 방금 만든 것의 것이고, 본문은 사람이 승인한
+        // 그대로여야 한다 — 다른 것이 올라갔다면 성공이 아니다.
+        const ref = parseRef(this.#expand(action.target))
+        const noteId = /#note_(\d+)$/.exec(result.resultRef)?.[1]
+        if (!ref || !noteId) return { observed: {}, unsupported: true }
+        const path = ref.kind === 'change' ? 'merge_requests' : 'issues'
+        const note = await this.#reader.get<{ id: number; body?: string }>(
+          `/projects/${encodeProject(ref.project)}/${path}/${ref.iid}/notes/${noteId}`,
+        )
+        return {
+          observed: {
+            resource: ref.project,
+            note: note.ok && note.data ? String(note.data.id) : undefined,
+            body: note.ok ? note.data?.body : undefined,
+          },
+        }
+      }
+      case 'gitlab.issue.update': {
+        const ref = parseRef(this.#expand(action.target))
+        if (!ref || ref.kind !== 'issue') return { observed: {}, unsupported: true }
+        const issue = await this.#reader.get<Record<string, unknown>>(
+          `/projects/${encodeProject(ref.project)}/issues/${ref.iid}`,
+        )
+        if (!issue.ok || !issue.data) return { observed: { resource: ref.project } }
+        // 승인된 payload 의 필드가 실제로 그 값이 됐는가. 필드는 payload 가 정한다 —
+        // adapter 가 무엇을 볼지 고르지 않는다.
+        const observed: Record<string, string | undefined> = { resource: ref.project }
+        try {
+          for (const [field, value] of Object.entries(JSON.parse(action.payload) as Record<string, unknown>)) {
+            const current = issue.data[field]
+            observed[`issue.${field}`] = current === undefined ? undefined : String(current)
+            void value
+          }
+        } catch {
+          return { observed, unsupported: true }
+        }
+        return { observed }
+      }
+      default:
+        return { observed: {}, unsupported: true }
+    }
+  }
+
+  /** 올릴 가지의 지금 상태 — 이름이 아니라 SHA 로 본다 (§L). */
+  async #reviewPush(action: ExternalAction, capability: boolean): Promise<RemoteFacts> {
+    if (!this.#repoRoot) {
+      return { provider: this.id, capability: false, target: action.target, unknown: ['no repository root for git.push'] }
+    }
+    const [remote, branch] = this.#pushTarget(action.target)
+    const unknown: string[] = []
+    const url = await this.#git(['remote', 'get-url', remote], this.#repoRoot)
+    if (!url.ok) unknown.push(`remote url for ${remote}`)
+    const head = await this.#git(['rev-parse', 'HEAD'], this.#repoRoot)
+    if (!head.ok) unknown.push('local HEAD')
+    const listed = await this.#git(['ls-remote', remote, `refs/heads/${branch}`], this.#repoRoot)
+    if (!listed.ok) unknown.push(`remote ref ${branch}`)
+    const remoteSha = listed.ok ? (listed.detail.split(/\s+/)[0] ?? '') : ''
+
+    // 되감기가 필요한 상태인가. 조상이 아니면 이 push 는 남의 것을 덮는 형태가 된다.
+    let divergence: string | undefined
+    if (head.ok && remoteSha) {
+      const ancestor = await this.#git(['merge-base', '--is-ancestor', remoteSha, head.detail], this.#repoRoot)
+      divergence = ancestor.ok ? 'fast-forward' : 'diverged'
+    } else if (head.ok && listed.ok && !remoteSha) {
+      divergence = 'new-branch'
+    }
+
+    return {
+      provider: this.id,
+      capability,
+      target: `${remote}/${branch}`,
+      ...(url.ok ? { resource: identityOf(url.detail) } : {}),
+      observed: {
+        'remote.name': remote,
+        'remote.url': url.ok ? url.detail : undefined,
+        'remote.sha': remoteSha || undefined,
+        'local.head': head.ok ? head.detail : undefined,
+        branch,
+        ...(divergence ? { divergence } : {}),
+      },
+      ...(divergence === 'diverged'
+        ? { ambiguity: [`${remote}/${branch} is not an ancestor of this HEAD — this push would not fast-forward`] }
+        : {}),
+      ...(unknown.length > 0 ? { unknown } : {}),
+    }
+  }
+
+  /** 만들려는 변경요청의 자리 — 같은 것이 이미 있으면 그것이 모호함이다 (§M). */
+  async #reviewCreateChange(action: ExternalAction, capability: boolean): Promise<RemoteFacts> {
+    const project = this.#projectOf(action.target)
+    if (!project) return { provider: this.id, capability: false, unknown: ['no project for gitlab.mr.create'] }
+    let body: Record<string, unknown> = {}
+    const unknown: string[] = []
+    try {
+      body = JSON.parse(action.payload) as Record<string, unknown>
+    } catch {
+      unknown.push('payload is not JSON')
+    }
+    const source = typeof body['source_branch'] === 'string' ? (body['source_branch'] as string) : undefined
+    const target = typeof body['target_branch'] === 'string' ? (body['target_branch'] as string) : undefined
+
+    const ambiguity: string[] = []
+    if (source) {
+      const open = await this.#reader.get<{ iid: number; target_branch?: string }[]>(
+        `/projects/${encodeProject(project)}/merge_requests?state=opened&source_branch=${encodeURIComponent(source)}`,
+      )
+      if (!open.ok) unknown.push('open merge requests for this source branch')
+      for (const existing of open.data ?? []) {
+        ambiguity.push(`!${existing.iid} is already open from ${source} into ${existing.target_branch ?? '(unknown)'}`)
+      }
+    } else {
+      unknown.push('source_branch')
+    }
+    if (!target) unknown.push('target_branch')
+
+    const sha = source ? await this.#branchSha(project, source) : undefined
+    const baseline = target ? await this.#branchSha(project, target) : undefined
+
+    return {
+      provider: this.id,
+      capability,
+      resource: project,
+      target: action.target,
+      observed: {
+        source,
+        target,
+        'local.head': sha,
+        'remote.sha': baseline,
+        title: typeof body['title'] === 'string' ? (body['title'] as string) : undefined,
+      },
+      ...(ambiguity.length > 0 ? { ambiguity } : {}),
+      ...(unknown.length > 0 ? { unknown } : {}),
+    }
+  }
+
+  /** 합치려는 변경요청의 지금 — 무엇을 어디로, 어느 SHA 에서 (§N). */
+  async #reviewMergeChange(action: ExternalAction, capability: boolean): Promise<RemoteFacts> {
+    const ref = parseRef(this.#expand(action.target))
+    if (!ref || ref.kind !== 'change') {
+      return { provider: this.id, capability: false, target: action.target, unknown: ['unrecognized change reference'] }
+    }
+    const mr = await this.#change(ref.project, ref.iid)
+    if (!mr) {
+      return { provider: this.id, capability, resource: ref.project, target: action.target, unknown: ['the merge request'] }
+    }
+    const ambiguity: string[] = []
+    if (mr.state !== 'opened') ambiguity.push(`!${ref.iid} is ${mr.state ?? '(unknown state)'}, not open`)
+    if (mr.merge_status && mr.merge_status !== 'can_be_merged') ambiguity.push(`merge status is ${mr.merge_status}`)
+    if (mr.has_conflicts) ambiguity.push('the merge request reports conflicts')
+    if (mr.draft) ambiguity.push('the merge request is a draft')
+
+    return {
+      provider: this.id,
+      capability,
+      resource: ref.project,
+      target: action.target,
+      observed: {
+        state: mr.state,
+        source: mr.source_branch,
+        target: mr.target_branch,
+        'local.head': mr.sha,
+        merge_status: mr.merge_status,
+        pipeline: mr.pipeline?.status,
+      },
+      ...(ambiguity.length > 0 ? { ambiguity } : {}),
+    }
+  }
+
+  async #change(project: string, iid: number): Promise<ChangeFacts | null> {
+    const response = await this.#reader.get<ChangeFacts>(
+      `/projects/${encodeProject(project)}/merge_requests/${iid}`,
+    )
+    return response.ok ? (response.data ?? null) : null
+  }
+
+  async #branchSha(project: string, branch: string): Promise<string | undefined> {
+    const response = await this.#reader.get<{ commit?: { id?: string } }>(
+      `/projects/${encodeProject(project)}/repository/branches/${encodeURIComponent(branch)}`,
+    )
+    return response.ok ? response.data?.commit?.id : undefined
+  }
+
+  #projectOf(target: string): string | undefined {
+    if (!target.trim()) return this.#project
+    const ref = parseRef(this.#expand(target))
+    return ref?.project ?? (target.includes('/') ? target.trim() : this.#project)
+  }
+
+  #pushTarget(target: string): [string, string] {
+    const parts = target.trim().split(/\s+/).filter(Boolean)
+    if (parts.length === 0) return [this.#remote, '']
+    return parts.length === 1 ? [this.#remote, parts[0]!] : [parts[0]!, parts[1]!]
   }
 
   async execute(action: ExternalAction): Promise<ExternalActionResult> {
@@ -185,9 +512,12 @@ export class GitLabScm implements ScmPort {
   async #mergeChange(action: ExternalAction): Promise<ExternalActionResult> {
     const ref = parseRef(this.#expand(action.target))
     if (!ref || ref.kind !== 'change') return { ok: false, error: `unrecognized change: ${action.target}` }
-    // GitLab 의 merge 는 PUT 이다. 이 adapter 의 통로는 post 하나이므로, 통로가 넓어지기
-    // 전까지는 할 수 없다고 **말한다** — 못 하는 것을 하는 척하지 않는다.
-    const response = await this.#writer.post<{ web_url?: string; state?: string }>(
+    // GitLab 의 merge 는 `PUT /merge_requests/:iid/merge` 다. 예전에 POST 로 보낸 것은
+    // 계약 위반이었고, 그 실패는 승인이 끝난 **뒤에** 났다.
+    if (!this.#writer.put) {
+      return { ok: false, error: 'this write channel cannot send PUT — gitlab.mr.merge needs it' }
+    }
+    const response = await this.#writer.put<{ web_url?: string; state?: string }>(
       `/projects/${encodeProject(ref.project)}/merge_requests/${ref.iid}/merge`,
       action.payload ? (JSON.parse(action.payload) as Record<string, unknown>) : {},
     )
@@ -222,10 +552,15 @@ export class GitLabScm implements ScmPort {
     const parts = action.target.trim().split(/\s+/).filter(Boolean)
     if (parts.length === 0) return { ok: false, error: 'git.push needs a branch' }
     if (parts.some((part) => part.startsWith('-'))) return { ok: false, error: `git.push takes no flags: ${action.target}` }
-    const [remote, branch] = parts.length === 1 ? ['origin', parts[0]!] : [parts[0]!, parts[1]!]
-    const result = await this.#git(['push', remote, branch], this.#repoRoot)
+    const [remote, branch] = parts.length === 1 ? [this.#remote, parts[0]!] : [parts[0]!, parts[1]!]
+    // **가지 이름이 아니라 commit 을 올린다** (§L). 승인은 그 SHA 에 대한 것이었고, 그
+    // 사이에 HEAD 가 움직였다면 같은 명령이 다른 내용을 내보낸다. HEAD 를 못 읽으면
+    // 이름으로 밀지 않고 그 사실을 말한다.
+    const head = await this.#git(['rev-parse', 'HEAD'], this.#repoRoot)
+    if (!head.ok) return { ok: false, error: `could not read HEAD: ${head.detail}` }
+    const result = await this.#git(['push', remote, `${head.detail}:refs/heads/${branch}`], this.#repoRoot)
     return result.ok
-      ? { ok: true, resultRef: `${remote}/${branch}` }
+      ? { ok: true, resultRef: `${remote}/${branch}@${head.detail}` }
       : { ok: false, error: result.detail }
   }
 
@@ -233,4 +568,30 @@ export class GitLabScm implements ScmPort {
     if (!this.#project) return reference
     return /^[!#]\d+$/.test(reference.trim()) ? `${this.#project}${reference.trim()}` : reference
   }
+}
+
+/** 검수가 읽는 변경요청의 사실들. 이 adapter 밖으로 그대로 나가지 않는다. */
+type ChangeFacts = {
+  state?: string
+  source_branch?: string
+  target_branch?: string
+  sha?: string
+  title?: string
+  merge_status?: string
+  has_conflicts?: boolean
+  draft?: boolean
+  merge_commit_sha?: string
+  squash_commit_sha?: string
+  pipeline?: { status?: string }
+}
+
+/**
+ * 원격 URL 에서 프로젝트 신원만 꺼낸다 — `git@host:group/p.git` 도 `https://host/group/p` 도
+ * 같은 `group/p` 다. 결합과 견주는 값이므로 형태가 아니라 신원이어야 한다.
+ */
+export function identityOf(url: string): string {
+  const trimmed = url.trim()
+  const ssh = /^[^@\s]+@[^:]+:(.+)$/.exec(trimmed)
+  const path = ssh ? ssh[1]! : trimmed.replace(/^[a-z+]+:\/\/[^/]+\//i, '')
+  return normalize(path)
 }

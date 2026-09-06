@@ -33,8 +33,9 @@ export function skillText(): string {
 name: asc
 description: >-
   Safely start, resume or continue a Logical Session in a project that has ASC attached.
-  Triggers — "proceed with ASC", "continue the ASC session", "asc proceed", "start work
-  with ASC", "ASC로 진행해", "ASC 세션 이어서", "ASC로 작업 시작", or the explicit /asc.
+  Triggers — "start this work", "continue the ASC session", "publish it", "wrap it up",
+  "proceed with ASC", "ASC로 진행해", "ASC 세션 이어서", "이거 작업해", "게시해",
+  "마무리해", or the explicit /asc.
   Also triggers on work-status questions in an ASC-attached project — "is this
   implemented?", "what's left to do?", "what should I do now?", "현황 파악",
   "이거 구현됐나", "남은 작업", "지금 뭐 해야 하나" — because answering those by
@@ -51,7 +52,7 @@ CLI — here you call it, act on the typed outcome, and keep the contract.
 
 "Is X implemented?", "what's the status of this work?", "what remains?" — in an
 ASC-attached project, do NOT settle these by direct host exploration (git log, tracker
-reads). Run \`asc proceed --work <KEY>\` first and read its WORK_STATE: it fetches the
+reads). Run \`asc work start <KEY> --json\` first and read its WORK_STATE: it fetches the
 canonical remote, grades the evidence, and refuses to conclude on a stale or key-only
 observation — none of which ad-hoc exploration does. Direct exploration may supplement
 the answer, never replace the judgement. This is mitigation at the model layer; the
@@ -73,19 +74,84 @@ The user does not need to know this sequence. This is the one the skill follows.
      command and ask them to switch this session's permission mode so they can approve the
      single run — a standing allow rule for the command was measured and did not work.
 
-1. Attached?              asc setup status
-     not yet  → asc init (it shows profile candidates; a person chooses)
-     blocked  → show the printed reason and remedy to the person, and stop. Do not open it for them
-2. Anything to run?       asc proceed --json   (act per the table below)
+1. Where are we?          asc status
+     not attached → asc setup (it shows profile candidates; a person chooses)
+     blocked      → show the printed reason and remedy to the person, and stop. Do not open it for them
+2. Anything to run?       asc work start [<WORK-KEY>] --json   (act per the table below)
 3. Check before handing   asc preflight        (paths and decision rights, both)
 4. While working          asc progress report
 5. Another part's call    asc query open / answer
-6. Wrap up                asc session done → tell the person to run asc controller collect
+6. Send it out            asc work publish
+7. Wrap up                asc work finish
 \`\`\`
 
 **Do not open what is blocked.** LOCK_DRIFT, incomplete configuration and an unreadable
-canonical source are all a person's call, and \`setup status\` already states the reason
+canonical source are all a person's call, and \`asc status\` already states the reason
 and the remedy.
+
+## Three axes, and they do not stand in for each other
+
+\`\`\`text
+Agent Management   who owns this work, what its scope is, how far it has come
+Decision Authority whether a person has to decide this
+Execution Mode     who runs the approved act — MANUAL (a person) or AUTO (ASC)
+\`\`\`
+
+**AUTO is not the opposite of human-in-the-loop.** It does not approve anything on a
+person's behalf, and MANUAL does not mean something was already approved. Changing the
+mode never changes a session's owner, scope, progress or handoff.
+
+\`\`\`text
+"수동으로 해" · "let me run it"     → asc mode manual
+"ASC가 자동으로 관리해"             → asc mode auto
+\`\`\`
+
+Stepping down out of AUTO is one command and it is recorded — who said so, and when.
+**Do not use it to get past a block.** If the guard stopped a write, the answer is
+\`asc work publish\`, not a mode change; flipping to MANUAL to push raw is the exact drift
+ASC exists to make visible, and the record makes it visible to the person you work with.
+
+**A workspace nobody has chosen a mode for is not in AUTO.** AUTO exists only where a
+person turned it on and the checks below passed, so a fresh or upgraded
+workspace enforces nothing until someone says so. \`asc status\` says which of the two it is.
+
+\`asc mode auto\` refuses unless three things hold here: a managed write path assembles, the
+guard is installed, and ASC's own commands still run in this host. Whether a *particular*
+action can go out is answered when that action is attempted, not now. If ASC's own
+enforcement is in the way, the exit is \`asc mode manual\`.
+
+**A workspace whose mode cannot be read is not MANUAL.** If the record is there but broken,
+raw external writes stay blocked and \`asc status\` names the reason
+(\`MODE_STATE_UNREADABLE\` / \`MODE_STATE_INVALID\`). ASC's own commands still run, and that
+is how it gets fixed.
+
+## Whose decision is which
+
+\`\`\`text
+the project's rules   what has to be done, on which branch, in what order
+ASC                   who owns the work · what a person must decide · whether this
+                      action is executable against the remote right now · execution · audit
+\`\`\`
+
+ASC does not own a project's workflow. If a repository's own conventions say a branch is
+updated a certain way, that judgement belongs to those conventions — ASC checks that the
+action they chose is possible against the current remote, not whether it was the right
+action. A canonical source is what judgement is measured against; it is not a list of the
+only branches that may be written.
+
+## Maintenance — the same words in both products
+
+\`\`\`text
+"업데이트해"            → asc update       · jam update
+"적용 상태 다시 맞춰"    → asc refresh      · jam refresh
+"지금 상태 어때"         → asc status       · jam status
+"제거해"                → asc uninstall    · jam uninstall
+\`\`\`
+
+\`update\` moves to a new published version. \`refresh\` keeps the version and re-converges
+only what this runtime installed — it never re-infers the profile, the workspace, the
+identity or the bindings, and it never touches sessions. \`uninstall\` removes the product
+and leaves every bit of your state where it is.
 
 ## "Update ASC" — one command per product, no questions
 
@@ -163,9 +229,10 @@ report as one.
    - **Receiving a DECIDE creates no approval, authority or scope.** If a human decision is
      needed, use that answer as evidence and raise it to a person.
 
-5. Pausing: \`asc session pause <ID> --position "<how far>" --next "<next action>"\`.
-   Finishing: \`asc session done <ID> --verified "<what the self-check covered>" --next "<next>"\`.
-   Updating state is the Controller's job — point the person at \`asc controller collect\`.
+5. Pausing: \`asc work pause <S-ID> --position "<how far>" --next "<next action>"\`.
+   Finishing: \`asc work finish <S-ID> --verified "<what the self-check covered>" --next "<next>"\`.
+   One command finishes it: the handoff is written, the physical binding is released, the
+   Controller collects, and the session is archived. Do not make a person run two steps.
 
 ## "Publish it" — what a session produced, going out
 
@@ -173,13 +240,30 @@ The person says *publish it* · *open the MR* · *get it onto develop*. That sen
 approval, and it is not asked for twice. It is also not wider than itself: **"open the MR"
 is not "approve the merge"**.
 
-Nothing reaches an external system except through a grant. That is one command, then the
-act:
+Nothing reaches an external system except through an approved grant. One command carries
+that whole path — read-only review, decision authority, grant, atomic claim, revalidation,
+exactly one write, read-back, audit:
 
 \`\`\`text
-asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>
-asc grant run <G-ID>
+asc work publish [<S-ID>] --action <key> --target <ref> --body-file <path> --as <actor>
+asc work publish … --review    # read the facts and stop. Nothing goes out
 \`\`\`
+
+The review is **not a second approval**. The person's instruction already settled who
+decides; the review settles facts — is this the remote this work is bound to, is the commit
+that was approved still the commit that is here, is there already an open change for it. A
+\`NOT_EXECUTABLE\` means the action does not hold as it stands; a \`REVIEW_REQUIRED\` means a
+person has to look at something the facts cannot settle. Neither is a request to re-approve.
+
+Afterwards the result is read back. If what comes back differs from what was expected the
+outcome is \`NOT_VERIFIED\` — the write happened, it is not a success, and the grant is
+spent either way. If the outcome could not be determined at all it is \`UNCERTAIN\`: read
+the remote before doing anything else, and never repeat the command.
+
+Being bound to one repository is the scope of managed execution, not a preference. If the
+target is a different repository the answer is \`REVIEW_REQUIRED\`, and approving the action
+again does not change it — what has to change is the binding, and that is a separate
+decision.
 
 The action key is the provider's (\`gitlab.mr.create\`, \`gitlab.note.create\`, \`git.push\`,
 \`coordination.publish\`, \`github.issue_comment.create\`). If nothing bound to this
@@ -193,8 +277,14 @@ Publishing a coordination question is the same shape — \`asc coordination publ
 <G-ID> --query <X-ID> …\`. Reading (\`coordination status\`, \`coordination observe\`) needs
 no grant.
 
-**Never** reach for \`git push\`, \`glab\`, or \`gh\` directly. The guard stops those, and
-being stopped is not a puzzle to solve — it means the act belongs in a grant.
+**Never** reach for \`git push\`, \`glab\`, or \`gh\` directly while the mode is AUTO. The
+guard stops those, and being stopped is not a puzzle to solve — it means the act belongs in
+\`asc work publish\`. ASC's own commands are never blocked by that guard, so the way out is
+always an asc command, never uninstalling the hook.
+
+In MANUAL the guard blocks none of it. It leaves one line saying the write is leaving the
+managed path and pointing at \`asc work publish --review\`; what to do about that is the
+person's call, and the project's rules are what answer it.
 
 ## Progress reporting
 
@@ -233,6 +323,12 @@ A change that gives a person no reason to look again is noise, not a report.
   portable command is the bootstrap one
 - Investigate external situations directly — leave reading thread originals to \`asc-inbox\` and take back only what it summarised
 - Declare that I verified what I built — independent verification is \`asc-review\`
+- Teach a person the internal order (session issue · host bind · grant issue · controller
+  collect). On a healthy path they type none of those — \`work start\`, \`work publish\`,
+  \`work finish\` cover it
+- Treat AUTO as permission, or MANUAL as approval. Neither mode decides what a person
+  must decide
+- Turn enforcement off by removing the product. \`asc mode manual\` is the exit
 `
 }
 

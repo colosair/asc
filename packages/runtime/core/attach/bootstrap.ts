@@ -159,13 +159,13 @@ export async function planBootstrap(input: BootstrapInput): Promise<BootstrapPla
         ? '쓸 수 있는 Profile이 없다 — 설치 경로에 profiles/<id>/profile.json 이 있어야 한다'
         : `어떤 Profile로 붙일지 (후보: ${candidates.join(', ')})`,
     )
-    if (candidates.length > 0) steps.push('asc init --profile <위 후보 중 하나>')
+    if (candidates.length > 0) steps.push('asc setup --profile <위 후보 중 하나>')
   } else if (profile.kind === 'ATTACHED_UNKNOWN') {
     // 통과시키면 무엇으로 도는지 모르는 채 굴러간다 — bootstrapGuard가 막는 것과 같은 상태다
     undecided.push('.asc/ 는 있는데 profile.lock 을 읽지 못했다 — 붙이다 만 상태다')
-    steps.push('asc init --profile <id> 로 다시 붙이거나 asc profile resolve --write 로 고정한다')
+    steps.push('asc setup 으로 다시 붙이거나 asc profile resolve --write 로 고정한다')
   } else if (!attached) {
-    steps.push(`asc init --profile ${profile.id}`)
+    steps.push(`asc setup --profile ${profile.id}`)
   }
 
   for (const host of hosts) {
@@ -186,7 +186,7 @@ export async function planBootstrap(input: BootstrapInput): Promise<BootstrapPla
     }
   }
 
-  steps.push('asc setup status')
+  steps.push('asc status')
   if (attached) steps.push('asc proceed')
 
   return {
