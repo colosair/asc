@@ -31,7 +31,7 @@ import {
   timerUnit,
   unitDir,
 } from '../adapters/service/systemd-user.ts'
-import { dueWorkspaces, renderWorkspaces, viewWorkspaces } from '../core/runtime/workspaces.ts'
+import { dueWorkspaces, renderWorkspaces, summarizePass, viewWorkspaces } from '../core/runtime/workspaces.ts'
 
 const command: ServiceCommand = {
   program: '/usr/bin/node',
@@ -246,5 +246,32 @@ describe('여러 workspace 를 하나가 돌본다 (설계 §6·§7)', () => {
 
   it('아는 workspace 가 없으면 그렇게 말한다', () => {
     assert.match(renderWorkspaces([]).join('\n'), /No workspaces are registered/)
+  })
+})
+
+describe('기계 회차의 종료 코드 (P0-R2)', () => {
+  it('전부 0 이면 0', () => {
+    const summary = summarizePass([{ workspaceId: 'W-a', code: 0 }, { workspaceId: 'W-b', code: 0 }], [])
+    assert.equal(summary.code, 0)
+    assert.equal(summary.outcome, 'ok')
+  })
+
+  it('하나라도 실패하면 회차도 실패다 — 삼키지 않는다', () => {
+    const summary = summarizePass(
+      [{ workspaceId: 'W-a', code: 0 }, { workspaceId: 'W-b', code: 2 }, { workspaceId: 'W-c', code: 2 }],
+      [{ workspaceId: 'W-d', health: 'DORMANT' }],
+    )
+    assert.equal(summary.code, 1)
+    assert.equal(summary.outcome, 'partial')
+    assert.deepEqual(summary.failed.map((r) => r.workspaceId), ['W-b', 'W-c'])
+    assert.match(summary.line, /1 passed · 2 failed \(W-b: 2, W-c: 2\) · 1 skipped \(DORMANT\)/)
+  })
+
+  it('돈 것이 없으면 실패도 없다', () => {
+    assert.equal(summarizePass([], [{ workspaceId: 'W-d', health: 'DORMANT' }]).code, 0)
+  })
+
+  it('전부 실패면 failed', () => {
+    assert.equal(summarizePass([{ workspaceId: 'W-a', code: 1 }], []).outcome, 'failed')
   })
 })

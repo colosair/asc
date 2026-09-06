@@ -88,3 +88,26 @@ export function renderWorkspaces(views: readonly WorkspaceView[]): string[] {
   }
   return lines
 }
+
+/** 회차 하나에서 workspace 하나가 어떻게 끝났는가. */
+export type PassResult = { workspaceId: string; code: number }
+
+/**
+ * 기계 회차 전체의 결과 (P0-R2).
+ *
+ * 원칙 둘이 같이 선다: **한 workspace 의 실패가 다른 workspace 를 세우지 않는다** — 그래서
+ * 전부 돌린 뒤에 센다. 그리고 **기계 수준 결과는 실패를 삼키지 않는다** — 하나라도 0 이 아니면
+ * 회차도 0 이 아니다. 예전에는 무조건 0 을 돌려줘서 OS 기록(LastExitStatus)에는 두 workspace 가
+ * 실패한 회차가 정상으로 남았다. 실패를 지운 것이 아니라 볼 수 없게 만든 것이고, 그것이 더 나쁘다.
+ */
+export function summarizePass(
+  ran: readonly PassResult[],
+  skipped: readonly { workspaceId: string; health: WorkspaceHealth }[],
+): { code: 0 | 1; outcome: 'ok' | 'partial' | 'failed'; failed: PassResult[]; line: string } {
+  const failed = ran.filter((result) => result.code !== 0)
+  const outcome = failed.length === 0 ? 'ok' : failed.length === ran.length ? 'failed' : 'partial'
+  const parts = [`${ran.length - failed.length} passed`]
+  if (failed.length > 0) parts.push(`${failed.length} failed (${failed.map((r) => `${r.workspaceId}: ${r.code}`).join(', ')})`)
+  if (skipped.length > 0) parts.push(`${skipped.length} skipped (${skipped.map((s) => s.health).join(', ')})`)
+  return { code: failed.length === 0 ? 0 : 1, outcome, failed, line: `Machine pass ${outcome} — ${parts.join(' · ')}` }
+}
