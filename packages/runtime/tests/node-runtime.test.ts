@@ -112,6 +112,7 @@ describe('P0 — 지원 하한을 먼저 답한다', () => {
 // ── A6 회귀 (0.3.1) — 후보를 찾았으면 처방 대신 실행한다 ─────────────────────
 
 import { REEXEC_SENTINEL, reexecWithCandidate, type ReexecSpawn } from '../core/distribution/node-runtime.ts'
+import { ENTRY_ENV } from '../cli/asc.ts'
 
 const failed = (candidates: { path: string; version: string }[]) =>
   ({
@@ -184,5 +185,35 @@ describe('A6 — Node self re-exec', () => {
     const { spawn } = spawnRecorder({ status: null, error: new Error('ENOENT') })
     const code = reexecWithCandidate(failed([{ path: '/n', version: 'v26.0.0' }]), [], { env: {}, spawn, entry: '/e' })
     assert.equal(code, null)
+  })
+})
+
+describe('재실행이 진입점을 잃지 않는다 (F1 후속)', () => {
+  it('bootstrap 으로 들어온 실행은 재실행 뒤에도 bootstrap 이다', () => {
+    // 기본 Node 가 하한보다 낮은 기계에서 첫 설치가 절반만 끝났다: 재실행된 프로세스가
+    // 자기를 설치된 runtime 이라고 말해 stable runtime 설치도 기계 등록도 계획에서 빠졌다.
+    const spawned: { path: string; args: string[]; env: NodeJS.ProcessEnv }[] = []
+    const outcome = reexecWithCandidate(
+      {
+        ok: false,
+        code: 'NODE_RUNTIME_REQUIRED',
+        version: 'v22.23.2',
+        detail: 'too old',
+        candidates: [{ path: '/opt/node24/bin/node', version: 'v24.2.0' }],
+      },
+      ['setup', 'apply', '--json'],
+      {
+        env: { ...process.env, [ENTRY_ENV]: 'bootstrap' },
+        entry: '/opt/asc/asc.js',
+        spawn: (path, args, env) => {
+          spawned.push({ path, args: [...args], env: env as NodeJS.ProcessEnv })
+          return { status: 0 }
+        },
+      },
+    )
+    assert.equal(outcome, 0)
+    assert.equal(spawned.length, 1)
+    assert.equal(spawned[0]!.path, '/opt/node24/bin/node')
+    assert.equal(spawned[0]!.env[ENTRY_ENV], 'bootstrap', '재실행된 쪽이 어느 문이었는지 알아야 한다')
   })
 })
