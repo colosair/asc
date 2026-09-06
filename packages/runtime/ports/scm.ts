@@ -56,6 +56,14 @@ export interface ScmPort {
   review?(action: ExternalAction): Promise<RemoteFacts>
 
   /**
+   * 이 행위를 **되돌려 읽을 수 있는가** (0.8.0 보정 P1-2).
+   *
+   * 읽어 확인할 수 없는 쓰기를 자율 실행 가능한 것으로 광고하지 않기 위한 질문이다.
+   * 답하지 않는 통로는 "모른다" 이고, 그때 호출자는 확인했다고 적지 않는다.
+   */
+  verifies?(action: string): boolean
+
+  /**
    * 행위 뒤의 되돌려 읽기 (0.8.0 §L·§M·§N). **mutation 0** 이다.
    *
    * 명령이 0 으로 끝났다는 것과 밖에 그것이 있다는 것은 다르다. 여기서 읽은 사실이

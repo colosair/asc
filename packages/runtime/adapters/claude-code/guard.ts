@@ -299,20 +299,35 @@ ${offlinePatterns}
 ${logic}
 
 /**
- * 이 workspace 의 Execution Mode (0.8.0 Axis C).
+ * 이 workspace 의 실행 축 (0.8.0 Axis C · 보정 P0-1).
  *
- * **기록이 없으면 AUTO 가 아니다.** AUTO 는 사람이 고르고 readiness 를 통과한 결과로만
- * 존재한다 — 기록이 없다는 사실은 그 둘 중 어느 것도 증명하지 않으므로, 그 자리에서
- * enforcement 를 켜면 한 번도 검사되지 않은 강제가 서는 것이다.
+ * **세 자리를 가른다.** 두 개로 뭉치면 어느 쪽이든 한 번은 틀린다:
  *
- * 읽지 못한 경우도 같다. 모르는 것을 AUTO 로 읽으면 위와 같은 일이 생긴다.
+ *   파일 없음            ADVISE   아무도 고르지 않았다. 검사되지 않은 강제를 켜지 않는다
+ *   파일 있고 AUTO       ENFORCE  사람이 고르고 readiness 를 통과한 상태다
+ *   파일 있고 MANUAL     ADVISE   사람이 고른 상태다
+ *   파일 있는데 못 읽음   ENFORCE  AUTO 였을 수도 있다 — 모르는 것을 여는 쪽으로 기울지 않는다
+ *
+ * 마지막 자리가 이 함수가 다시 쓰인 이유다. 예전에는 읽기 실패를 MANUAL 로 답했고,
+ * 그러면 저장돼 있던 AUTO 가 파일 손상·권한·I/O 하나로 조용히 풀린다 (fail-open).
+ * 여기서 강제한다고 해서 AUTO 라고 말하지는 않는다 — 화면에는 "읽지 못했다" 로 나간다.
  */
-function executionMode(ascRoot) {
+function executionState(ascRoot) {
+  const file = join(ascRoot, 'adapters', 'policy', 'execution-mode.json')
+  let raw
   try {
-    const { value } = JSON.parse(readFileSync(join(ascRoot, 'adapters', 'policy', 'execution-mode.json'), 'utf8'))
-    return JSON.parse(value).mode === 'AUTO' ? 'AUTO' : 'MANUAL'
+    raw = readFileSync(file, 'utf8')
+  } catch (error) {
+    // 없는 것과 못 읽는 것은 다르다. ENOENT 만 "고르지 않았다" 다.
+    if (error && error.code === 'ENOENT') return { enforcement: 'ADVISE', mode: 'MANUAL', chosen: false }
+    return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_UNREADABLE' }
+  }
+  try {
+    const mode = JSON.parse(JSON.parse(raw).value).mode
+    if (mode !== 'AUTO' && mode !== 'MANUAL') return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_INVALID' }
+    return { enforcement: mode === 'AUTO' ? 'ENFORCE' : 'ADVISE', mode, chosen: true }
   } catch {
-    return 'MANUAL'
+    return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_INVALID' }
   }
 }
 
@@ -434,7 +449,7 @@ const ascRoot = registered ? registered.root : findAscRoot(cwd)
 if (!ascRoot) process.exit(0)
 
 const managed = findManaged(ascRoot, observedSessionId)
-const mode = executionMode(ascRoot)
+const state = executionState(ascRoot)
 
 // 관찰은 차단과 섞이지 않는다 — 실패해도 아래 판정에 닿지 않고, 두 mode 모두에서 돈다.
 // 일을 관리하는 것(Agent Management)은 실행을 누가 하느냐(Execution Mode)와 다른 축이다.
@@ -468,7 +483,7 @@ if (!isMutation) {
 //
 // **여기서 대상을 해석하지 않는다** (§H). 어느 프로젝트인지·어느 SHA 인지 판정하는 것은
 // Remote Review 의 일이고, 그 검수는 \`asc work publish --review\` 가 읽기만으로 보여 준다.
-if (mode !== 'AUTO') {
+if (state.enforcement === 'ADVISE') {
   const outward = forbiddenIn(command, FORBIDDEN)
   if (outward) {
     console.error(
@@ -482,8 +497,30 @@ if (mode !== 'AUTO') {
   process.exit(0)
 }
 
+// ── 실행 축 기록을 읽지 못했다 (P0-1) ────────────────────────────────────────
+//
+// AUTO 라고 말하지 않는다. 그러나 열어 두지도 않는다 — 저장돼 있던 것이 AUTO 였을 수 있고,
+// 그것을 파일 하나로 푸는 것이 fail-open 이다. ASC 명령은 위에서 이미 통과했으므로 복구
+// 경로는 그대로 열려 있다.
+if (state.degraded) {
+  const outward = forbiddenIn(command, FORBIDDEN)
+  if (outward) {
+    console.error(
+      [
+        \`[ASC guard] \${state.degraded} — 이 workspace 의 실행 축을 읽지 못했다.\`,
+        \`'\${outward}' 는 그 상태에서 나가지 않는다. 저장돼 있던 것이 AUTO 였을 수 있다.\`,
+        '  asc status                   # 무엇이 깨졌는지 본다',
+        '  asc mode                     # 지금 상태를 그대로 보여 준다',
+        'ASC 명령은 막히지 않는다 — 복구는 그쪽으로 한다.',
+      ].join('\\n'),
+    )
+    process.exit(2)
+  }
+  process.exit(0)
+}
+
 // ── AUTO 에서만 서는 문 ───────────────────────────────────────────────────────
-if (mode === 'AUTO') {
+if (state.mode === 'AUTO') {
   // **일이 시작되는데 논리 세션이 없다** (F6). 사람이 "ASC 적용해" 라고 말해야 했던 자리다.
   // 여기서 막고 다음 한 걸음을 그대로 준다. 세션에 들어간 뒤에는 이 문이 다시 열린다.
   if (isMutation && !managed) {

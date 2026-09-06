@@ -5,7 +5,7 @@
 //   ① 승인 ≠ 검수      사람이 "게시해" 라고 한 것은 결정권을 해결한다. 대상이 맞는지,
 //                      승인한 commit 이 아직 그 commit 인지는 그 말이 답해 주지 않는다.
 //   ② 검수 ≠ 정책      무엇을 해야 하는지는 프로젝트가 정한다. 검수는 "지금 이 외부
-//                      상태에서 그것이 정확히 실행 가능한가" 만 본다 (SSAFESTA §5).
+//                      상태에서 그것이 정확히 실행 가능한가" 만 본다 (the project §5).
 
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
@@ -36,7 +36,7 @@ describe('사실이 맞으면 READY 다', () => {
     assert.equal(outcome.expected['sha'], 'abc123', '성공했다면 밖에서 무엇이 보여야 하는지 미리 적는다')
   })
 
-  it('F-01 — 정본 branch 가 아니라는 이유로 막지 않는다 (SSAFESTA §3)', () => {
+  it('F-01 — 정본 branch 가 아니라는 이유로 막지 않는다 (프로젝트 정책 경계)', () => {
     // canonical = develop 은 "정본 판단의 기준" 이지 "develop 외 write 금지" 가 아니다.
     // 같은 저장소 안의 part branch 로 나가는 것은 프로젝트 정책의 자리이며, 검수는
     // 그것을 금지하지 않는다.
@@ -51,7 +51,7 @@ describe('사실이 맞으면 READY 다', () => {
     }
   })
 
-  it('검수는 branch 정책 어휘를 모른다 — 그것은 프로젝트의 것이다 (SSAFESTA §5·§16)', async () => {
+  it('검수는 branch 정책 어휘를 모른다 — 그것은 프로젝트의 것이다 (정책 경계)', async () => {
     const source = await readFile(new URL('../core/execution/remote-review.ts', import.meta.url), 'utf8')
     // 낱말이 아니라 **규칙**이 없어야 한다. `read back` 같은 산문은 정책이 아니므로
     // 경계에 붙여 본다.

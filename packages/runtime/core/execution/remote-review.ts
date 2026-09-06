@@ -23,6 +23,8 @@ export type RemoteFacts = {
   target?: string
   /** 이 통로가 이 행위를 할 수 있는가. */
   capability?: boolean
+  /** 이 통로가 이 행위를 되돌려 읽을 수 있는가 (0.8.0 보정 P1-2). */
+  verifiable?: boolean
   /**
    * 관측된 사실들. 키는 provider 가 정하고 Core 는 해석하지 않는다 — 화면과 감사에
    * 그대로 남는다. 예: `local.head`, `remote.sha`, `mr.state`, `remote.url`.
@@ -49,6 +51,7 @@ export type ReviewSeverity = 'BLOCK' | 'REVIEW' | 'NOTE'
 export type ReviewFinding = {
   code:
     | 'NO_CAPABILITY'
+    | 'NO_VERIFY_PATH'
     | 'BINDING_MISMATCH'
     | 'DRIFT'
     | 'AMBIGUOUS'
@@ -78,6 +81,13 @@ export type ReviewInput = {
   target: string
   facts: RemoteFacts
   basis?: ApprovedBasis
+  /**
+   * 되돌려 읽을 수 없으면 실행하지 않는가 (0.8.0 보정 P1-2).
+   *
+   * 자율 실행(AUTO)에서는 참이다: 확인할 수 없는 쓰기를 자율로 내보내면 "성공했다" 를
+   * 아무도 세지 않는다. 사람이 실행하는 자리(MANUAL)에서는 그 판단이 사람의 것이다.
+   */
+  requireVerification?: boolean
 }
 
 /**
@@ -88,6 +98,13 @@ export function reviewExternalAction(input: ReviewInput): ReviewOutcome {
   const findings: ReviewFinding[] = []
   const facts = input.facts
 
+  if (input.requireVerification === true && facts.verifiable === false) {
+    findings.push({
+      code: 'NO_VERIFY_PATH',
+      severity: 'BLOCK',
+      detail: `${facts.provider} cannot read back '${input.action}' — it will not run unattended`,
+    })
+  }
   if (facts.capability === false) {
     findings.push({
       code: 'NO_CAPABILITY',
@@ -153,6 +170,11 @@ function expectationOf(input: ReviewInput): Record<string, string> {
   const sha = input.basis?.sourceSha ?? input.facts.observed?.['local.head']
   if (sha) expected['sha'] = sha
   if (input.facts.resource) expected['resource'] = input.facts.resource
+  // provider 가 "성공했다면 이것이 보여야 한다" 고 적어 둔 것들. Core 는 그 뜻을 풀지
+  // 않고 이름만 옮긴다 — 무엇을 확인할지는 그 행위를 아는 쪽이 안다.
+  for (const [key, value] of Object.entries(input.facts.observed ?? {})) {
+    if (key.startsWith('expect.') && value !== undefined) expected[key.slice('expect.'.length)] = value
+  }
   return expected
 }
 

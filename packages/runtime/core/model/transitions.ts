@@ -136,7 +136,7 @@ export function transitionGrant(
   grant: ExecutionGrant,
   to: ExecutionGrant['status'],
   actor: ActorRole,
-  patch: Partial<Pick<ExecutionGrant, 'claimedBy' | 'consumedAt' | 'resultRef'>> = {},
+  patch: Partial<Pick<ExecutionGrant, 'claimedBy' | 'consumedAt' | 'resultRef' | 'resolution'>> = {},
 ): ExecutionGrant {
   const rule = resolve(GRANT_TRANSITIONS, grant.status, to, actor)
   const next: ExecutionGrant = { ...grant, ...patch, status: to, version: grant.version + 1 }

@@ -38,14 +38,55 @@ export const ExecutionModeRecord = z.object({
 })
 export type ExecutionModeRecord = z.infer<typeof ExecutionModeRecord>
 
+/** 기록이 있는데 읽지 못한 이유. **새 mode 값이 아니다** — 읽기의 결과일 뿐이다. */
+export type ModeStateProblem = 'MODE_STATE_UNREADABLE' | 'MODE_STATE_INVALID'
+
 /**
- * 지금 이 workspace 의 실행 축. `chosen` 은 **사람이 골랐는가** 다.
+ * 지금 이 workspace 의 실행 축.
  *
- * 상태가 셋이 아니다 — mode 는 여전히 MANUAL·AUTO 둘이고, `chosen` 은 기록이 있느냐를
- * 그대로 옮긴 값이다. 새 상태를 만들지 않으면서 "아직 정하지 않았다" 를 말할 수 있어야
- * 화면이 사람에게 정확히 무엇을 물을지 정한다.
+ * mode 는 여전히 MANUAL·AUTO 둘뿐이다. 달라진 것은 **모를 수 있다는 사실을 적는다**는 것:
+ *
+ * ```text
+ * 기록 없음            mode MANUAL · chosen false      아무도 고르지 않았다
+ * 기록 있음            mode 그대로 · chosen true       사람이 고른 값이다
+ * 기록 있는데 못 읽음   mode 없음   · degraded         AUTO 였을 수도 있다 — 모른다
+ * ```
+ *
+ * 마지막 자리를 MANUAL 로 적으면 그것이 fail-open 이다: 저장돼 있던 AUTO 가 파일 손상·
+ * 권한·I/O 하나로 조용히 풀린다. 그래서 `mode` 를 비워 두고, 호출자가 그 사실을 마주하게 한다.
  */
-export type ExecutionModeState = ExecutionModeRecord & { chosen: boolean }
+export type ExecutionModeState = {
+  mode?: ExecutionMode
+  chosen: boolean
+  since?: string
+  by?: string
+  degraded?: ModeStateProblem
+}
+
+/**
+ * 이 상태에서 밖으로 나가는 raw 쓰기를 강제 경로로 돌릴 것인가.
+ *
+ * ```text
+ * ENFORCE  AUTO 이거나, 기록을 읽지 못했다 (모르는 것을 푸는 쪽으로 기울지 않는다)
+ * ADVISE   MANUAL 이거나, 아무도 고르지 않았다
+ * ```
+ *
+ * **ENFORCE 는 AUTO 라는 뜻이 아니다.** 읽지 못한 자리는 AUTO 라고 주장하지 않으면서도
+ * 열어 두지 않는다 — 그 둘은 다른 말이고, 화면은 그 차이를 그대로 보여 준다.
+ */
+export function enforcementOf(state: ExecutionModeState): 'ENFORCE' | 'ADVISE' {
+  return state.degraded !== undefined || state.mode === 'AUTO' ? 'ENFORCE' : 'ADVISE'
+}
+
+/** 사람이 읽는 한 줄. 세 자리를 각각 다르게 말한다. */
+export function modeLine(state: ExecutionModeState): string {
+  if (state.degraded) {
+    return state.degraded === 'MODE_STATE_INVALID'
+      ? 'Execution Mode: unreadable — the stored record is not valid. Raw external writes stay blocked until it is fixed.'
+      : 'Execution Mode: unreadable — the stored record could not be read. Raw external writes stay blocked until it is fixed.'
+  }
+  return `Execution Mode: ${state.mode}${state.chosen ? '' : ' (never chosen — nothing is being enforced)'}`
+}
 
 /**
  * 기록이 없으면 AUTO 가 **아니다**.
@@ -60,10 +101,25 @@ export type ExecutionModeState = ExecutionModeRecord & { chosen: boolean }
  */
 export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'MANUAL'
 
+/**
+ * 읽는다. **없는 것과 못 읽은 것을 가른다** (0.8.0 보정 P0-1).
+ *
+ * 없으면 아무도 고르지 않은 것이고, 못 읽으면 무엇이 저장돼 있었는지 모르는 것이다.
+ * 뒤엣것을 MANUAL 로 적는 순간 저장된 AUTO 가 파일 하나로 풀린다.
+ */
 export async function readExecutionMode(scope: ScopedStore): Promise<ExecutionModeState> {
-  const raw = await scope.get(EXECUTION_MODE_KEY)
-  if (!raw) return { mode: DEFAULT_EXECUTION_MODE, chosen: false }
-  return { ...ExecutionModeRecord.parse(JSON.parse(raw)), chosen: true }
+  let raw: string | null
+  try {
+    raw = await scope.get(EXECUTION_MODE_KEY)
+  } catch {
+    return { chosen: true, degraded: 'MODE_STATE_UNREADABLE' }
+  }
+  if (raw === null) return { mode: DEFAULT_EXECUTION_MODE, chosen: false }
+  try {
+    return { ...ExecutionModeRecord.parse(JSON.parse(raw)), chosen: true }
+  } catch {
+    return { chosen: true, degraded: 'MODE_STATE_INVALID' }
+  }
 }
 
 export async function writeExecutionMode(

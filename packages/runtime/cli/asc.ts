@@ -35,10 +35,10 @@ import { IDENTITY_FILE } from './identity-config.ts'
 import { TextRenderer } from '../adapters/text/renderer.ts'
 import { ApprovalService } from '../core/approval/service.ts'
 import { Executor } from '../core/execution/executor.ts'
-import { transitionGrant } from '../core/model/transitions.ts'
+import { transitionGrant, transitionRequest } from '../core/model/transitions.ts'
 import { applyTransition } from '../core/runtime/store-ops.ts'
 import { GrantService } from '../core/execution/grant.ts'
-import { DecisionKind } from '../core/model/entities.ts'
+import { ApprovalRequest, DecisionKind } from '../core/model/entities.ts'
 import { discoverProjectRoot, excludeFromGit, identitiesTemplate, overrideTemplate, writeIfAbsent } from '../core/attach/init.ts'
 import { AdoptError, buildAdoptedProfile, type AdoptedProfile, type RemoteEntry } from '../core/attach/adopt.ts'
 import { locatorsOf, lookupLocator, readIndex, register, writeIndex } from '../core/workspace/index-store.ts'
@@ -178,10 +178,13 @@ import { buildFinalReport, renderFinalReport } from '../core/runtime/report.ts'
 import { FreezeLedger, freezeLines, judgeAction } from '../core/policy/remote-freeze.ts'
 import {
   ExecutionMode,
+  enforcementOf,
   judgeAutoReadiness,
+  modeLine,
   readExecutionMode,
   writeExecutionMode,
   type AutoReadiness,
+  type ExecutionModeState,
   type ReadinessAxis,
 } from '../core/policy/execution-mode.ts'
 import { reviewExternalAction, reviewLines, type ReviewOutcome } from '../core/execution/remote-review.ts'
@@ -208,7 +211,9 @@ Lifecycle
 
 Execution
   asc mode                  who executes: MANUAL (you) or AUTO (ASC)
-  asc mode manual|auto
+  asc mode auto             turn on managed execution — refuses unless the path is usable
+  asc mode manual [--request <REQ-ID>]
+                            step down. From AUTO this needs a decision a person approved
 
 Work
   asc work start [WORK]     start or resume the work, inside a contract
@@ -831,6 +836,7 @@ function parseArgsOrThrow(argv: string[]) {
       expect: { type: 'string' },
       advanced: { type: 'boolean', default: false },
       review: { type: 'boolean', default: false },
+      request: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   })
@@ -4600,7 +4606,10 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
       ? { axis: 'executor', state: 'READY', detail: outward.id }
       : { axis: 'executor', state: 'MISSING', detail: 'no binding provides an outward write path' },
   )
-  const actions = outward ? EXTERNAL_ACTIONS.filter((action) => outward.supports?.(action) ?? false) : []
+  // **되돌려 읽을 수 없는 행위는 자율 실행 가능한 것으로 광고하지 않는다** (P1-2).
+  const actions = outward
+    ? EXTERNAL_ACTIONS.filter((action) => (outward.supports?.(action) ?? false) && (outward.verifies?.(action) ?? false))
+    : []
   axes.push(
     !outward
       ? { axis: 'provider', state: 'MISSING', detail: 'no outward write path to ask' }
@@ -4620,8 +4629,8 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
   axes.push(
     !outward
       ? { axis: 'verify', state: 'MISSING', detail: 'no outward path to verify with' }
-      : outward.verify
-        ? { axis: 'verify', state: 'READY', detail: 'what goes out can be read back' }
+      : outward.verify && actions.length > 0
+        ? { axis: 'verify', state: 'READY', detail: `read-back for ${actions.length} action(s)` }
         : { axis: 'verify', state: 'MISSING', detail: `${outward.id} cannot read back what it wrote` },
   )
 
@@ -4830,15 +4839,16 @@ async function guardedByController(
 ): Promise<number | null> {
   if (!root) return null
   const store = new MarkdownStateStore(root)
-  const mode = await readExecutionMode(store.scope('policy')).catch(() => null)
-  if (mode?.mode !== 'AUTO') return null
-  const authority = await controllerAuthority(root, await attachedRuntime(root), values)
-  if (authority.ok) return null
-  console.error(`This workspace runs in AUTO. ${what} takes ASC's enforcement away with it,`)
-  console.error('so it is a controller decision — say who is deciding with `--as <actor>`.')
-  if (authority.names.length > 0) console.error(`Known: ${authority.names.join(', ')}`)
-  console.error('To step down to MANUAL first: `asc mode manual --as <actor>`')
-  return 2
+  const mode = await readExecutionMode(store.scope('policy'))
+  // 강제가 서 있는 자리에서만 묻는다 — 읽지 못한 자리도 포함이다(P0-1).
+  if (enforcementOf(mode) !== 'ENFORCE') return null
+  console.error(`This workspace enforces ASC's execution path. ${what} takes that away with it.`)
+  const decided = await consumeSafetyDecision(store, root, values, {
+    what: `safety-downgrade:${what}`,
+    title: `${what} — ASC 의 강제를 걷어낸다`,
+    situation: '이 명령이 끝나면 이 workspace 의 외부 쓰기는 더 이상 승인된 경로를 지나지 않는다.',
+  })
+  return decided.ok ? null : decided.code
 }
 
 /**
@@ -4858,14 +4868,25 @@ async function runMode(
   const current = await readExecutionMode(scope)
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
 
-  const show = (record: { mode: ExecutionMode }, extra: Record<string, unknown> = {}): void => {
+  const show = (state: ExecutionModeState, extra: Record<string, unknown> = {}): void => {
     if (values.json) {
       console.log(
-        JSON.stringify({ mode: record.mode, autoReadiness: { ready: readiness.ready, axes: readiness.axes }, ...extra }, null, 2),
+        JSON.stringify(
+          {
+            mode: state.mode ?? null,
+            chosen: state.chosen,
+            ...(state.degraded ? { degraded: state.degraded } : {}),
+            enforcement: enforcementOf(state),
+            autoReadiness: { ready: readiness.ready, axes: readiness.axes },
+            ...extra,
+          },
+          null,
+          2,
+        ),
       )
       return
     }
-    console.log(`Execution Mode: ${record.mode}`)
+    console.log(modeLine(state))
     for (const axis of readiness.axes) {
       console.log(`  ${axis.state.padEnd(16)} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
     }
@@ -4890,7 +4911,13 @@ async function runMode(
       if (values.json) {
         console.log(
           JSON.stringify(
-            { mode: current.mode, requested: 'AUTO', applied: false, autoReadiness: { ready: false, axes: readiness.axes } },
+            {
+              mode: current.mode ?? null,
+              chosen: current.chosen,
+              requested: 'AUTO',
+              applied: false,
+              autoReadiness: { ready: false, axes: readiness.axes },
+            },
             null,
             2,
           ),
@@ -4900,31 +4927,126 @@ async function runMode(
         for (const axis of readiness.blocking) {
           console.error(`  ${axis.state} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
         }
-        console.error(`Staying in ${current.mode}. Nothing was changed.`)
+        console.error(`Staying in ${current.mode ?? 'the current state'}. Nothing was changed.`)
       }
       return 1
     }
     const record = await writeExecutionMode(scope, 'AUTO', values.as as string | undefined)
-    show(record, { applied: 'true' })
+    show({ ...record, chosen: true }, { applied: 'true' })
     return 0
   }
 
-  // AUTO → MANUAL 은 enforcement 를 낮추는 전환이다 (§11·§J). Controller 권한을 Core 가 본다.
+  // AUTO → MANUAL 은 enforcement 를 낮추는 전환이다 (§11·§J·P0-2).
   //
-  // **AUTO 에서는 예외가 없다.** Host 가 `Bash(asc:*)` 를 허용한다는 사실이 Agent 에게
-  // 안전 경계를 스스로 푸는 길을 주어서는 안 된다 — Guard 는 이 명령을 통과시키고,
-  // 거절은 여기서 Core 가 한다. 아직 AUTO 가 아닌 자리에서는 견줄 대상이 없을 수 있고,
-  // 그때까지 문을 잠그면 공식 출구가 사라진다.
-  const authority = await controllerAuthority(root, runtime, values)
-  if (current.mode === 'AUTO' ? !authority.ok : authority.known > 0 && !authority.ok) {
-    console.error('Lowering enforcement is a controller decision — say who is deciding: `asc mode manual --as <actor>`')
-    if (authority.names.length > 0) console.error(`Known: ${authority.names.join(', ')}`)
-    else console.error('No approver is mapped in this workspace — `asc setup identity` names one.')
-    return 2
+  // **`--as` 하나로는 통과하지 않는다.** 그것은 자기 신고이고, Host 가 `Bash(asc:*)` 를
+  // 허용한 자리에서는 Agent 도 똑같이 칠 수 있다. 그러면 AUTO 는 스스로 벗을 수 있는 옷이
+  // 되고, 그것이 이 릴리스의 안전 경계를 무너뜨리는 가장 짧은 길이다.
+  //
+  // 그래서 **이미 있는 결정 장부**를 쓴다: 사람이 Inbox 에서 승인한 요청 하나가 근거다.
+  // 새 approval framework 를 만들지 않는다 — 요청을 만드는 것은 Agent 도 할 수 있고(올리는
+  // 것은 승인이 아니다), 승인하는 것은 Inbox 를 지난 사람뿐이다.
+  if (enforcementOf(current) === 'ENFORCE') {
+    const decided = await consumeSafetyDecision(store, root, values, {
+      what: 'execution-mode:MANUAL',
+      title: '이 workspace 의 실행 축을 MANUAL 로 내린다',
+      situation: current.degraded
+        ? `실행 축 기록을 읽지 못한다 (${current.degraded}). 강제를 낮추려면 사람이 정해야 한다.`
+        : '지금 AUTO 다. 외부 쓰기는 승인된 실행 경로로만 나간다.',
+    })
+    if (!decided.ok) return decided.code
   }
   const record = await writeExecutionMode(scope, 'MANUAL', values.as as string | undefined)
-  show(record, { applied: 'true' })
+  show({ ...record, chosen: true }, { applied: 'true' })
   return 0
+}
+
+/**
+ * 안전을 낮추는 행위 앞에 서는 **사람의 결정**을 찾는다 (0.8.0 보정 P0-2·P0-3).
+ *
+ * 새 승인 체계를 만들지 않는다. 여기서 쓰는 것은 이미 있는 것뿐이다:
+ *
+ * ```text
+ * ApprovalRequest   무엇을 물었는가        — Agent 가 만들 수 있다. 올리는 것은 승인이 아니다
+ * asc inbox decide  사람이 답한 자리       — 승인은 여기서만 생긴다
+ * DONE 전이         한 번 쓴 결정은 끝난다 — 같은 승인으로 두 번 내려가지 않는다
+ * ```
+ *
+ * 흐름은 세 걸음이고, 그 중 가운데가 사람의 자리다:
+ *
+ * ```text
+ * asc mode manual                        → 요청을 만들고 멈춘다 (REQ-xxxx)
+ * asc inbox decide REQ-xxxx approve --as → 사람이 정한다
+ * asc mode manual --request REQ-xxxx     → 그 결정을 근거로 내려간다
+ * ```
+ */
+async function consumeSafetyDecision(
+  store: MarkdownStateStore,
+  root: string,
+  values: Record<string, unknown>,
+  what: { what: string; title: string; situation: string },
+): Promise<{ ok: true } | { ok: false; code: number }> {
+  const requestId = values.request as string | undefined
+  const approvers = Object.keys(await loadIdentityMap(root))
+
+  if (requestId) {
+    const request = await store.get('request', requestId)
+    if (!request) {
+      console.error(`${requestId} 를 찾지 못했다.`)
+      return { ok: false, code: 1 }
+    }
+    // 그 결정이 **이 행위**에 대한 것이어야 한다. 다른 승인을 빌려 오지 않는다.
+    if (request.source?.reference !== what.what) {
+      console.error(`${requestId} 가 승인한 것은 '${request.source?.reference ?? '(없음)'}' 이지 ${what.what} 가 아니다.`)
+      return { ok: false, code: 2 }
+    }
+    if (request.status !== 'APPROVED') {
+      console.error(`${requestId} 는 지금 ${request.status} 다 — 사람이 승인한 결정만 근거가 된다.`)
+      console.error(`  asc inbox decide ${requestId} approve --as <actor>`)
+      return { ok: false, code: 2 }
+    }
+    // 한 번 쓴 결정은 소진된다. 같은 승인으로 두 번 내려가지 않는다.
+    //
+    // 소진은 executor 의 자리다 (APPROVED → DONE). 승인한 사람과 그것을 쓰는 쪽이 다른
+    // 역할이라는 것이 이 전이의 뜻이고, 여기서 그 규칙을 비켜 가지 않는다.
+    const consumed = await applyTransition(store, 'request', requestId, (r) =>
+      transitionRequest(r, 'DONE', 'executor', { resultRef: what.what }),
+    )
+    if (!consumed.ok) {
+      console.error(`${requestId} 를 소진하지 못했다 — 같은 승인이 다시 쓰일 수 있으므로 진행하지 않는다.`)
+      return { ok: false, code: 1 }
+    }
+    return { ok: true }
+  }
+
+  // 근거가 없다. **여기서 승인을 만들지 않는다** — 사람에게 올릴 자리를 만들고 멈춘다.
+  const id = await nextRequestId(store)
+  const at = new Date().toISOString()
+  const created = await store.create(
+    'request',
+    ApprovalRequest.parse({
+      id,
+      version: 0,
+      status: 'AWAITING_APPROVAL',
+      type: 'actionable',
+      priority: 'P0',
+      title: what.title,
+      detectedAt: at,
+      source: { eventKey: `${what.what}:${at}`, reference: what.what },
+      situation: what.situation,
+      impact: { interruptRequired: true, affectedSessions: [] },
+      draft: what.what,
+      authorizedApprover: approvers[0] ?? 'controller',
+      allowedDecisions: ['approve', 'dismiss'],
+    }),
+  )
+  console.error('This lowers ASC\'s enforcement, so it is a person\'s decision — not a flag on this command.')
+  console.error(`Raised for a person to decide: ${id}${created.ok ? '' : ' (could not be stored)'}`)
+  console.error(`  asc inbox show ${id}`)
+  console.error(`  asc inbox decide ${id} approve --as <actor>`)
+  console.error(`  asc mode manual --request ${id}`)
+  if (approvers.length > 0) console.error(`Known approvers: ${approvers.join(', ')}`)
+  else console.error('No approver is mapped here — `asc setup identity` names one first.')
+  return { ok: false, code: 2 }
 }
 
 /**
@@ -5211,12 +5333,19 @@ async function runWork(
       const bound = bindingIdentity(runtime, outward.id)
       const facts = outward.review
         ? await outward.review(action)
-        : { provider: outward.id, capability: outward.supports?.(action.action) ?? true, unknown: ['this write path cannot be read before use'] }
+        : {
+            provider: outward.id,
+            capability: outward.supports?.(action.action) ?? true,
+            verifiable: outward.verifies?.(action.action) ?? false,
+            unknown: ['this write path cannot be read before use'],
+          }
+      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'))) === 'ENFORCE'
       const review = reviewExternalAction({
         action: action.action,
         target: action.target,
         facts,
         ...(bound ? { basis: { resource: bound } } : {}),
+        ...(enforcing ? { requireVerification: true } : {}),
       })
       for (const line of reviewLines(review)) console.log(line)
       for (const [key, value] of Object.entries(facts.observed ?? {})) {
@@ -6631,6 +6760,16 @@ async function runGrant(
       // 발급도 승인 권한자만 할 수 있다 — 외부로 나가는 권한이 여기서 만들어지기 때문이다
       const grants = new GrantService(store, new LocalIdentityBinding(await loadIdentityMap(root)))
 
+      // **범위를 계약에 못 박는다** (0.8.0 보정 P1-3). 이 결합이 가리키는 원격이 곧 이
+      // 승인의 실행 범위다 — 행위 하나를 승인했다는 사실이 다른 저장소까지 열어 주지
+      // 않는다. 호출자가 이미 근거를 준 경우에는 그것을 그대로 둔다.
+      const scoped = ((): ExecutionGrant['basis'] | undefined => {
+        const given = values.basis as ExecutionGrant['basis'] | undefined
+        const bound = bindingIdentity(runtime, outward.id)
+        if (given?.resource || !bound) return given
+        return { ...(given ?? {}), resource: bound }
+      })()
+
       if (fromSession) {
         // 사람이 지금 내보내라고 한 것이 승인이다. 그 말과 함께 온 내용이 payload 이고,
         // 여기서 지어내지 않는다 — 사람이 본 적 없는 글이 사람의 이름을 달고 나가면 안 된다.
@@ -6648,8 +6787,9 @@ async function runGrant(
           grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
           sessionId: fromSession,
           // 검수가 읽어 온 사실을 승인에 못 박는다 (0.8.0 §L). 없으면 없는 대로 둔다 —
-          // 없는 기준선을 지어내면 재검수가 아무것도 지키지 못한다.
-          ...(values.basis ? { basis: values.basis as ExecutionGrant['basis'] } : {}),
+          // 없는 기준선을 지어내면 재검수가 아무것도 지키지 못한다. 범위(resource)만은
+          // 결합에서 채운다: 그것이 이 승인이 미치는 곳의 경계다.
+          ...(scoped ? { basis: scoped } : {}),
           issuedBy: values.as as string,
           channel: 'local',
           action: values.action as string,
@@ -6674,6 +6814,7 @@ async function runGrant(
       const issued = await grants.issue({
         grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
         requestId: target,
+        ...(scoped ? { basis: scoped } : {}),
         issuedBy: values.as as string,
         channel: 'local',
         action: values.action as string,
@@ -6713,10 +6854,13 @@ async function runGrant(
         console.error('지금 무엇이 풀리는지: asc status')
         return 2
       }
+      // 강제가 서 있는 자리에서는 되돌려 읽을 수 없는 행위를 실행하지 않는다 (P1-2).
+      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'))) === 'ENFORCE'
       const outcome = await new Executor({
         store,
         scm,
         runId: (values['run-id'] as string) ?? `cli-${process.pid}`,
+        ...(enforcing ? { requireVerification: true } : {}),
       }).run(target)
 
       if (outcome.ok) {

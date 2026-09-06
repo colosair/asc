@@ -220,6 +220,30 @@ export const GrantStatus = z.enum(['READY', 'CLAIMED', 'EXECUTED', 'INVALIDATED'
 export type GrantStatus = z.infer<typeof GrantStatus>
 
 /**
+ * terminal 로 간 이유 (0.8.0 보정).
+ *
+ * ```text
+ * DRIFT           승인 근거가 움직였다 — 나가지 않았다
+ * NOT_EXECUTABLE  지금 성립하지 않는 행위다 — 나가지 않았다
+ * REVIEW_REQUIRED 사람이 봐야 하는 사실이 있다 — 나가지 않았다
+ * FORBIDDEN       계약이 허용하지 않는 행위다 — 나가지 않았다
+ * REJECTED        밖이 거절했다 — 나가지 않은 것이 확인됐다
+ * UNCERTAIN       나갔는지 모른다 — 다시 부르지 않는다
+ * NOT_VERIFIED    나갔는데 되돌려 읽은 것이 다르다 — 성공이 아니다
+ * ```
+ */
+export const GrantResolution = z.enum([
+  'DRIFT',
+  'NOT_EXECUTABLE',
+  'REVIEW_REQUIRED',
+  'FORBIDDEN',
+  'REJECTED',
+  'UNCERTAIN',
+  'NOT_VERIFIED',
+])
+export type GrantResolution = z.infer<typeof GrantResolution>
+
+/**
  * Policy hierarchy의 하위 override가 아니라, Controller가 hierarchy 밖에서 생성하는
  * one-shot execution contract (OM §5.2). Session 권한은 그대로 두고 별도 Executor에게만
  * 단일 Action을 허용한다.
@@ -268,6 +292,14 @@ export const ExecutionGrant = z.object({
   claimedBy: z.string().optional(),
   consumedAt: Timestamp.optional(),
   resultRef: z.string().optional(),
+  /**
+   * 어떻게 끝났는가 (0.8.0 보정 P0-5·P1-1). **새 상태가 아니라 이유다** — 상태는 그대로
+   * 다섯이고, 이 필드는 그 중 terminal 로 간 이유를 구조화해 남긴다.
+   *
+   * 소진된 것과 성공한 것을 가르는 자리이기도 하다: 밖으로 나갔지만 되돌려 읽은 것이
+   * 다르면 그 Grant 는 다시 쓸 수 없고(INVALIDATED), 동시에 성공도 아니다.
+   */
+  resolution: GrantResolution.optional(),
 })
   .refine((grant) => Boolean(grant.requestId) !== Boolean(grant.sessionId), {
     message: 'a grant stands on exactly one basis — an approved request or a session',

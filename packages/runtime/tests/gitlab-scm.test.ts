@@ -156,3 +156,86 @@ describe('Drift Guard 가 대조할 값', () => {
     assert.equal(baseline!.baseline, '(unknown)')
   })
 })
+
+// ── 0.8.0 보정 P1-2 — 나간 것을 되돌려 읽는다 ────────────────────────────────
+//
+// 명령이 0 으로 끝났다는 것과 밖에 그것이 있다는 것은 다르다. 되돌려 읽지 못하는 행위를
+// 자율 실행 가능한 것으로 광고하지도 않는다.
+
+describe('되돌려 읽기 (P1-2)', () => {
+  const scm = (answers: Record<string, unknown> = {}) => {
+    const client = fakeClient(answers)
+    return {
+      client,
+      port: new GitLabScm({
+        reader: client.reader,
+        writer: { ...client.writer, async put<T>(path: string, body: Record<string, unknown>) {
+          client.calls.push({ path, body })
+          return (answers[path] === undefined
+            ? { ok: false, status: 404, data: null, error: 'HTTP 404' }
+            : { ok: true, status: 200, data: answers[path] as T }) as GitLabResponse<T>
+        } },
+        defaultProject: 'group/project',
+      }),
+    }
+  }
+
+  it('무엇을 되돌려 읽을 수 있는지 스스로 말한다', () => {
+    const { port } = scm()
+    for (const action of ['git.push', 'gitlab.mr.create', 'gitlab.mr.merge', 'gitlab.note.create', 'gitlab.issue.update']) {
+      assert.equal(port.verifies(action), true, action)
+    }
+    // 조율 게시는 이 통로가 하지 않는다 — 자기가 하지 않은 일을 확인했다고 말하지 않는다.
+    assert.equal(port.verifies('coordination.publish'), false)
+  })
+
+  it('T-21 — note 는 그 글이 그 자리에 그 내용으로 있는지 읽는다', async () => {
+    const { port } = scm({
+      '/projects/group%2Fproject/issues/7/notes/91': { id: 91, body: '작업 결과입니다' },
+    })
+    const read = await port.verify(
+      { action: 'gitlab.note.create', target: 'group/project#7', payload: '작업 결과입니다' },
+      { resultRef: 'group/project#7#note_91' },
+    )
+    assert.equal(read.observed['body'], '작업 결과입니다')
+    assert.equal(read.observed['resource'], 'group/project')
+
+    // 검수는 그 본문을 기대치로 미리 적어 둔다 — 실행 뒤에 기대치를 정하지 않는다.
+    const facts = await port.review({ action: 'gitlab.note.create', target: 'group/project#7', payload: '작업 결과입니다' })
+    assert.equal(facts.observed?.['expect.body'], '작업 결과입니다')
+    assert.equal(facts.verifiable, true)
+  })
+
+  it('T-22 — issue 는 승인된 payload 의 필드가 실제로 그 값이 됐는지 읽는다', async () => {
+    const { port } = scm({
+      '/projects/group%2Fproject/issues/7': { state_event: 'close', labels: 'front' },
+    })
+    const read = await port.verify(
+      { action: 'gitlab.issue.update', target: 'group/project#7', payload: JSON.stringify({ labels: 'front' }) },
+      { resultRef: 'group/project#7' },
+    )
+    assert.equal(read.observed['issue.labels'], 'front')
+
+    const facts = await port.review({
+      action: 'gitlab.issue.update',
+      target: 'group/project#7',
+      payload: JSON.stringify({ labels: 'front' }),
+    })
+    assert.equal(facts.observed?.['expect.issue.labels'], 'front')
+  })
+
+  it('merge 는 PUT 으로 나간다 — 공식 계약이다', async () => {
+    const { client, port } = scm({ '/projects/group%2Fproject/merge_requests/9/merge': { state: 'merged' } })
+    const result = await port.execute({ action: 'gitlab.mr.merge', target: 'group/project!9', payload: '' })
+    assert.equal(result.ok, true)
+    assert.ok(client.calls.some((call) => call.path.endsWith('/merge_requests/9/merge')))
+  })
+
+  it('PUT 을 못 보내는 통로면 그렇다고 말한다 — 하는 척하지 않는다', async () => {
+    const client = fakeClient()
+    const port = new GitLabScm({ reader: client.reader, writer: client.writer, defaultProject: 'group/project' })
+    const result = await port.execute({ action: 'gitlab.mr.merge', target: 'group/project!9', payload: '' })
+    assert.equal(result.ok, false)
+    assert.match(result.ok ? '' : result.error, /cannot send PUT/)
+  })
+})

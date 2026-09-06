@@ -1,4 +1,4 @@
-// SSAFESTA `festa-*` 와의 책임 경계 (추가 지시 §16·§17).
+// 프로젝트 정책 계층과의 책임 경계.
 //
 // ASC 는 그 프로젝트의 업무 규칙을 소유하지 않는다. 어느 branch 가 파트 branch 인지,
 // 언제 develop 을 반영하는지, 어떤 문서를 회수하는지는 프로젝트 정책의 자리다.
@@ -48,12 +48,16 @@ describe('ASC Core 는 프로젝트 workflow 를 들고 있지 않다 (§1·§16
     assert.match(review, /basis\?\.resource/)
   })
 
-  it('F-06 — Inbox 는 generic 상태 하나다. 프로젝트용 사본을 만들지 않는다', async () => {
+  it('F-06 — Inbox 상태는 한 곳이다. 프로젝트용 사본을 만들지 않는다', async () => {
+    // 프로젝트 계층이 자기 방식으로 걸러 보여 주는 것은 표현이다. 그 표현이 자기
+    // 결정 상태를 따로 저장하기 시작하면 두 장부가 갈리고, 그때부터 무엇이 정본인지
+    // 아무도 모른다. ASC 쪽에서 지킬 수 있는 것은 "여기에 사본을 만들지 않는다" 다.
     const cli = await core('cli/asc.ts')
-    assert.ok(!/festa/i.test(cli), 'CLI 가 프로젝트 스킬 이름을 알고 있다')
-    for (const path of ['core/operator/local-operator.ts', 'core/runtime/front.ts']) {
-      assert.ok(!/festa/i.test(await core(path)), `${path} 가 프로젝트 스킬을 안다`)
-    }
+    const readers = cli.match(/new LocalOperator\(/g) ?? []
+    assert.ok(readers.length > 0, 'Inbox 를 읽는 자리가 있다')
+    // 판단 상태를 담는 다른 저장소를 CLI 가 만들지 않는다.
+    assert.ok(!/new\s+\w*Inbox\w*Store/.test(cli), 'Inbox 용 별도 저장소가 있다')
+    assert.ok(!/decisions\.json|inbox-state/.test(cli), 'Inbox 상태 사본 파일이 있다')
   })
 
   it('F-05 — work finish 는 논리 세션 하나를 닫는다. 프로젝트 전체 인계를 대신하지 않는다', async () => {
@@ -72,7 +76,7 @@ describe('ASC Core 는 프로젝트 workflow 를 들고 있지 않다 (§1·§16
 
 describe('MANUAL / AUTO 에서의 파트 branch push (§14·§15·F-03·F-04)', () => {
   async function project(mode?: 'MANUAL' | 'AUTO'): Promise<string> {
-    const root = await tempDir('asc-festa-')
+    const root = await tempDir('asc-project-policy-')
     const store = await MarkdownStateStore.open(join(root, '.asc'))
     await claudeBindings(store).claim(
       { logicalSessionId: 'S-20260907-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
@@ -84,7 +88,7 @@ describe('MANUAL / AUTO 에서의 파트 branch push (§14·§15·F-03·F-04)', 
   }
 
   async function invokeHook(cwd: string, command: string): Promise<{ code: number; stderr: string }> {
-    const dir = await tempDir('asc-festa-hook-')
+    const dir = await tempDir('asc-project-policy-hook-')
     const script = join(dir, 'guard-hook.mjs')
     await writeFile(script, hookScript(), 'utf8')
     const child = spawnSync(process.execPath, [script], {

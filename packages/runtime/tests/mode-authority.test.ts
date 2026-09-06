@@ -91,53 +91,32 @@ describe('T-02 — AUTO 는 경로 전체가 설 때만 켜진다', () => {
   })
 })
 
-describe('T-07 — AUTO 에서 내려오는 것은 Controller 의 자리다 (§J)', () => {
-  it('권한 없이 부른 `asc mode manual` 은 거부되고 AUTO 가 유지된다', async () => {
+describe('AUTO 에서 내려오는 것은 사람의 결정이다 (§J · 보정 P0-2)', () => {
+  // 이 절의 본검사는 tests/mode-integrity.test.ts (T-17·T-18·T-19) 에 있다. 여기서는
+  // **같은 문이 다른 명령에도 서 있는가** 만 본다 — 하나만 잠그고 옆문을 열어 두면
+  // 그것이 곧 우회로다.
+  it('AUTO 에서 enforcement 를 걷어내는 명령은 전부 같은 결정을 요구한다', async () => {
     const { repo, home, root, cleanup } = await attached()
     try {
       await identities(root, { 'controller-a': ['local:colosair'] })
       await setMode(root, 'AUTO')
 
-      const attempted = run(repo, home, ['mode', 'manual'])
-      assert.equal(attempted.code, 2)
-      assert.match(attempted.stderr, /controller decision/)
+      // `--as` 는 자기 신고다. Host 가 `Bash(asc:*)` 를 허용한 자리에서는 Agent 도 똑같이
+      // 칠 수 있으므로, 그것 하나로는 어느 문도 열리지 않는다.
+      for (const argv of [
+        ['mode', 'manual', '--as', 'controller-a'],
+        ['host', 'claude', 'uninstall', '--as', 'controller-a'],
+        ['runtime', 'use', 'development', repo, '--as', 'controller-a'],
+        ['uninstall', '--as', 'controller-a'],
+      ]) {
+        const attempted = run(repo, home, argv)
+        assert.equal(attempted.code, 2, `${argv.join(' ')} 가 통과했다`)
+        assert.match(attempted.stderr, /asc inbox decide/, `${argv.join(' ')} 가 결정을 요구하지 않는다`)
+      }
 
+      // 그리고 mode 는 하나도 움직이지 않았다.
       const after = run(repo, home, ['mode', '--json'])
-      assert.equal((JSON.parse(after.stdout) as { mode: string }).mode, 'AUTO', 'mode 가 움직이지 않았다')
-    } finally {
-      await cleanup()
-    }
-  })
-
-  it('권한이 있으면 내려온다 — 출구는 닫혀 있지 않다', async () => {
-    const { repo, home, root, cleanup } = await attached()
-    try {
-      await identities(root, { 'controller-a': ['local:colosair'] })
-      await setMode(root, 'AUTO')
-
-      const lowered = run(repo, home, ['mode', 'manual', '--as', 'controller-a', '--json'])
-      assert.equal(lowered.code, 0, lowered.stderr)
-      assert.equal((JSON.parse(lowered.stdout) as { mode: string }).mode, 'MANUAL')
-    } finally {
-      await cleanup()
-    }
-  })
-
-  it('AUTO 에서 enforcement 를 걷어내는 명령도 같은 문을 지난다', async () => {
-    const { repo, home, root, cleanup } = await attached()
-    try {
-      await identities(root, { 'controller-a': ['local:colosair'] })
-      await setMode(root, 'AUTO')
-
-      // Host 가 `Bash(asc:*)` 를 허용한 것은 ASC 가 갇히지 않게 하려는 것이지, Agent 가
-      // 자기 감시를 스스로 떼어내라는 뜻이 아니다.
-      const removed = run(repo, home, ['host', 'claude', 'uninstall'])
-      assert.equal(removed.code, 2)
-      assert.match(removed.stderr, /controller decision/)
-
-      const swapped = run(repo, home, ['runtime', 'use', 'development', repo])
-      assert.equal(swapped.code, 2)
-      assert.match(swapped.stderr, /controller decision/)
+      assert.equal((JSON.parse(after.stdout) as { mode: string }).mode, 'AUTO')
     } finally {
       await cleanup()
     }

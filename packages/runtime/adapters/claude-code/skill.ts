@@ -102,9 +102,15 @@ person's behalf, and MANUAL does not mean something was already approved. Changi
 mode never changes a session's owner, scope, progress or handoff.
 
 \`\`\`text
-"수동으로 해" · "let me run it"     → asc mode manual --as <actor>
+"수동으로 해" · "let me run it"     → asc mode manual
 "ASC가 자동으로 관리해"             → asc mode auto
 \`\`\`
+
+Stepping down out of AUTO is a person's decision, and **saying a name is not that
+decision**. Run \`asc mode manual\`: it raises the question into the inbox and stops. A
+person answers it (\`asc inbox decide <REQ-ID> approve --as <actor>\`), and then
+\`asc mode manual --request <REQ-ID>\` goes through. Do not invent an approver name to get
+past it — that is the one shortcut this release exists to close.
 
 **A workspace nobody has chosen a mode for is not in AUTO.** AUTO exists only where a
 person turned it on and the whole managed path measured READY, so a fresh or upgraded
@@ -114,9 +120,14 @@ workspace enforces nothing until someone says so. \`asc status\` says which of t
 controller, binding, executor, provider, review and read-back, all of it — and says which
 axis is missing. Read that answer and stop; do not turn enforcement on some other way.
 If ASC's own enforcement is what is in the way, the one official exit is
-\`asc mode manual\` (a controller decision, so \`--as\`). Removing the product, uninstalling
-the host integration or switching the runtime is not that exit, and in AUTO those commands
-ask for the same authority.
+\`asc mode manual\` — the command always runs, and what it needs is a person's answer, not a
+flag. Removing the product, uninstalling the host integration or switching the runtime is
+not that exit, and in AUTO those commands ask for the same decision.
+
+**A workspace whose mode cannot be read is not MANUAL.** If the record is there but broken,
+raw external writes stay blocked and \`asc status\` names the reason
+(\`MODE_STATE_UNREADABLE\` / \`MODE_STATE_INVALID\`). ASC's own commands still run, and that
+is how it gets fixed.
 
 ## Whose decision is which
 
@@ -247,6 +258,16 @@ decides; the review settles facts — is this the remote this work is bound to, 
 that was approved still the commit that is here, is there already an open change for it. A
 \`NOT_EXECUTABLE\` means the action does not hold as it stands; a \`REVIEW_REQUIRED\` means a
 person has to look at something the facts cannot settle. Neither is a request to re-approve.
+
+Afterwards the result is read back. If what comes back differs from what was expected the
+outcome is \`NOT_VERIFIED\` — the write happened, it is not a success, and the grant is
+spent either way. If the outcome could not be determined at all it is \`UNCERTAIN\`: read
+the remote before doing anything else, and never repeat the command.
+
+Being bound to one repository is the scope of managed execution, not a preference. If the
+target is a different repository the answer is \`REVIEW_REQUIRED\`, and approving the action
+again does not change it — what has to change is the binding, and that is a separate
+decision.
 
 The action key is the provider's (\`gitlab.mr.create\`, \`gitlab.note.create\`, \`git.push\`,
 \`coordination.publish\`, \`github.issue_comment.create\`). If nothing bound to this

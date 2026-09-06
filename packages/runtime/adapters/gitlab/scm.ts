@@ -41,6 +41,20 @@ export const GITLAB_ACTIONS = [
   'git.push',
 ] as const
 
+/**
+ * 되돌려 읽을 수 있는 행위 (0.8.0 보정 P1-2).
+ *
+ * `coordination.publish` 가 여기 없는 이유는 그 실행이 이 통로가 아니라 조율 표면에서
+ * 나가기 때문이다 — 자기가 하지 않은 일을 확인했다고 말하지 않는다.
+ */
+export const VERIFIABLE_ACTIONS = [
+  'git.push',
+  'gitlab.mr.create',
+  'gitlab.mr.merge',
+  'gitlab.note.create',
+  'gitlab.issue.update',
+] as const
+
 export type GitLabScmDeps = {
   reader: GitLabReader
   writer: GitLabWriter
@@ -136,6 +150,10 @@ export class GitLabScm implements ScmPort {
    * Remote Review 가 이 사실로 판정한다. 여기서 쓰는 것은 하나도 없다.
    */
   async review(action: ExternalAction): Promise<RemoteFacts> {
+    return { verifiable: this.verifies(action.action), ...(await this.#review(action)) }
+  }
+
+  async #review(action: ExternalAction): Promise<RemoteFacts> {
     const capability = this.supports(action.action)
     switch (action.action) {
       case 'git.push':
@@ -144,6 +162,41 @@ export class GitLabScm implements ScmPort {
         return this.#reviewCreateChange(action, capability)
       case 'gitlab.mr.merge':
         return this.#reviewMergeChange(action, capability)
+      case 'gitlab.note.create': {
+        const ref = parseRef(this.#expand(action.target))
+        if (!ref) {
+          return { provider: this.id, capability: false, target: action.target, unknown: ['unrecognized target'] }
+        }
+        return {
+          provider: this.id,
+          capability,
+          resource: ref.project,
+          target: action.target,
+          // 성공했다면 밖에 이 본문이 있어야 한다 — 실행 전에 적어 둔다.
+          observed: { 'expect.body': action.payload },
+        }
+      }
+      case 'gitlab.issue.update': {
+        const ref = parseRef(this.#expand(action.target))
+        if (!ref || ref.kind !== 'issue') {
+          return { provider: this.id, capability: false, target: action.target, unknown: ['unrecognized issue'] }
+        }
+        const expected: Record<string, string | undefined> = {}
+        try {
+          for (const [field, value] of Object.entries(JSON.parse(action.payload) as Record<string, unknown>)) {
+            expected[`expect.issue.${field}`] = String(value)
+          }
+        } catch {
+          return {
+            provider: this.id,
+            capability,
+            resource: ref.project,
+            target: action.target,
+            unknown: ['payload is not JSON'],
+          }
+        }
+        return { provider: this.id, capability, resource: ref.project, target: action.target, observed: expected }
+      }
       default: {
         const ref = parseRef(this.#expand(action.target))
         return {
@@ -154,6 +207,11 @@ export class GitLabScm implements ScmPort {
         }
       }
     }
+  }
+
+  /** 되돌려 읽을 수 있는 행위. `execute` 의 분기와 이 목록이 갈리면 그것이 결함이다. */
+  verifies(action: string): boolean {
+    return (VERIFIABLE_ACTIONS as readonly string[]).includes(action)
   }
 
   /**
@@ -198,6 +256,45 @@ export class GitLabScm implements ScmPort {
             merge_commit: mr?.merge_commit_sha ?? mr?.squash_commit_sha,
           },
         }
+      }
+      case 'gitlab.note.create': {
+        // 글이 실제로 그 자리에 있는가. id 는 방금 만든 것의 것이고, 본문은 사람이 승인한
+        // 그대로여야 한다 — 다른 것이 올라갔다면 성공이 아니다.
+        const ref = parseRef(this.#expand(action.target))
+        const noteId = /#note_(\d+)$/.exec(result.resultRef)?.[1]
+        if (!ref || !noteId) return { observed: {}, unsupported: true }
+        const path = ref.kind === 'change' ? 'merge_requests' : 'issues'
+        const note = await this.#reader.get<{ id: number; body?: string }>(
+          `/projects/${encodeProject(ref.project)}/${path}/${ref.iid}/notes/${noteId}`,
+        )
+        return {
+          observed: {
+            resource: ref.project,
+            note: note.ok && note.data ? String(note.data.id) : undefined,
+            body: note.ok ? note.data?.body : undefined,
+          },
+        }
+      }
+      case 'gitlab.issue.update': {
+        const ref = parseRef(this.#expand(action.target))
+        if (!ref || ref.kind !== 'issue') return { observed: {}, unsupported: true }
+        const issue = await this.#reader.get<Record<string, unknown>>(
+          `/projects/${encodeProject(ref.project)}/issues/${ref.iid}`,
+        )
+        if (!issue.ok || !issue.data) return { observed: { resource: ref.project } }
+        // 승인된 payload 의 필드가 실제로 그 값이 됐는가. 필드는 payload 가 정한다 —
+        // adapter 가 무엇을 볼지 고르지 않는다.
+        const observed: Record<string, string | undefined> = { resource: ref.project }
+        try {
+          for (const [field, value] of Object.entries(JSON.parse(action.payload) as Record<string, unknown>)) {
+            const current = issue.data[field]
+            observed[`issue.${field}`] = current === undefined ? undefined : String(current)
+            void value
+          }
+        } catch {
+          return { observed, unsupported: true }
+        }
+        return { observed }
       }
       default:
         return { observed: {}, unsupported: true }

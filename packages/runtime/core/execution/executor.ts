@@ -43,7 +43,10 @@ export type ExecuteOutcome =
    * 있고, 그것이 이 상태에서 가장 나쁜 결과다. Grant 는 집힌 채로 남아 재사용되지 않는다.
    */
   | { ok: false; reason: 'UNCERTAIN'; detail: string }
-  /** 나갔는데 되돌려 읽은 것이 기대와 다르다. 성공이라고 적지 않는다. */
+  /**
+   * 나갔는데 되돌려 읽은 것이 기대와 다르다. 성공이라고 적지 않는다 — Grant 는 소진되되
+   * `EXECUTED` 가 되지 않는다. 그 상태는 밖에서 "성공적으로 끝남" 으로 읽히기 때문이다.
+   */
   | { ok: false; reason: 'NOT_VERIFIED'; detail: string; resultRef: string; mismatches: string[] }
   | { ok: false; reason: 'ACTION_FAILED'; detail: string }
 
@@ -52,6 +55,13 @@ export type ExecutorDeps = {
   scm: ScmPort
   /** 이 Physical Run의 식별자. 누가 집었는지 Grant에 남는다. */
   runId: string
+  /**
+   * 되돌려 읽을 수 없는 행위를 실행하지 않는다 (0.8.0 보정 P1-2).
+   *
+   * 강제가 서 있는 자리(AUTO·실행 축을 읽지 못한 자리)에서 참이다. 사람이 실행하는
+   * 자리에서는 그 판단이 사람의 것이므로 호출자가 정한다.
+   */
+  requireVerification?: boolean
   now?: () => string
 }
 
@@ -59,12 +69,14 @@ export class Executor {
   #store: StateStore
   #scm: ScmPort
   #runId: string
+  #requireVerification: boolean
   #now: () => string
 
   constructor(deps: ExecutorDeps) {
     this.#store = deps.store
     this.#scm = deps.scm
     this.#runId = deps.runId
+    this.#requireVerification = deps.requireVerification ?? false
     this.#now = deps.now ?? (() => new Date().toISOString())
   }
 
@@ -92,14 +104,14 @@ export class Executor {
     //    계약 자체가 모순이면 외부 상태를 조회할 이유도 없으므로 Drift Guard보다 앞에 둔다.
     if (!claimed.entity.allowedWrites.includes(claimed.entity.action)) {
       const detail = `'${claimed.entity.action}' is not in allowed writes [${claimed.entity.allowedWrites.join(', ')}]`
-      await this.#close(grant.id, 'INVALIDATED', this.#now(), detail)
+      await this.#close(grant.id, 'INVALIDATED', this.#now(), detail, 'FORBIDDEN')
       return { ok: false, reason: 'FORBIDDEN_ACTION', detail }
     }
 
     // 3. Drift Guard — 승인 시점의 기준선과 지금을 대조한다
     const drift = await this.#detectDrift(claimed.entity)
     if (drift) {
-      await this.#close(grant.id, 'INVALIDATED', this.#now(), drift)
+      await this.#close(grant.id, 'INVALIDATED', this.#now(), drift, 'DRIFT')
       return { ok: false, reason: 'DRIFT', detail: drift }
     }
 
@@ -119,10 +131,17 @@ export class Executor {
         target: action.target,
         facts,
         ...(claimed.entity.basis ? { basis: claimed.entity.basis } : {}),
+        ...(this.#requireVerification ? { requireVerification: true } : {}),
       })
       if (review.verdict !== 'READY') {
         const detail = review.findings.map((finding) => `${finding.code}: ${finding.detail}`).join('; ')
-        await this.#close(grant.id, 'INVALIDATED', this.#now(), `재검수 ${review.verdict}: ${detail}`)
+        await this.#close(
+          grant.id,
+          'INVALIDATED',
+          this.#now(),
+          `재검수 ${review.verdict}: ${detail}`,
+          review.verdict === 'NOT_EXECUTABLE' ? 'NOT_EXECUTABLE' : 'REVIEW_REQUIRED',
+        )
         return review.verdict === 'NOT_EXECUTABLE'
           ? { ok: false, reason: 'NOT_EXECUTABLE', detail, review }
           : { ok: false, reason: 'REVIEW_REQUIRED', detail, review }
@@ -142,10 +161,20 @@ export class Executor {
           ref: grant.id,
           detail: `${grant.action} → ${grant.target}: ${result.error}`,
         })
-        // Grant 는 CLAIMED 로 남는다. 다시 실행할 수 없고, 사람이 밖을 확인한 뒤 정한다.
+        // **CLAIMED 로 남기지 않는다** (0.8.0 보정 P1-1). 그 상태는 이 시스템에서 "지금
+        // 누가 집고 실행 중" 을 뜻하고(READY→CLAIMED→EXECUTED/INVALIDATED), 아무도 실행
+        // 중이 아닌 Grant 를 거기 두면 화면과 감사가 영영 틀린 말을 한다. terminal 로
+        // 닫되 **이유가 UNCERTAIN** 이다 — 재실행은 막히고, 성공도 실패도 주장하지 않는다.
+        await this.#close(
+          grant.id,
+          'INVALIDATED',
+          this.#now(),
+          `결과 불명: ${result.error}`,
+          'UNCERTAIN',
+        )
         return { ok: false, reason: 'UNCERTAIN', detail: result.error }
       }
-      await this.#close(grant.id, 'INVALIDATED', this.#now(), `실행 실패: ${result.error}`)
+      await this.#close(grant.id, 'INVALIDATED', this.#now(), `실행 실패: ${result.error}`, 'REJECTED')
       return { ok: false, reason: 'REJECTED', detail: result.error }
     }
 
@@ -162,8 +191,34 @@ export class Executor {
       }
     }
 
-    // 7. 소비 기록 — 성공한 Grant는 다시 쓸 수 없다
+    // 7. 소비 기록. **되돌려 읽은 것이 다르면 EXECUTED 로 적지 않는다** (P0-5) —
+    //    그 상태는 밖에서 "성공적으로 끝남" 으로 읽힌다. 나간 것은 나갔으므로 재사용은
+    //    막되(terminal), 성공은 주장하지 않는다.
     const executedAt = this.#now()
+    if (mismatches.length > 0) {
+      await this.#close(
+        grant.id,
+        'INVALIDATED',
+        executedAt,
+        `되돌려 읽은 것이 다르다: ${mismatches.join('; ')}`,
+        'NOT_VERIFIED',
+        result.resultRef,
+      )
+      await this.#store.appendHistory({
+        at: executedAt,
+        actor: this.#runId,
+        kind: 'external_action_unverified',
+        ref: grant.id,
+        detail: `${grant.action} → ${grant.target} = ${result.resultRef} (unverified: ${mismatches.join('; ')})`,
+      })
+      return {
+        ok: false,
+        reason: 'NOT_VERIFIED',
+        detail: mismatches.join('; '),
+        resultRef: result.resultRef,
+        mismatches,
+      }
+    }
     const executed = await applyTransition(this.#store, 'grant', grant.id, (g) =>
       transitionGrant(g, 'EXECUTED', 'executor', { resultRef: result.resultRef, consumedAt: executedAt }),
     )
@@ -180,25 +235,10 @@ export class Executor {
     await this.#store.appendHistory({
       at: executedAt,
       actor: this.#runId,
-      kind: mismatches.length > 0 ? 'external_action_unverified' : 'external_action',
+      kind: 'external_action',
       ref: grant.id,
-      detail:
-        mismatches.length > 0
-          ? `${grant.action} → ${grant.target} = ${result.resultRef} (unverified: ${mismatches.join('; ')})`
-          : `${grant.action} → ${grant.target} = ${result.resultRef}`,
+      detail: `${grant.action} → ${grant.target} = ${result.resultRef}`,
     })
-
-    // 나간 것은 나갔다 — Grant 는 소비됐다. 그러나 밖에서 기대한 것이 읽히지 않으면
-    // 성공이라고 적지 않는다.
-    if (mismatches.length > 0) {
-      return {
-        ok: false,
-        reason: 'NOT_VERIFIED',
-        detail: mismatches.join('; '),
-        resultRef: result.resultRef,
-        mismatches,
-      }
-    }
 
     return { ok: true, grant: executed.entity, resultRef: result.resultRef }
   }
@@ -223,13 +263,24 @@ export class Executor {
     return null
   }
 
+  /**
+   * terminal 로 닫는다. **이유를 함께 적는다** — 상태 다섯 개만으로는 "왜" 가 남지 않고,
+   * 소진된 것과 성공한 것을 가르는 것도 그 이유다 (0.8.0 보정 P0-5).
+   */
   async #close(
     grantId: string,
     to: 'INVALIDATED' | 'EXPIRED',
     at: string,
     detail: string,
+    resolution?: ExecutionGrant['resolution'],
+    resultRef?: string,
   ): Promise<void> {
-    await applyTransition(this.#store, 'grant', grantId, (g) => transitionGrant(g, to, 'executor'))
+    await applyTransition(this.#store, 'grant', grantId, (g) =>
+      transitionGrant(g, to, 'executor', {
+        ...(resolution ? { resolution } : {}),
+        ...(resultRef ? { resultRef } : {}),
+      }),
+    )
     await this.#store.appendHistory({ at, actor: this.#runId, kind: `grant_${to.toLowerCase()}`, ref: grantId, detail })
   }
 }
