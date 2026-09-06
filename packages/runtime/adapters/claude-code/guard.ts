@@ -253,7 +253,11 @@ try {
   process.exit(0) // 입력을 못 읽으면 판단하지 않는다 — guard 오작동으로 전부 막는 것이 더 나쁘다
 }
 
-if (input.tool_name !== 'Bash') process.exit(0)
+// 파일을 바꾸는 도구는 **일을 시작한다는 신호**다 (F6). 읽기는 여기 없다 — 상태를 보는
+// 세션까지 관리 대상으로 끌어들이면 그것은 자동화가 아니라 방해다.
+const MUTATORS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+const isMutation = MUTATORS.has(String(input.tool_name ?? ''))
+if (input.tool_name !== 'Bash' && !isMutation) process.exit(0)
 const command = String(input.tool_input?.command ?? '')
 
 const cwd = input.cwd ?? process.cwd()
@@ -281,12 +285,33 @@ const ascRoot = registered ? registered.root : findAscRoot(cwd)
 if (!ascRoot) process.exit(0)
 
 const managed = findManaged(ascRoot, observedSessionId)
+
+// **일이 시작되는데 논리 세션이 없다** (F6). 사람이 "ASC 적용해" 라고 말해야 했던 자리다.
+// 여기서 막고 다음 한 걸음을 그대로 준다 — 그 명령을 실행하는 것은 agent 이고, 사람이
+// 아니다. 세션에 들어간 뒤에는 이 문이 다시 열린다.
+if (isMutation && !managed) {
+  const id = observedSessionId || '<this session id>'
+  console.error(
+    [
+      '[ASC] 이 workspace 는 ASC 가 관리한다. 파일을 바꾸기 전에 논리 세션 안에 들어가라.',
+      '  asc proceed --work <WORK-KEY> --json     # 작업 항목이 있으면',
+      '  asc proceed --json                       # 이어갈 세션을 고르거나 계약을 제안받는다',
+      '  asc host claude bind <S-ID> --physical ' + id,
+      '읽기·조회는 막지 않는다 — 막는 것은 관리 밖의 변경뿐이다.',
+    ].join('\\n'),
+  )
+  process.exit(2)
+}
+
 if (!managed) process.exit(0)
 
 // 관찰은 여기서 끝난다 — 아래 차단 판정은 이 호출의 성패를 보지 않는다
 try {
   recordActivity(ascRoot, managed, observedSessionId, String(input.tool_name ?? ''))
 } catch {}
+
+// 변경 도구는 여기까지다 — 아래 목록은 Bash 명령에 대한 것이다.
+if (isMutation) process.exit(0)
 
 for (const { pattern, label } of FORBIDDEN) {
   if (pattern.test(command)) {

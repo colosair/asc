@@ -86,7 +86,13 @@ import type { ContextComment, ResourceSnapshot } from '../ports/resource-context
 import { statusIndicatesDone } from '../adapters/jam/ports.ts'
 import { ProgressService } from '../core/operator/progress.ts'
 import { composeBindings, defaultAdapters } from '../composition/registry.ts'
-import { buildObservationChannels, buildRuntimePorts, closeToolClients, rolesFor } from '../composition/runtime.ts'
+import {
+  buildObservationChannels,
+  buildRuntimePorts,
+  closeToolClients,
+  rolesFor,
+  workItemRoles,
+} from '../composition/runtime.ts'
 import { proposeBindings } from '../composition/propose.ts'
 import { buildEventObservation } from '../composition/observe.ts'
 import { availableProfiles, planBootstrap, renderPlan, type PolicyId } from '../core/attach/bootstrap.ts'
@@ -2711,6 +2717,7 @@ async function runProceed(
   const workRef = (values.work as string | undefined) ?? undefined
   const ingress = workRef ? await buildWorkIngress(store, root, sessions, resolved) : undefined
   if (workRef && !ingress) {
+    // **정본이 없는 것과 다른 실패다.** 정본은 code 쪽 사실이고 이것은 작업 항목 쪽이다.
     console.error(`작업 항목 '${workRef}' 을 읽을 통로가 없다 — Profile bindings 에 작업 항목 provider 를 선언하라.`)
     return 2
   }
@@ -2931,7 +2938,11 @@ async function buildWorkIngress(
     plan,
     // 제안은 **말하는 것**이지 정하는 것이 아니다. 역할을 박아 넣으면 선언과 구분되지 않고,
     // capability 해석은 후보가 유일할 때 이미 스스로 풀린다.
-    roles: rolesFor(plan, declared),
+    //
+    // 다만 **작업 항목을 누구에게 물을지는 여기서 정한다** — code 와 work 가 둘 다 자원
+    // 조회를 제공하면 `rolesFor` 는 아무것도 정하지 못하고, 그러면 선언해 둔 work binding 이
+    // 있는데도 "통로가 없다" 가 된다 (P0 F7).
+    roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
