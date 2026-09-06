@@ -2688,6 +2688,15 @@ async function runHost(
         return 0
       }
 
+      // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
+      // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
+      // 여기이고, 사람이 따로 기억해야 하는 정리 절차는 결국 안 돌아간다.
+      for (const dead of await bindings.stale()) {
+        if (await bindings.forget(dead.logicalSessionId)) {
+          console.error(`(stale binding cleared: ${dead.logicalSessionId} ← ${dead.physicalSessionId})`)
+        }
+      }
+
       if (!values.physical) {
         console.error('--physical <Claude session id> is required.')
         return 2
@@ -2703,8 +2712,19 @@ async function runHost(
         const released = await bindings.release(target, physical)
         // 소유권은 사라져도 그 실행이 있었다는 사실은 남는다 (C-10 §1.3)
         if (released) for (const evidence of running) await audit.endExecution(evidence.executionId, 'RELEASED', at)
-        console.log(released ? `${target} ownership released` : 'Release failed — you are not the owner')
-        return released ? 0 : 1
+        if (!released) {
+          console.error('Release failed — you are not the owner')
+          return 1
+        }
+        // **놓았다고 말하기 전에 확인한다.** guard 는 이 파일 하나로 관리 대상을 정하므로,
+        // 지워지지 않은 채 "released" 라고 적으면 그 세션의 외부 write 가 계속 막힌다.
+        const after = await bindings.get(target)
+        if (after) {
+          console.error(`Release did not take — ${target} is still bound to ${after.physicalSessionId}.`)
+          return 1
+        }
+        console.log(`${target} ownership released`)
+        return 0
       }
 
       const spec = {

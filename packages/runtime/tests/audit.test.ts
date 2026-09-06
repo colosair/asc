@@ -174,6 +174,10 @@ describe('B-41 Gate — 소유권 묘비 (Runtime Binding)', () => {
     physicalSessionId: physical,
   })
 
+  /** 이력에서 끝남만. 집음(CLAIMED)은 0.7.0 에서 함께 남기 시작했다. */
+  const endings = (history: Awaited<ReturnType<ReturnType<typeof bindingsOn>['history']>>) =>
+    history.filter((entry) => entry.kind !== 'CLAIMED')
+
   it('내려놓으면 현재 소유권은 사라지되 이력은 남는다', async () => {
     const store = new MemoryStateStore()
     const bindings = bindingsOn(store)
@@ -183,9 +187,10 @@ describe('B-41 Gate — 소유권 묘비 (Runtime Binding)', () => {
 
     assert.equal(await bindings.get(IMPLEMENTER), null, '현재 소유권은 비어야 한다')
     const history = await bindings.history(IMPLEMENTER)
-    assert.equal(history.length, 1)
-    assert.equal(history[0]!.physicalSessionId, 'phys-1')
-    assert.equal(history[0]!.kind, 'RELEASED')
+    // 집음과 내려놓음이 순서대로 남는다 — 반쪽 이력으로는 "지워졌어야 할 것이 남았다"를
+    // 정상 재결합과 구분할 수 없다.
+    assert.deepEqual(history.map((entry) => entry.kind), ['CLAIMED', 'RELEASED'])
+    assert.equal(history.at(-1)!.physicalSessionId, 'phys-1')
   })
 
   it('승계도 덮이는 쪽을 남긴다', async () => {
@@ -195,10 +200,10 @@ describe('B-41 Gate — 소유권 묘비 (Runtime Binding)', () => {
     await bindings.claim(spec('phys-1'), NOW)
     await bindings.rebind(spec('phys-2'), LATER)
 
-    const history = await bindings.history(IMPLEMENTER)
-    assert.equal(history.length, 1)
-    assert.equal(history[0]!.kind, 'SUPERSEDED')
-    assert.equal(history[0]!.physicalSessionId, 'phys-1')
+    const ended = endings(await bindings.history(IMPLEMENTER))
+    assert.equal(ended.length, 1)
+    assert.equal(ended[0]!.kind, 'SUPERSEDED')
+    assert.equal(ended[0]!.physicalSessionId, 'phys-1')
     assert.equal((await bindings.get(IMPLEMENTER))!.physicalSessionId, 'phys-2')
   })
 
@@ -209,7 +214,7 @@ describe('B-41 Gate — 소유권 묘비 (Runtime Binding)', () => {
     await bindings.claim(spec('phys-1'), NOW)
     await bindings.rebind(spec('phys-1'), LATER)
 
-    assert.deepEqual(await bindings.history(IMPLEMENTER), [])
+    assert.deepEqual(endings(await bindings.history(IMPLEMENTER)), [])
   })
 
   it('owner가 아니면 내려놓지 못하고 이력도 생기지 않는다', async () => {
@@ -218,7 +223,8 @@ describe('B-41 Gate — 소유권 묘비 (Runtime Binding)', () => {
 
     await bindings.claim(spec('phys-1'), NOW)
     assert.equal(await bindings.release(IMPLEMENTER, 'phys-2'), false)
-    assert.deepEqual(await bindings.history(IMPLEMENTER), [])
+    // 남의 것을 놓으려 한 시도는 아무 것도 끝내지 않는다 — 집음은 그대로 서 있다.
+    assert.deepEqual(endings(await bindings.history(IMPLEMENTER)), [])
   })
 
   it('묘비 키가 guard의 관리 대상 판별에 걸리지 않는다', async () => {
