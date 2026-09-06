@@ -346,7 +346,10 @@ function renderControlState(state: ControlState): string {
     '# Execution',
     `활성 Block: ${state.activeBlock ?? '없음'}`,
     `활성 세션: ${state.activeSessions.join(', ') || '없음'}`,
-    `Write Boundary 점유: ${state.writeBoundaryOccupancy.join(', ') || '없음'}`,
+    // 객체를 그대로 문자열에 넣으면 "[object Object]" 가 남는다 — 실제 state.md 에서 그렇게 보였다.
+    `Write Boundary 점유: ${
+      state.writeBoundaryOccupancy.map((o) => `${o.sessionId} → ${o.paths.join(' ')}`).join(', ') || '없음'
+    }`,
     `승인 대기: ${state.awaitingController.join(', ') || '없음'}`,
     '',
     '# Monitoring',
