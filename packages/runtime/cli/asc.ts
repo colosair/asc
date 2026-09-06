@@ -129,12 +129,7 @@ import {
   renderBackground,
   staleAfter,
 } from '../core/runtime/background.ts'
-import {
-  dueWorkspaces,
-  renderWorkspaces,
-  viewWorkspaces,
-  type WorkspaceView,
-} from '../core/runtime/workspaces.ts'
+import { dueWorkspaces, renderWorkspaces, summarizePass, viewWorkspaces, type PassResult, type WorkspaceView } from '../core/runtime/workspaces.ts'
 import {
   persistentRuntimeLine,
   planPersistentRuntime,
@@ -4076,7 +4071,7 @@ async function tickAllWorkspaces(values: Record<string, unknown>, lease: Runtime
   const due = dueWorkspaces(views)
   const skipped = views.filter((view) => view.health !== 'ACTIVE')
 
-  const results: { workspaceId: string; code: number }[] = []
+  const results: PassResult[] = []
   for (const workspace of due) {
     const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'runtime', 'tick'], {
       cwd: workspace.cwd,
@@ -4089,13 +4084,17 @@ async function tickAllWorkspaces(values: Record<string, unknown>, lease: Runtime
     await lease.renew()
   }
 
+  const skippedViews = skipped.map((view) => ({ workspaceId: view.workspaceId, health: view.health }))
+  const summary = summarizePass(results, skippedViews)
   if (values.json) {
     console.log(
       JSON.stringify(
         {
           ran: results,
           // 건너뛴 것을 조용히 빼지 않는다 — "아무 일도 없었다"와 다른 사실이다
-          skipped: skipped.map((view) => ({ workspaceId: view.workspaceId, health: view.health })),
+          skipped: skippedViews,
+          outcome: summary.outcome,
+          failed: summary.failed,
         },
         null,
         2,
@@ -4104,9 +4103,11 @@ async function tickAllWorkspaces(values: Record<string, unknown>, lease: Runtime
   } else {
     for (const result of results) console.log(`${result.workspaceId}: pass exited ${result.code}`)
     for (const view of skipped) console.log(`${view.workspaceId}: ${view.health} — not observed this pass`)
+    console.log(summary.line)
   }
-  // 한 workspace 가 실패해도 회차 자체는 성공이다. 다음 회차가 다시 본다.
-  return 0
+  // 한 workspace 가 실패해도 다른 workspace 는 전부 돌았다. 그러나 실패했다는 사실은 회차의
+  // 종료 코드에 남는다 — OS 가 보는 것은 그것 하나뿐이다 (P0-R2).
+  return summary.code
 }
 
 /**
