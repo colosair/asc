@@ -241,6 +241,15 @@ try {
     return found.sort().join('\n')
   }
 
+  // 이 회차는 **onboarding 을 보는 것**이지 npm 을 보는 것이 아니다. 게시 전 candidate 는
+  // registry 에 없으므로, 같은 artifact 를 격리 prefix 에 미리 심어 그 축을 닫는다 —
+  // registry 에서 받아오는 경로의 관측은 게시 뒤 acceptance 의 몫이다.
+  runNpm(['install', '-g', '--no-audit', '--no-fund', tarballs.find((t) => t.includes('runtime'))], {
+    cwd: zeroWork,
+    env: isolated(zeroHome),
+    stdio: 'pipe',
+  })
+
   const beforeRepo = await treeOf(zeroWork)
   const beforeHome = await treeOf(zeroHome)
 
