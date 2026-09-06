@@ -283,3 +283,37 @@ describe('F5 — 정본 갈래까지 결선한다', () => {
     )
   })
 })
+
+describe('첫 설치가 등록까지 간다 — 명령을 하나 더 치게 하지 않는다', () => {
+  const fresh: SetupState = {
+    entry: 'bootstrap',
+    projectRoot: '/work/project',
+    git: true,
+    profileCandidates: [],
+    scope: 'local',
+    host: [{ id: 'claude', status: 'INSTALLED_CURRENT' }],
+    adoptable: { id: 'PROJ', exists: false },
+    stableRuntime: { status: 'NOT_INSTALLED', expectedVersion: '9.9.9', executableVisible: false },
+    persistentRuntime: { action: 'install', adapter: 'launchd' },
+  }
+
+  it('전역 runtime 을 놓는 같은 계획이 등록도 싣는다', () => {
+    const plan = computeSetupPlan(fresh)
+    assert.deepEqual(
+      plan.changes.map((change) => change.target),
+      ['runtime-install', 'adopt-profile', 'attach-workspace', 'persistent-runtime'],
+    )
+    // 등록이 설치보다 앞서면 가리킬 것이 없는 채로 등록된다.
+    const order = plan.changes.map((change) => change.target)
+    assert.ok(order.indexOf('runtime-install') < order.indexOf('persistent-runtime'))
+  })
+
+  it('가리킬 자리가 없고 이번에 놓지도 않으면 등록하지 않는다', () => {
+    const plan = computeSetupPlan({
+      ...fresh,
+      stableRuntime: { status: 'CURRENT', expectedVersion: '9.9.9', installedVersion: '9.9.9', executableVisible: true },
+      persistentRuntime: { action: 'unsupported', adapter: 'launchd', detail: 'nothing stable to point at' },
+    })
+    assert.equal(plan.changes.some((change) => change.target === 'persistent-runtime'), false)
+  })
+})

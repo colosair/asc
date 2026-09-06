@@ -1760,6 +1760,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
   const attachedProfile = ascRoot ? await lockedProfileId(ascRoot) : undefined
   // 이번 계획이 쓸 Profile 하나 — 그것의 결합 선언이 비어 있을 때만 제안을 관측한다.
   const targetProfile = (values.profile as string | undefined) ?? attachedProfile ?? adoptable.adoptable?.id
+  const stable = entry === 'bootstrap' ? await detectStableInstall(nodeProcessRunner) : undefined
   return {
     entry,
     projectRoot,
@@ -1783,11 +1784,11 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     host: [{ id: 'claude', status: hostReport.status }],
     // Profile 이 작업 도구를 선언했으면 그 준비 상태까지 본다 (설계 §9.3).
     ...(await workBindingState(ascRoot, projectRoot)),
-    // 이 기계의 지속 등록. **별도 onboarding 을 만들지 않는다** — 같은 계획에 함께 든다.
-    ...(await persistentRuntimeState(values)),
     // **bootstrap으로 들어왔을 때만 본다.** 설치된 runtime이 자기를 다시 설치할 이유가
     // 없고, 그 축을 안 그리면 plan은 설치된 `asc` 를 전제하지도 않는다 (C-14 §3.4).
-    ...(entry === 'bootstrap' ? { stableRuntime: await detectStableInstall(nodeProcessRunner) } : {}),
+    ...(stable ? { stableRuntime: stable } : {}),
+    // 이 기계의 지속 등록. **별도 onboarding 을 만들지 않는다** — 같은 계획에 함께 든다.
+    ...(await persistentRuntimeState(values, Boolean(stable && stable.status !== 'CURRENT'))),
   }
 }
 
@@ -1815,7 +1816,7 @@ function runningFromInstalledPackage(): boolean {
  */
 function serviceRegistrationAllowed(): boolean {
   if (process.env.ASC_SERVICE === 'off') return false
-  return runningFromInstalledPackage()
+  return true
 }
 
 /**
@@ -1826,15 +1827,25 @@ function serviceRegistrationAllowed(): boolean {
  */
 async function persistentRuntimeState(
   values: Record<string, unknown>,
+  installing: boolean,
 ): Promise<Pick<SetupState, 'persistentRuntime'>> {
   if (!serviceRegistrationAllowed()) return {}
   const adapter = serviceAdapter()
   if (!adapter) return {}
   // 등록물이 가리킬 자리가 없으면 이 축을 그리지 않는다 — 깨진 등록을 남기느니 등록하지
   // 않고 그 사실을 말한다 (P0 F1).
+  //
+  // **이번 계획이 그 자리를 만든다면 지금 없는 것은 근거가 아니다.** 첫 설치는 npx 로
+  // 들어와 전역 runtime 을 놓는데, 그 전에 판정하면 "가리킬 것이 없다" 가 되어 등록이
+  // 영영 계획에 들지 않는다 — 사람이 뒤에 명령 하나를 더 쳐야 했던 자리다. 등록 자체는
+  // apply 순서상 맨 마지막이고, 그때 다시 해석한다.
   const runtime = await serviceRuntime()
-  if (runtime.kind !== 'STABLE') {
+  if (runtime.kind !== 'STABLE' && !installing) {
     return { persistentRuntime: { action: 'unsupported', adapter: adapter.id, detail: runtime.detail } }
+  }
+  if (runtime.kind !== 'STABLE') {
+    // 아직 없다 — 이번에 놓는다. 그러면 등록할 것이 생긴다.
+    return { persistentRuntime: { action: 'install', adapter: adapter.id } }
   }
   const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values), runtime)).catch(() => null)
   if (!plan) return {}
