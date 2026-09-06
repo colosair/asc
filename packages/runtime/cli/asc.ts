@@ -21,7 +21,7 @@ import {
   type NodeRuntimeDeps,
   reexecWithCandidate,
 } from '../core/distribution/node-runtime.ts'
-import { RELEASE_VERSION } from '../core/distribution/release.ts'
+import { RELEASE_VERSION, RUNTIME_PACKAGE } from '../core/distribution/release.ts'
 
 import { GitHubClient, discoverToken } from '../adapters/github/client.ts'
 import { GitHubChangeContext, GitHubInventory, GitHubResourceContext } from '../adapters/github/context.ts'
@@ -69,6 +69,12 @@ import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
 import type { ScmPort } from '../ports/scm.ts'
 import { servicePath } from '../core/distribution/external-command.ts'
+import {
+  isTransientPath,
+  resolveServiceRuntime,
+  serviceRuntimeLine,
+  type ServiceRuntimeResolution,
+} from '../core/distribution/service-runtime.ts'
 import { LocalCanonicalReader } from '../adapters/local/canonical.ts'
 import { LocalRepoAdapter } from '../adapters/local/repo.ts'
 import { GitHubAdapter } from '../adapters/github/adapter.ts'
@@ -80,7 +86,13 @@ import type { ContextComment, ResourceSnapshot } from '../ports/resource-context
 import { statusIndicatesDone } from '../adapters/jam/ports.ts'
 import { ProgressService } from '../core/operator/progress.ts'
 import { composeBindings, defaultAdapters } from '../composition/registry.ts'
-import { buildObservationChannels, buildRuntimePorts, closeToolClients, rolesFor } from '../composition/runtime.ts'
+import {
+  buildObservationChannels,
+  buildRuntimePorts,
+  closeToolClients,
+  rolesFor,
+  workItemRoles,
+} from '../composition/runtime.ts'
 import { proposeBindings } from '../composition/propose.ts'
 import { buildEventObservation } from '../composition/observe.ts'
 import { availableProfiles, planBootstrap, renderPlan, type PolicyId } from '../core/attach/bootstrap.ts'
@@ -1514,6 +1526,217 @@ async function runSetup(
  * Core의 planner는 파일도 network도 모른다 — 사실은 여기서 관측해 넘긴다. 그래야
  * "이 명령이 무엇을 바꿀 것인가"를 아무것도 바꾸지 않고 물어볼 수 있다.
  */
+/**
+ * 이 저장소가 스스로 증명하는 Profile 이름 (P0 F2).
+ *
+ * **파일을 만들지 않는다** — 이름과 "이미 있는가"만 관측한다. 다른 논리 workspace 를
+ * 찾아 합치는 것이 아니라, 이 checkout 의 remote 하나에서 읽히는 신원이다 (C-11 유지).
+ */
+async function adoptableState(projectRoot: string, git: boolean): Promise<Pick<SetupState, 'adoptable'>> {
+  if (!git) return {}
+  const remotes = await gitRemotes(projectRoot)
+  if (remotes.length === 0) return {}
+  try {
+    const adopted = buildAdoptedProfile({
+      dirName: basename(projectRoot),
+      remotes,
+      scmForHost: (host) => (host === 'github.com' ? 'github' : 'git'),
+    })
+    // **공유 주소가 없으면 후보가 아니다.** remote 가 프로젝트 신원을 증명하지 못하면
+    // 그것은 이 기계 안의 폴더일 뿐이고, 무엇으로 붙을지는 사람이 정한다.
+    const project = adopted.profile.project as { repository?: string } | undefined
+    if (!project?.repository || project.repository.startsWith('local/')) return {}
+    const exists = existsSync(join(externalProfileRoot(), adopted.id, 'profile.json'))
+    return { adoptable: { id: adopted.id, exists } }
+  } catch {
+    // 이름을 만들 수 없는 저장소가 있다. 그때는 이 축이 없는 것이고, 사람이 고른다.
+    return {}
+  }
+}
+
+/**
+ * 승인 권한자가 서 있는가, 그리고 지금 이 사람을 무엇으로 부를 수 있는가 (P0 F2).
+ *
+ * **인증된 provider 가 말한 이름을 쓴다.** ASC 가 지어내지 않고, 자격 값은 읽지 않는다.
+ */
+async function identityState(
+  ascRoot: string | undefined,
+  workspaceComing: boolean,
+): Promise<Pick<SetupState, 'identity'>> {
+  const wired = ascRoot ? Object.keys(await loadIdentityMap(ascRoot)).length > 0 : false
+  if (wired) return { identity: { wired: true } }
+  // **세울 workspace 가 없으면 누구인지 묻지 않는다.** 물으려면 provider CLI 를 불러야
+  // 하고, 그 도구는 자기 설정 파일을 만든다 — 멈출 계획이 남기는 자국이 되면 안 된다.
+  if (!workspaceComing) return { identity: { wired: false } }
+  const actor = await detectActor()
+  return { identity: { wired: false, ...(actor ? { actor } : {}) } }
+}
+
+/**
+ * 지금 이 사람을 `<channel>:<actor>` 로. 인증된 통로가 먼저다 — 그것이 실제로 밖에서
+ * 나를 부르는 이름이고, git 의 표시 이름은 아무 계정과도 이어지지 않는다.
+ */
+async function detectActor(): Promise<string | null> {
+  const gitlab = await execText('glab', ['api', 'user'])
+  const gitlabName = readJsonField(gitlab, 'username')
+  if (gitlabName) return `gitlab:${gitlabName}`
+  const github = await execText('gh', ['api', 'user'])
+  const githubName = readJsonField(github, 'login')
+  if (githubName) return `github:${githubName}`
+  const local = await detectSelf()
+  return local ? `local:${local}` : null
+}
+
+function readJsonField(text: string | null, field: string): string | null {
+  if (!text) return null
+  try {
+    const value = (JSON.parse(text) as Record<string, unknown>)[field]
+    return typeof value === 'string' && value.length > 0 ? value : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 발견이 증명하는 결합 (P0 F2).
+ *
+ * **역할은 capability 로 정한다** — provider 이름으로 정하면 이 자리가 provider 목록이
+ * 된다. 변경을 아는 통로가 code, 작업 항목을 세는 통로가 work 다. 같은 역할에 후보가
+ * 둘이면 origin remote 가 가리키는 쪽을 쓰고, 그것으로도 갈리면 아무것도 제안하지 않는다.
+ */
+async function bindingProposalState(
+  projectRoot: string,
+  profileId: string | undefined,
+  willCreate: boolean,
+): Promise<Pick<SetupState, 'bindingProposal'>> {
+  if (!profileId) return {}
+  // 이미 선언이 있으면 손대지 않는다 — 사람이 적은 것이 먼저다.
+  // 파일이 아직 없어도 **이번에 만들 것이면** 비어 있는 것과 같다: adopt 는 결합을
+  // 적지 않으므로, 그 사실을 여기서 미리 알아야 한 번의 apply 로 끝난다.
+  const declared = await readProfileBindings(profileId)
+  if (declared === null && !willCreate) return {}
+  if (declared !== null && declared.length > 0) return {}
+
+  const adapters = monitorAdapters()
+  const plan = await composeBindings({ context: { projectRoot, env: process.env }, adapters, roles: [] })
+  const usable = plan.bindings.filter((binding) => binding.state === 'AVAILABLE' || binding.state === 'DEGRADED')
+  const origin = (await gitRemotes(projectRoot)).find((remote) => remote.name === 'origin')
+  const originAlias = origin ? normalizeRemote(origin.url) : null
+
+  const byRole = new Map<string, { role: string; adapter: string; resource: string }[]>()
+  for (const binding of usable) {
+    const role = binding.provides.includes('context.change')
+      ? 'code-primary'
+      : binding.provides.includes('inventory.enumerate')
+        ? 'work'
+        : null
+    if (!role) continue
+    byRole.set(role, [...(byRole.get(role) ?? []), { role, adapter: binding.adapterId, resource: binding.resource }])
+  }
+
+  const proposal: { role: string; adapter: string; resource: string }[] = []
+  for (const [role, candidates] of byRole) {
+    if (candidates.length === 1) {
+      proposal.push(candidates[0]!)
+      continue
+    }
+    // origin 이 가리키는 것 하나면 그것이다 — 이 저장소의 주소가 그 판정의 근거다.
+    const matching = originAlias
+      ? candidates.filter((candidate) => originAlias.endsWith(`/${candidate.resource}`))
+      : []
+    if (matching.length === 1) proposal.push(matching[0]!)
+    else return {}
+  }
+  return proposal.length > 0 ? { bindingProposal: proposal } : {}
+}
+
+/**
+ * 발견이 증명한 결합을 Profile 파일에 적는다.
+ *
+ * **이미 있는 선언은 건드리지 않는다** — 사람이 적은 것이 먼저다. 그 밖의 필드도 그대로
+ * 둔다: 이 함수가 아는 것은 `bindings` 한 칸뿐이다.
+ */
+async function writeProfileBindings(
+  profileId: string,
+  bindings: readonly { role: string; adapter: string; resource: string }[],
+): Promise<boolean> {
+  const path = join(externalProfileRoot(), profileId, 'profile.json')
+  const profile = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+  if (Array.isArray(profile.bindings) && profile.bindings.length > 0) return false
+  profile.bindings = bindings.map((binding) => ({ ...binding }))
+  await writeFile(path, `${JSON.stringify(profile, null, 2)}\n`, 'utf8')
+  console.log(`bindings declared in ${profileId}: ${bindings.map((b) => `${b.role}=${b.adapter}`).join(', ')}`)
+  return true
+}
+
+/**
+ * 이 checkout 이 증명하는 정본 갈래 (P0 F5).
+ *
+ * **remote 에게 물어본다.** 로컬 `origin/HEAD` 는 clone 시점에 고정돼 낡는다 — 이 저장소에서
+ * 그 값은 `main` 인데 remote 의 기본 branch 는 `develop` 이었다. 낡은 값을 정본으로 적으면
+ * 세션이 엉뚱한 baseline 을 딛는다. 물어보지 못하면 적지 않는다.
+ */
+async function canonicalProposalState(
+  projectRoot: string,
+  git: boolean,
+  profileId: string | undefined,
+  willCreate: boolean,
+): Promise<Pick<SetupState, 'canonicalProposal'>> {
+  if (!git || !profileId) return {}
+  const declared = await readProfileCanonical(profileId)
+  if (declared === null && !willCreate) return {}
+  if (declared !== null && declared > 0) return {}
+
+  const symref = await execText('git', ['-C', projectRoot, 'ls-remote', '--symref', 'origin', 'HEAD'])
+  const match = symref ? /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(symref) : null
+  const branch = match?.[1]
+  if (!branch) return {}
+  // provider 는 `git` 이다 — 이 값은 checkout 이 이미 들고 있는 사실이고, 그것을 읽는 통로가
+  // 선언된 provider 를 따른다 (canonical baseline 읽기).
+  return { canonicalProposal: { id: branch, provider: 'git', remote: 'origin', ref: branch } }
+}
+
+/** Profile 이 선언한 정본 갈래 수. 파일이 없으면 `null`. */
+async function readProfileCanonical(profileId: string): Promise<number | null> {
+  const path = join(externalProfileRoot(), profileId, 'profile.json')
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as { canonical?: { sources?: unknown } }
+    return Array.isArray(parsed.canonical?.sources) ? parsed.canonical.sources.length : 0
+  } catch {
+    return null
+  }
+}
+
+/**
+ * remote 가 말한 정본 갈래를 Profile 에 적는다. 이미 선언이 있으면 손대지 않는다.
+ */
+async function writeProfileCanonical(
+  profileId: string,
+  source: { id: string; provider: string; remote: string; ref: string },
+): Promise<boolean> {
+  const path = join(externalProfileRoot(), profileId, 'profile.json')
+  const profile = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+  const canonical = (profile.canonical ?? {}) as { sources?: unknown[] }
+  if (Array.isArray(canonical.sources) && canonical.sources.length > 0) return false
+  profile.canonical = { ...canonical, sources: [source] }
+  await writeFile(path, `${JSON.stringify(profile, null, 2)}\n`, 'utf8')
+  console.log(`canonical source declared in ${profileId}: ${source.remote}/${source.ref}`)
+  return true
+}
+
+/** Profile 이 이미 선언한 결합. 파일이 없으면 `null` — 없는 것과 비어 있는 것은 다르다. */
+async function readProfileBindings(
+  profileId: string,
+): Promise<{ role?: string; adapter: string; resource: string }[] | null> {
+  const path = join(externalProfileRoot(), profileId, 'profile.json')
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as { bindings?: unknown }
+    return Array.isArray(parsed.bindings) ? (parsed.bindings as { adapter: string; resource: string }[]) : []
+  } catch {
+    return null
+  }
+}
+
 async function detectSetupState(values: Record<string, unknown>, entry: AscEntry): Promise<SetupState> {
   const { root: projectRoot, git } = await discoverProjectRoot(process.cwd())
   const resolution = await resolveRoot(process.cwd(), values.root as string | undefined)
@@ -1523,6 +1746,10 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
   const attachmentBroken = ascRoot ? (await inspectSetup(ascRoot)).attachment === 'BROKEN' : false
   const scope = values.scope === 'project' ? 'project' : 'local'
   const hostReport = await verifyInstall(hostPaths())
+  const adoptable = await adoptableState(projectRoot, git)
+  const attachedProfile = ascRoot ? await lockedProfileId(ascRoot) : undefined
+  // 이번 계획이 쓸 Profile 하나 — 그것의 결합 선언이 비어 있을 때만 제안을 관측한다.
+  const targetProfile = (values.profile as string | undefined) ?? attachedProfile ?? adoptable.adoptable?.id
   return {
     entry,
     projectRoot,
@@ -1532,6 +1759,17 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     ...(values.profile ? { requestedProfile: values.profile as string } : {}),
     profileCandidates: await availableProfiles(installRoot(), externalProfileRoot()),
     scope,
+    ...(attachedProfile ? { attachedProfile } : {}),
+    // fresh onboarding 이 사람에게 되묻지 않으려면 이 셋이 관측돼 있어야 한다 (P0 F2).
+    ...adoptable,
+    ...(await identityState(ascRoot, Boolean(ascRoot) || Boolean(targetProfile))),
+    ...(await bindingProposalState(projectRoot, targetProfile, Boolean(adoptable.adoptable && !adoptable.adoptable.exists))),
+    ...(await canonicalProposalState(
+      projectRoot,
+      git,
+      targetProfile,
+      Boolean(adoptable.adoptable && !adoptable.adoptable.exists),
+    )),
     host: [{ id: 'claude', status: hostReport.status }],
     // Profile 이 작업 도구를 선언했으면 그 준비 상태까지 본다 (설계 §9.3).
     ...(await workBindingState(ascRoot, projectRoot)),
@@ -1551,7 +1789,10 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
  * 스스로 할 때만 의미가 있다.
  */
 function runningFromInstalledPackage(): boolean {
-  return fileURLToPath(import.meta.url).replace(/\\/g, '/').includes('/node_modules/@asc-agent/runtime/')
+  const here = fileURLToPath(import.meta.url).replace(/\\/g, '/')
+  // **npx 캐시도 node_modules 다.** 경로 모양만 보면 임시 자리가 설치본으로 통과하고,
+  // 실제로 그렇게 통과해 등록물이 npx 캐시를 가리켰다 — 캐시를 지우면 깨진다.
+  return here.includes('/node_modules/@asc-agent/runtime/') && !isTransientPath(here)
 }
 
 /**
@@ -1579,7 +1820,13 @@ async function persistentRuntimeState(
   if (!serviceRegistrationAllowed()) return {}
   const adapter = serviceAdapter()
   if (!adapter) return {}
-  const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values))).catch(() => null)
+  // 등록물이 가리킬 자리가 없으면 이 축을 그리지 않는다 — 깨진 등록을 남기느니 등록하지
+  // 않고 그 사실을 말한다 (P0 F1).
+  const runtime = await serviceRuntime()
+  if (runtime.kind !== 'STABLE') {
+    return { persistentRuntime: { action: 'unsupported', adapter: adapter.id, detail: runtime.detail } }
+  }
+  const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values), runtime)).catch(() => null)
   if (!plan) return {}
   return {
     persistentRuntime: {
@@ -1835,6 +2082,12 @@ async function runSetupLifecycle(
   // stdout에 섞이면 JSON 문서 하나라는 계약이 깨진다 (C-14 §7) — 진단이므로 stderr로 보낸다.
   const speak = console.log
   if (asJson) console.log = console.error
+  const relock = async (profile: string): Promise<void> => {
+    const root = await discoverRoot(process.cwd(), values.root as string | undefined)
+    if (!root) return
+    const code = await runProfile('resolve', { ...values, profile, write: true }, root)
+    if (code !== 0) throw new Error(`profile re-lock 실패 (exit ${code})`)
+  }
   let outcome: ApplyResult
   try {
     outcome = await applySetupPlan(plan, {
@@ -1853,8 +2106,13 @@ async function runSetupLifecycle(
       registerPersistentRuntime: async () => {
         const adapter = serviceAdapter()
         if (!adapter) return
+        const runtime = await serviceRuntime()
+        if (runtime.kind !== 'STABLE') {
+          console.error(`Persistent runtime not registered — ${runtime.detail}`)
+          return
+        }
         try {
-          await adapter.install(serviceCommand(serviceInterval(values)))
+          await adapter.install(serviceCommand(serviceInterval(values), runtime))
           console.log(`Persistent runtime registered with ${adapter.id}.`)
         } catch (error) {
           // **등록 실패는 attach 실패가 아니다.** 기계 등록은 이 프로젝트가 붙는 것과
@@ -1873,7 +2131,35 @@ async function runSetupLifecycle(
         const code = await runHost('claude', 'install', undefined, { ...values, json: false })
         if (code !== 0) throw new Error(`${change.host} 설치 실패 (exit ${code})`)
       },
+      // 이 저장소를 설명하는 Profile 을 만든다. 이름은 plan 이 이미 정했다.
+      adoptProfile: async (change) => {
+        const code = await runProfileAdopt({ ...values, id: change.profile, json: true }, entry)
+        if (code !== 0) throw new Error(`profile adopt 실패 (exit ${code})`)
+      },
+      // 승인 권한자를 세운다. 이름과 채널뿐이고 비밀은 다루지 않는다.
+      wireIdentity: async (change) => {
+        const code = await runSetupIdentity({ ...values, actor: change.actor, role: 'both' })
+        if (code !== 0) throw new Error(`identity 결선 실패 (exit ${code})`)
+      },
+      // 발견이 증명한 결합을 Profile 에 적는다. 갈리는 것은 plan 에 들어오지 않는다.
+      declareCanonical: async (change) => {
+        const written = await writeProfileCanonical(change.profile, change.source)
+        if (written) await relock(change.profile)
+      },
+      declareBindings: async (change) => {
+        const written = await writeProfileBindings(change.profile, change.bindings)
+        // Profile 을 고쳤으면 lock 이 어긋난다 — 다음 명령이 그 drift 앞에서 멈춘다.
+        // 고친 쪽이 닫는다 (setup identity 가 하는 것과 같다).
+        if (written) await relock(change.profile)
+      },
     })
+  } catch (error) {
+    // **적용 실패는 stack trace 가 아니라 답이어야 한다.** agent 는 이 문서를 읽고 다음
+    // 행동을 정한다 — 예외가 그대로 나가면 stdout 이 비고 아무것도 판단할 수 없다.
+    console.log = speak
+    const detail = error instanceof Error ? error.message : String(error)
+    emit({ ...plan, status: 'apply_failed', changesApplied: false, detail })
+    return 1
   } finally {
     console.log = speak
   }
@@ -1915,6 +2201,7 @@ async function inspectSetup(root: string): Promise<SetupStatus> {
     ...(runtime
       ? { profile: { id: runtime.layers.profile.id, origin: runtime.layers.profileOrigin } }
       : {}),
+    ...(runtime ? { canonicalSources: runtime.layers.profile.canonical.sources.length } : {}),
     hasApprovers: Object.keys(await loadIdentityMap(root)).length > 0,
     hasControllerIdentities: Object.keys(runtime?.controllerIdentities ?? {}).length > 0,
     hasMonitorIdentities: (runtime?.monitor.identities?.length ?? 0) > 0,
@@ -2437,6 +2724,7 @@ async function runProceed(
   const workRef = (values.work as string | undefined) ?? undefined
   const ingress = workRef ? await buildWorkIngress(store, root, sessions, resolved) : undefined
   if (workRef && !ingress) {
+    // **정본이 없는 것과 다른 실패다.** 정본은 code 쪽 사실이고 이것은 작업 항목 쪽이다.
     console.error(`작업 항목 '${workRef}' 을 읽을 통로가 없다 — Profile bindings 에 작업 항목 provider 를 선언하라.`)
     return 2
   }
@@ -2657,7 +2945,11 @@ async function buildWorkIngress(
     plan,
     // 제안은 **말하는 것**이지 정하는 것이 아니다. 역할을 박아 넣으면 선언과 구분되지 않고,
     // capability 해석은 후보가 유일할 때 이미 스스로 풀린다.
-    roles: rolesFor(plan, declared),
+    //
+    // 다만 **작업 항목을 누구에게 물을지는 여기서 정한다** — code 와 work 가 둘 다 자원
+    // 조회를 제공하면 `rolesFor` 는 아무것도 정하지 못하고, 그러면 선언해 둔 work binding 이
+    // 있는데도 "통로가 없다" 가 된다 (P0 F7).
+    roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
@@ -3887,7 +4179,11 @@ async function serviceHealth(
 ): Promise<{ adapter: string; action: string; line: string } | null> {
   const adapter = serviceAdapter()
   if (!adapter) return null
-  const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values))).catch(() => null)
+  const runtime = await serviceRuntime()
+  if (runtime.kind !== 'STABLE') {
+    return { adapter: adapter.id, action: 'unsupported', line: serviceRuntimeLine(runtime) }
+  }
+  const plan = await planPersistentRuntime(adapter, serviceCommand(serviceInterval(values), runtime)).catch(() => null)
   if (!plan) return null
   return { adapter: adapter.id, action: plan.action, line: persistentRuntimeLine(adapter.id, plan) }
 }
@@ -3947,14 +4243,43 @@ function serviceAdapter(): PersistentRuntimeAdapter | null {
  * 지금 도는 실행 파일과 진입점을 그대로 쓴다 — 어느 build 를 쓸지는 그 진입점이 다시
  * 정하므로(C-14), 등록물이 build 를 고르는 일은 없다.
  */
-function serviceCommand(intervalSeconds: number): ServiceCommand {
+function serviceCommand(intervalSeconds: number, runtime: Extract<ServiceRuntimeResolution, { kind: 'STABLE' }>): ServiceCommand {
   return {
-    program: process.execPath,
-    args: [fileURLToPath(import.meta.url), 'runtime', 'tick', '--all'],
+    program: runtime.node,
+    args: [runtime.entry, 'runtime', 'tick', '--all'],
     intervalSeconds,
-    ...serviceEnvironment(),
+    ...serviceEnvironment(runtime.node),
     logPath: join(ascHome(), 'service.log'),
   }
+}
+
+/**
+ * 등록물이 가리킬 Node 와 진입점 (P0 — fresh onboarding).
+ *
+ * 지금 이 프로세스가 어디서 도는지와 **다른 질문이다.** bootstrap 은 npx 캐시에서 돌 수
+ * 있고, 그 자리는 지워진다. 전역 설치본이 있으면 그것이 답이고, 없으면 등록하지 않는다.
+ */
+async function serviceRuntime(): Promise<ServiceRuntimeResolution> {
+  const stable = await globalRuntimeEntry()
+  const check = await checkNodeRuntime(nodeRuntimeDeps())
+  return resolveServiceRuntime({
+    runningEntry: fileURLToPath(import.meta.url),
+    runningNode: process.execPath,
+    runningNodeVersion: process.version,
+    ...(stable ? { stableEntry: stable } : {}),
+    ...(check.ok ? {} : { nodeCandidates: check.candidates }),
+  })
+}
+
+/** 전역 설치본의 진입점. npm 이 말하는 prefix 를 쓴다 — 경로를 지어내지 않는다. */
+async function globalRuntimeEntry(): Promise<string | undefined> {
+  const prefix = await execText('npm', ['prefix', '-g'])
+  if (!prefix) return undefined
+  const entry =
+    process.platform === 'win32'
+      ? join(prefix, 'node_modules', RUNTIME_PACKAGE, 'dist', 'cli', 'asc.js')
+      : join(prefix, 'lib', 'node_modules', RUNTIME_PACKAGE, 'dist', 'cli', 'asc.js')
+  return existsSync(entry) ? entry : undefined
 }
 
 /**
@@ -3964,9 +4289,9 @@ function serviceCommand(intervalSeconds: number): ServiceCommand {
  * node 의 디렉터리를 맨 앞에 둬서 같은 node 의 npx 가 먼저 잡히게 한다. Windows 의 예약
  * 작업은 사용자 환경을 그대로 물려받으므로 환경을 싣지 않는다.
  */
-function serviceEnvironment(): Pick<ServiceCommand, 'environment'> {
+function serviceEnvironment(node: string): Pick<ServiceCommand, 'environment'> {
   if (process.platform === 'win32') return {}
-  const tools = [process.execPath, jamLauncher().command, 'glab', 'git']
+  const tools = [node, jamLauncher().command, 'glab', 'git']
   const { path } = servicePath(tools)
   return { environment: { PATH: path } }
 }
@@ -3993,7 +4318,15 @@ async function runRuntimeService(
     return 0
   }
 
-  const wanted = serviceCommand(serviceInterval(values))
+  const runtime = await serviceRuntime()
+  if (runtime.kind !== 'STABLE') {
+    // 등록물이 가리킬 안정된 자리가 없다. 무엇이 없어서인지 말한다 — 등록하지 않는 것이
+    // 답이고, 깨진 등록을 남기는 것은 답이 아니다.
+    if (values.json) console.log(JSON.stringify({ supported: true, stable: false, ...runtime }, null, 2))
+    else console.error(serviceRuntimeLine(runtime))
+    return command === 'status' || command === undefined ? 0 : 1
+  }
+  const wanted = serviceCommand(serviceInterval(values), runtime)
 
   if (command === undefined || command === 'status') {
     const plan = await planPersistentRuntime(adapter, wanted)

@@ -18,7 +18,7 @@ import {
 import { composeBindings, describeAll } from '../composition/registry.ts'
 import { proposeBindings } from '../composition/propose.ts'
 import { GitHubAdapter, parseRemote } from '../adapters/github/adapter.ts'
-import { buildRuntimePorts } from '../composition/runtime.ts'
+import { buildRuntimePorts, rolesFor, workItemRoles } from '../composition/runtime.ts'
 import type { Adapter } from '../ports/adapter.ts'
 
 const binding = (over: Partial<ResolvedBinding> = {}): ResolvedBinding => ({
@@ -321,5 +321,87 @@ describe('P1-G — 발견되는 사실은 제안하고, 갈리면 고르지 않�
 
     assert.deepEqual(proposal.roles, {})
     assert.deepEqual(proposal.conflicts, [])
+  })
+})
+
+describe('F7 — 작업 항목을 누구에게 묻는가', () => {
+  const declared = [
+    { role: 'code-primary', adapter: 'gitlab', resource: 'group/project' },
+    { role: 'work', adapter: 'work-fixture', resource: 'PROJ' },
+  ]
+  const plan = planOf(
+    binding({
+      adapterId: 'gitlab',
+      resource: 'group/project',
+      role: 'code-primary',
+      provides: ['observe.delta', 'inventory.enumerate', 'context.resource', 'context.change'],
+    }),
+    binding({
+      adapterId: 'work-fixture',
+      resource: 'PROJ',
+      role: 'work',
+      // 작업 항목 통로는 변경을 모른다 — 그 차이가 두 축의 정의다.
+      provides: ['inventory.enumerate', 'context.resource', 'context.thread'],
+    }),
+  )
+
+  it('W1·W2 — 둘 다 자원 조회를 제공해도 작업 항목은 work 가 맡는다', () => {
+    // 이것이 없으면 rolesFor 는 후보 둘을 보고 아무 역할도 정하지 못하고,
+    // 선언해 둔 work binding 이 있는데도 "통로가 없다" 가 된다.
+    assert.deepEqual(rolesFor(plan, declared)['context.resource'], undefined)
+    assert.equal(workItemRoles(plan, declared)['context.resource'], 'work')
+    assert.equal(workItemRoles(plan, declared)['inventory.enumerate'], 'work')
+  })
+
+  it('provider 이름이 아니라 capability 모양으로 가른다 (W5 — 다른 provider 도 같다)', () => {
+    const other = [
+      { role: 'code-primary', adapter: 'github', resource: 'org/repo' },
+      { role: 'work', adapter: 'jam', resource: 'PROJ' },
+    ]
+    const otherPlan = planOf(
+      binding({
+        adapterId: 'github',
+        resource: 'org/repo',
+        role: 'code-primary',
+        provides: ['inventory.enumerate', 'context.resource', 'context.change'],
+      }),
+      binding({
+        adapterId: 'jam',
+        resource: 'PROJ',
+        role: 'work',
+        provides: ['inventory.enumerate', 'context.resource'],
+      }),
+    )
+    assert.equal(workItemRoles(otherPlan, other)['context.resource'], 'work')
+  })
+
+  it('작업 항목 통로가 둘이면 고르지 않는다 — 사람이 정한다', () => {
+    const two = [
+      { role: 'work', adapter: 'jam', resource: 'A' },
+      { role: 'work-2', adapter: 'work-fixture', resource: 'B' },
+    ]
+    const twoPlan = planOf(
+      binding({ adapterId: 'jam', resource: 'A', role: 'work', provides: ['inventory.enumerate', 'context.resource'] }),
+      binding({
+        adapterId: 'work-fixture',
+        resource: 'B',
+        role: 'work-2',
+        provides: ['inventory.enumerate', 'context.resource'],
+      }),
+    )
+    assert.deepEqual(workItemRoles(twoPlan, two), {})
+  })
+
+  it('code 통로만 있으면 작업 항목 역할은 서지 않는다 — 코드가 작업 항목인 척하지 않는다', () => {
+    const codeOnly = [{ role: 'code-primary', adapter: 'gitlab', resource: 'group/project' }]
+    const codePlan = planOf(
+      binding({
+        adapterId: 'gitlab',
+        resource: 'group/project',
+        role: 'code-primary',
+        provides: ['inventory.enumerate', 'context.resource', 'context.change'],
+      }),
+    )
+    assert.deepEqual(workItemRoles(codePlan, codeOnly), {})
   })
 })

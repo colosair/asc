@@ -198,6 +198,38 @@ const PORT_OF: Partial<Record<Capability, keyof Omit<RuntimePorts, 'unavailable'
  * 고르면 그 선택을 아무도 보지 못한다 (C-09 §4.2).
  */
 /**
+ * 작업 항목을 읽는 통로의 역할 이름 (P0 F7).
+ *
+ * `rolesFor` 는 **선언된 binding 이 하나일 때만** 역할을 정한다. 그래서 code binding 과
+ * work binding 이 둘 다 `context.resource` 를 제공하면 아무 역할도 서지 않고, 작업 항목
+ * 조회는 "통로가 없다" 로 끝난다 — 실기계에서 감시는 되는데 `proceed --work` 만 실패한
+ * 자리가 여기다. 없는 것이 아니라 **누구에게 물을지 정하지 않은 것**이었다.
+ *
+ * 가르는 기준은 provider 이름이 아니라 capability 모양이다: 작업 항목 통로는 목록과 자원을
+ * 알고 **변경을 모른다**. 코드 통로는 변경을 안다. 그 차이가 곧 두 축의 정의다
+ * (C-09 §2.1 — Port 를 좁게 나눈 이유가 그것이다).
+ */
+export function workItemRoles(
+  plan: BindingPlan,
+  declared: readonly { role: string; adapter: string; resource: string }[],
+): Partial<Record<Capability, string>> {
+  const candidates = plan.bindings
+    .filter((binding) => binding.role !== undefined)
+    .filter((binding) => declared.some((d) => d.adapter === binding.adapterId && d.resource === binding.resource))
+    .filter(
+      (binding) =>
+        binding.provides.includes('context.resource') &&
+        binding.provides.includes('inventory.enumerate') &&
+        !binding.provides.includes('context.change'),
+    )
+  const roles = new Set(candidates.map((binding) => binding.role!))
+  // 갈리면 고르지 않는다 — 그것은 사람이 정할 문제다 (C-09 §4.2).
+  if (roles.size !== 1) return {}
+  const role = [...roles][0]!
+  return { 'context.resource': role, 'inventory.enumerate': role, 'context.thread': role, 'context.history': role }
+}
+
+/**
  * Profile이 선언한 역할 배정을 capability별 역할로 옮긴다 (C-09 §3.1·§4).
  *
  * **추론하지 않는다.** 선언된 binding이 그 capability를 제공한다고 plan에 적혀 있을 때만

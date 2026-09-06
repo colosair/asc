@@ -21,6 +21,7 @@ import {
 import {
   install,
   installReportLines,
+  locate,
   uninstall,
   verifyInstall,
   verifyInstalled,
@@ -802,5 +803,41 @@ describe('관찰 이벤트 ≠ 전이 (C-03 §5.5·§5.6)', () => {
     )
     assert.equal((await bindings.get('S-20260823-01'))!.physicalSessionId, 'claude-respawned')
     assert.equal((await store.get('session', 'S-20260823-01'))!.status, 'ACTIVE')
+  })
+})
+
+describe('F6 — 일이 시작되면 논리 세션 안에서 시작된다', () => {
+  const script = hookScript()
+
+  it('S1 — 읽기 도구는 이 문을 지나지 않는다', () => {
+    // 상태를 보는 세션까지 끌어들이면 자동화가 아니라 방해다.
+    assert.match(script, /const MUTATORS = new Set\(\['Edit', 'Write', 'MultiEdit', 'NotebookEdit'\]\)/)
+    assert.doesNotMatch(script, /MUTATORS[^)]*'Read'/)
+    assert.doesNotMatch(script, /MUTATORS[^)]*'Grep'/)
+    assert.match(script, /if \(input\.tool_name !== 'Bash' && !isMutation\) process\.exit\(0\)/)
+  })
+
+  it('S2 — 관리 밖 세션의 변경은 막히고, 다음 한 걸음이 함께 온다', () => {
+    assert.match(script, /if \(isMutation && !managed\)/)
+    assert.match(script, /asc proceed --work <WORK-KEY> --json/)
+    assert.match(script, /asc host claude bind <S-ID> --physical/)
+    // 사람에게 "ASC 적용해" 라고 말하게 하지 않는다 — 명령은 agent 가 실행한다.
+    assert.doesNotMatch(script, /console\.error[^)]*ASC 적용/)
+  })
+
+  it('S5 — 세션 안에 들어간 뒤에는 변경을 막지 않는다', () => {
+    // managed 이면 그 아래 금지 목록(Bash 명령)만 남는다.
+    assert.match(script, /if \(isMutation\) process\.exit\(0\)/)
+  })
+
+  it('ASC 와 무관한 프로젝트는 그대로 통과한다', () => {
+    assert.match(script, /if \(!ascRoot\) process\.exit\(0\)/)
+  })
+
+  it('변경 도구도 같은 hook 이 맡는다 — 두 번째 문을 만들지 않는다', () => {
+    const pre = locate({ claudeHome: '/home/me/.claude' }).hooks.filter((hook) => hook.event === 'PreToolUse')
+    assert.ok(pre.some((hook) => hook.matcher === 'Bash'))
+    assert.ok(pre.some((hook) => hook.matcher?.includes('Edit') && hook.matcher?.includes('Write')))
+    assert.equal(new Set(pre.map((hook) => hook.script)).size, 1, '같은 스크립트여야 규칙이 한 곳에 있다')
   })
 })

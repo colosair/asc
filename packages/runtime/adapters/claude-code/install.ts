@@ -51,7 +51,7 @@ type HookSpec = {
   script: string
 }
 
-function locate(paths: InstallPaths) {
+export function locate(paths: InstallPaths) {
   const guard = join(paths.claudeHome, 'asc', 'guard-hook.mjs')
   const front = join(paths.claudeHome, 'asc', 'front-hook.mjs')
   return {
@@ -69,6 +69,8 @@ function locate(paths: InstallPaths) {
     hooks: ((): HookSpec[] => {
       const specs: HookSpec[] = [
         { event: 'PreToolUse', marker: HOOK_MARKER, matcher: 'Bash', script: guard },
+        // 파일을 바꾸는 도구도 같은 문을 지난다 — 일이 시작되는 신호이기 때문이다 (F6).
+        { event: 'PreToolUse', marker: HOOK_MARKER, matcher: 'Edit|Write|MultiEdit|NotebookEdit', script: guard },
       ]
       // 부를 곳을 모르면 심지 않는다 (§InstallPaths.entry)
       if (paths.entry) specs.push({ event: 'SessionStart', marker: FRONT_MARKER, script: front })

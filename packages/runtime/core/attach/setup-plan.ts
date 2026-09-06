@@ -65,6 +65,31 @@ export type SetupState = {
    * 사람에게 "그 도구를 설정할까요?"라고 되물으면, 사람은 자기가 이미 적어 둔 것을 다시
    * 답하게 된다. 고칠 수 있는 것은 고치고, 사람만 할 수 있는 것에서만 멈춘다.
    */
+  /**
+   * 이 저장소 자신의 remote 에서 읽히는 Profile id (P0 fresh onboarding).
+   *
+   * **다른 논리 workspace 를 추측해 합치는 것이 아니다** (C-11 금지사항). 이 저장소가
+   * 스스로 증명하는 신원 하나이고, 그 이름의 Profile 이 이미 있으면 그것을 쓰고 없으면
+   * 만든다. 이것이 없어서 fresh 설치가 `ASC_PROFILE_SELECTION_REQUIRED` 앞에 멈췄고,
+   * 사람이 `profile adopt` 를 따로 쳐야 했다.
+   */
+  adoptable?: { id: string; exists: boolean }
+  /**
+   * 이 workspace 에 승인 권한자가 서 있는가, 그리고 지금 이 사람을 무엇으로 알아볼 수
+   * 있는가. `actor` 는 인증된 provider 가 말한 값이며 ASC 가 지어내지 않는다.
+   */
+  identity?: { wired: boolean; actor?: string }
+  /**
+   * 발견이 **갈리지 않고** 제안하는 결합. Profile 에 결합 선언이 없을 때만 본다.
+   * 갈리면 비어 있다 — 고르는 것은 사람이다 (C-09 §4.2).
+   */
+  bindingProposal?: readonly { role: string; adapter: string; resource: string }[]
+  /**
+   * 이 checkout 이 증명하는 정본 갈래. remote 가 스스로 말한 기본 branch 하나이며,
+   * Profile 에 정본 선언이 비어 있을 때만 관측한다. 알 수 없으면 없다 — 지어내면 세션이
+   * 읽지 못하는 정본을 딛고 서게 된다.
+   */
+  canonicalProposal?: { id: string; provider: string; remote: string; ref: string }
   workBinding?: {
     adapter: string
     resource: string
@@ -85,8 +110,36 @@ export type SetupChange =
    * **설치도 plan에 드러나는 mutation이다** — bootstrap이 몰래 하지 않는다 (불변식 ⑩).
    */
   | { target: 'runtime-install'; package: string; version: string; strategy: 'npm-global'; from: string }
+  /**
+   * 이 저장소를 설명하는 Profile 을 만든다 (P0 fresh onboarding).
+   *
+   * 근거는 이 저장소의 remote 하나뿐이다. 다른 workspace 를 추측하지 않는다.
+   */
+  | { target: 'adopt-profile'; profile: string }
   /** 이 checkout에 runtime을 붙인다. local scope면 저장소에는 아무것도 만들지 않는다. */
   | { target: 'attach-workspace'; scope: 'local' | 'project'; profile: string }
+  /**
+   * 지금 이 사람을 이 workspace 의 승인 권한자로 세운다.
+   *
+   * **비밀은 다루지 않는다** — 이름과 채널뿐이다. 이것이 계획에 없으면 fresh 설치가
+   * 승인자 0 인 채로 READY 가 되고, 사람이 `setup identity` 를 따로 쳐야 했다.
+   */
+  | { target: 'identity'; actor: string }
+  /**
+   * 발견이 증명한 결합을 Profile 에 적는다.
+   *
+   * 갈리는 것은 담지 않는다. 여기 없으면 사람이 Profile 을 손으로 고쳐야 했고, 그것이
+   * fresh onboarding 에서 실제로 필요했던 단계다.
+   */
+  | { target: 'profile-bindings'; profile: string; bindings: readonly { role: string; adapter: string; resource: string }[] }
+  /**
+   * Profile 에 정본 갈래를 적는다.
+   *
+   * 이것이 비어 있으면 판정이 전부 "확인 못 함" 으로 나온다 — relevance 도
+   * responsibility 도 정본을 딛고 서기 때문이다. 근거는 remote 가 스스로 말한 기본
+   * branch 이고, 그 값을 얻지 못하면 이 변경은 계획에 들지 않는다.
+   */
+  | { target: 'profile-canonical'; profile: string; source: { id: string; provider: string; remote: string; ref: string } }
   /** Host 설치물을 지금 source에 맞춘다. 왜 필요한지까지 든다. */
   | { target: 'host-install'; host: string; from: string }
   /**
@@ -216,7 +269,7 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
         code: 'ASC_HOST_INSTALL_MODIFIED',
         // 사람이 고친 것을 덮는 것은 사람이 정한다 — plan에 담아 몰래 적용하지 않는다.
         // 다만 runtime 설치처럼 이 결정과 무관한 준비는 계획에 남는다.
-        changes,
+        changes: orderChanges(changes, false),
         requiresUserAction: true,
         ...actions(mode, evidence, [
           { type: 'force_host_install', ...command(['host', host.id, 'install', '--force']) },
@@ -248,7 +301,7 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
       return {
         status: 'user_action_required',
         code: 'ASC_WORK_BINDING_NEEDS_USER',
-        changes,
+        changes: orderChanges(changes, false),
         requiresUserAction: true,
         ...actions(mode, evidence, [{ type: 'proceed', ...command(['setup', 'status']) }]),
       }
@@ -265,6 +318,7 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
   }
 
   if (state.ascRoot && !state.attachmentBroken) {
+    pushWorkspaceChanges(changes, state, evidence)
     // 붙어 있어도 **무엇을 고를 수 있었는지**는 사실이다. 사용자 소유 Profile을 새로 놓고
     // 계획을 물었을 때 그것이 어디에도 안 보이면, 놓은 사람은 경로를 의심하게 된다.
     if (state.profileCandidates.length > 0) {
@@ -275,13 +329,24 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
 
   // 아직 안 붙었거나, 붙이다 말았다(BROKEN). 무엇으로 붙을지는 사람이 정한다 —
   // BROKEN이면 같은 선택으로 다시 붙이는 것이 repair다.
-  const profile = state.requestedProfile ?? soleCandidate(state.profileCandidates)
+  // 이 저장소가 스스로 증명하는 Profile 이 있으면 그것이 답이다 — 이름이 이미 있으면
+  // 그것을 쓰고, 없으면 만든다. 둘 다 "다른 workspace 를 추측"하는 것이 아니다.
+  const adoptable = state.adoptable
+  const profile =
+    state.requestedProfile ??
+    (adoptable && state.profileCandidates.includes(adoptable.id) ? adoptable.id : undefined) ??
+    (adoptable ? adoptable.id : undefined) ??
+    soleCandidate(state.profileCandidates)
+  if (adoptable && !state.requestedProfile && !adoptable.exists) {
+    evidence.push(`profile=${adoptable.id} (adopted from this repository)`)
+    changes.push({ target: 'adopt-profile', profile: adoptable.id })
+  }
   if (!profile) {
     evidence.push(`profile candidates=${state.profileCandidates.join(', ') || '(none)'}`)
     return {
       status: 'user_action_required',
       code: 'ASC_PROFILE_SELECTION_REQUIRED',
-      changes,
+      changes: orderChanges(changes, false),
       requiresUserAction: true,
       profiles: state.profileCandidates,
       // 고를 것이 **없을** 수도 있다 — 배포본이 들고 있는 것은 예시뿐이고, 이 프로젝트를
@@ -313,8 +378,40 @@ export function computeSetupPlan(state: SetupState): SetupPlan {
   }
 
   changes.push({ target: 'attach-workspace', scope: state.scope, profile })
-  evidence.push(`profile=${profile}${state.requestedProfile ? ' (given)' : ' (sole candidate)'}`)
+  if (!changes.some((c) => c.target === 'adopt-profile')) {
+    evidence.push(`profile=${profile}${state.requestedProfile ? ' (given)' : ' (sole candidate)'}`)
+  }
+  pushWorkspaceChanges(changes, state, evidence, profile)
   return finish(changes, evidence, state, mode, command)
+}
+
+/**
+ * workspace 가 서고 나서 필요한 것들 — 승인자와 결합 선언.
+ *
+ * 둘 다 **관측된 사실이 있을 때만** 계획에 든다. 승인자는 인증된 provider 가 말한 이름이고,
+ * 결합은 발견이 갈리지 않고 제안한 것이다. 없으면 담지 않는다 — 지어내면 그 값이 곧
+ * 사람이 겪는 오작동이 된다.
+ */
+function pushWorkspaceChanges(
+  changes: SetupChange[],
+  state: SetupState,
+  evidence: string[],
+  attachingProfile?: string,
+): void {
+  if (state.identity && !state.identity.wired && state.identity.actor) {
+    evidence.push(`identity=${state.identity.actor} (not yet recorded)`)
+    changes.push({ target: 'identity', actor: state.identity.actor })
+  }
+  const profile = attachingProfile ?? state.attachedProfile
+  if (!profile) return
+  if (state.bindingProposal && state.bindingProposal.length > 0) {
+    evidence.push(`bindings proposed=${state.bindingProposal.map((b) => `${b.role}:${b.adapter}`).join(', ')}`)
+    changes.push({ target: 'profile-bindings', profile, bindings: state.bindingProposal })
+  }
+  if (state.canonicalProposal) {
+    evidence.push(`canonical proposed=${state.canonicalProposal.remote}/${state.canonicalProposal.ref}`)
+    changes.push({ target: 'profile-canonical', profile, source: state.canonicalProposal })
+  }
 }
 
 /** 후보가 하나뿐이어도 대신 고르지 않는다 — 여기서 돌려주는 것은 "고를 것이 없다"뿐이다. */
@@ -340,12 +437,15 @@ function actions(
 }
 
 function finish(
-  changes: SetupChange[],
+  raw: SetupChange[],
   evidence: string[],
   state: SetupState,
   mode: SetupPlan['executionMode'],
   command: (args: readonly string[]) => { display: string; portable: string },
 ): SetupPlan {
+  const settled =
+    (Boolean(state.ascRoot) && !state.attachmentBroken) || raw.some((c) => c.target === 'attach-workspace')
+  const changes = orderChanges(raw, settled)
   if (changes.length === 0) {
     return {
       status: 'already_configured',
@@ -375,6 +475,14 @@ export type SetupEffects = {
   setupWorkBinding?(change: Extract<SetupChange, { target: 'work-binding-setup' }>): Promise<void>
   /** 이 기계에 runtime 을 등록한다. OS 별 형식은 adapter 뒤에 있다. */
   registerPersistentRuntime?(change: Extract<SetupChange, { target: 'persistent-runtime' }>): Promise<void>
+  /** 이 저장소를 설명하는 Profile 을 만든다. */
+  adoptProfile?(change: Extract<SetupChange, { target: 'adopt-profile' }>): Promise<void>
+  /** 승인 권한자를 세운다. 비밀은 다루지 않는다. */
+  wireIdentity?(change: Extract<SetupChange, { target: 'identity' }>): Promise<void>
+  /** 발견이 증명한 결합을 Profile 에 적는다. */
+  declareBindings?(change: Extract<SetupChange, { target: 'profile-bindings' }>): Promise<void>
+  /** remote 가 말한 정본 갈래를 Profile 에 적는다. */
+  declareCanonical?(change: Extract<SetupChange, { target: 'profile-canonical' }>): Promise<void>
 }
 
 export type ApplyResult = {
@@ -388,6 +496,36 @@ export type ApplyResult = {
  * 여기서 상태를 다시 보고 마음을 바꾸면, 사람이 승인한 plan과 실제로 일어난 일이
  * 달라진다. 그 순간 plan은 아무것도 보장하지 않는 문서가 된다.
  */
+/**
+ * 실행 순서 (설계 §9 — fresh onboarding).
+ *
+ * **등록이 맨 마지막이다.** 예전에는 등록이 붙이기보다 먼저 계획에 들어가, OS 가 아직
+ * identity·binding 이 서지 않은 workspace 를 회차로 돌렸다. 그 회차는 실패했고, 사람은
+ * 자기가 setup 을 끝내기도 전에 실패 기록을 봤다.
+ */
+const CHANGE_ORDER: Record<SetupChange['target'], number> = {
+  'runtime-install': 0,
+  'adopt-profile': 1,
+  'attach-workspace': 2,
+  identity: 3,
+  'profile-bindings': 4,
+  'profile-canonical': 5,
+  'work-binding-setup': 6,
+  'host-install': 7,
+  'persistent-runtime': 8,
+}
+
+/**
+ * 순서를 고정하고, **아직 설 자리가 아닌 등록은 뺀다.**
+ *
+ * 붙는 것이 이번 계획으로 끝나지 않으면 이 기계에 등록할 이유가 없다 — 등록물은
+ * workspace 를 돌보는 것이고, 돌볼 workspace 가 아직 없기 때문이다.
+ */
+function orderChanges(changes: readonly SetupChange[], attachmentSettled: boolean): SetupChange[] {
+  const kept = attachmentSettled ? [...changes] : changes.filter((change) => change.target !== 'persistent-runtime')
+  return kept.sort((a, b) => CHANGE_ORDER[a.target] - CHANGE_ORDER[b.target])
+}
+
 export async function applySetupPlan(plan: SetupPlan, effects: SetupEffects): Promise<ApplyResult> {
   const applied: SetupChange[] = []
   for (const change of plan.changes) {
@@ -411,6 +549,22 @@ export async function applySetupPlan(plan: SetupPlan, effects: SetupEffects): Pr
         // 안 한 것을 "했다"로 적지 않는다.
         if (!effects.setupWorkBinding) continue
         await effects.setupWorkBinding(change)
+        break
+      case 'adopt-profile':
+        if (!effects.adoptProfile) continue
+        await effects.adoptProfile(change)
+        break
+      case 'identity':
+        if (!effects.wireIdentity) continue
+        await effects.wireIdentity(change)
+        break
+      case 'profile-bindings':
+        if (!effects.declareBindings) continue
+        await effects.declareBindings(change)
+        break
+      case 'profile-canonical':
+        if (!effects.declareCanonical) continue
+        await effects.declareCanonical(change)
         break
     }
     applied.push(change)
@@ -444,5 +598,15 @@ function changeLine(change: SetupChange): string {
       return `  repair ${change.adapter} for ${change.resource} through its own setup (${change.version})`
     case 'persistent-runtime':
       return `  register this machine's ASC runtime with ${change.adapter}`
+    case 'adopt-profile':
+      return `  create profile ${change.profile} from this repository's remote`
+    case 'identity':
+      return `  record ${change.actor} as this workspace's approver`
+    case 'profile-bindings':
+      return `  declare bindings in ${change.profile}: ${change.bindings
+        .map((b) => `${b.role}=${b.adapter}:${b.resource}`)
+        .join(', ')}`
+    case 'profile-canonical':
+      return `  declare canonical source in ${change.profile}: ${change.source.remote}/${change.source.ref}`
   }
 }

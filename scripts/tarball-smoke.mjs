@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { runNpm } from './npm-exec.mjs'
@@ -195,7 +195,7 @@ try {
         code: 0,
         stdout: execFileSync(join(bin, binName(name)), args, {
           cwd: zeroWork,
-          env: isolated(zeroHome),
+          env: zeroEnv,
           encoding: 'utf8',
           stdio: 'pipe',
           shell: process.platform === 'win32',
@@ -241,6 +241,20 @@ try {
     return found.sort().join('\n')
   }
 
+  // 이 회차는 **onboarding 을 보는 것**이지 npm 을 보는 것이 아니다. 게시 전 candidate 는
+  // registry 에 없으므로, 같은 artifact 를 격리 prefix 에 미리 심어 그 축을 닫는다 —
+  // registry 에서 받아오는 경로의 관측은 게시 뒤 acceptance 의 몫이다.
+  runNpm(['install', '-g', '--no-audit', '--no-fund', tarballs.find((t) => t.includes('runtime'))], {
+    cwd: zeroWork,
+    env: isolated(zeroHome),
+    stdio: 'pipe',
+  })
+  // 설치된 것이 **이 프로세스에서 보여야** 설치된 것이다 (C-14 §3.3) — prefix 의 실행물
+  // 자리를 PATH 에 얹지 않으면 detect 는 BROKEN 이라 답하고, 그 판정은 맞다.
+  const zeroPrefixBin =
+    process.platform === 'win32' ? join(zeroHome, '.npm-global') : join(zeroHome, '.npm-global', 'bin')
+  const zeroEnv = isolated(zeroHome, { PATH: `${zeroPrefixBin}${delimiter}${process.env.PATH ?? ''}` })
+
   const beforeRepo = await treeOf(zeroWork)
   const beforeHome = await treeOf(zeroHome)
 
@@ -248,52 +262,69 @@ try {
   //    검사하는 것은 문서가 아니라 우리의 기억이 된다.
   const init = zero('asc-bootstrap', ['setup', 'apply', '--json'])
   const initPlan = asJson(init)
-  check('the canonical entry answers with a plan, not a status rendering', initPlan !== null && Array.isArray(initPlan.changes))
   check(
-    'it stops at the profile wall',
-    initPlan?.code === 'ASC_PROFILE_SELECTION_REQUIRED' && initPlan?.requiresUserAction === true && init.code === 1,
+    'the canonical entry answers with a plan, not a status rendering',
+    initPlan !== null && Array.isArray(initPlan.changes),
+    `exit ${init.code} | stdout ${JSON.stringify((init.stdout ?? '').slice(0, 300))} | stderr ${JSON.stringify((init.stderr ?? '').slice(0, 800))}`,
   )
-  // agent가 그대로 실행하는 형태다. 산문으로 답하는 명령을 주면 "산문을 파싱하지 마라"는
-  // 지시와 제품이 서로 어긋난다.
+  // **한 번으로 끝난다.** 예전에는 여기서 profile 선택 벽에 멈춰 사람이 `profile adopt` 를
+  // 따로 쳐야 했다. 이 저장소는 자기 remote 로 신원을 증명하므로 setup 이 그것으로 간다.
   check(
-    'every portable answers in JSON, at the exact version',
-    (initPlan?.actions ?? []).length > 0 &&
-      (initPlan?.actions ?? []).every((action) => /^npx --yes @asc-agent\/bootstrap@\S+ .*--json$/.test(action.portable)),
-    (initPlan?.actions ?? []).map((a) => a.portable).join(' | '),
+    'the entry does not stop to ask which profile — this repository proves one',
+    initPlan?.code === undefined && initPlan?.requiresUserAction !== true && init.code === 0,
+    `${initPlan?.code ?? '(no code)'} / exit ${init.code}`,
   )
-  // 멈췄으면 **아무 데도 남기지 않는다.** setup apply가 알아서 그럴 것이라고 가정하지
-  // 않는다 — init이 실제로 도는 경로를 여기서 본다 (저장소 · HOME · ASC_HOME · host 설정).
-  check('stopping leaves the repository untouched', (await treeOf(zeroWork)) === beforeRepo)
-  check('stopping leaves no user state behind', (await treeOf(zeroHome)) === beforeHome)
+  check(
+    'it adopted this repository and attached with it',
+    (initPlan?.changes ?? []).some((change) => change.target === 'adopt-profile' && change.profile === 'fixture') &&
+      (initPlan?.changes ?? []).some((change) => change.target === 'attach-workspace' && change.profile === 'fixture'),
+    (initPlan?.changes ?? []).map((c) => c.target).join(', '),
+  )
+  check('nothing was left to do', initPlan?.changesApplied === true && (initPlan?.remaining ?? []).length === 0,
+    JSON.stringify(initPlan?.remaining))
+  // 저장소에는 아무것도 만들지 않는다 — 붙는 것은 사용자 자리다.
+  check('attaching leaves the repository untouched', (await treeOf(zeroWork)) === beforeRepo)
 
-  // 2. 벽에서 빠져나오는 길을 plan이 데이터로 준다. **그 문자열을 우리가 조립하지 않는다** —
-  //    조립하면 검증되는 것은 우리의 조립이지 제품이 주는 명령이 아니다.
-  const adoptAction = initPlan?.actions?.find((action) => action.type === 'adopt_profile')
-  check('the plan carries a way to make one', adoptAction !== undefined, initPlan?.actions?.map((a) => a.type).join(', '))
-  const portable = adoptAction?.portable ?? ''
-  // 설치 전 형태는 `npx --yes <bootstrap>@<version> …` 이다. registry가 없는 이 환경에서
-  // 그대로 실행할 수는 없으므로, **앞머리가 그 배포본을 가리키는지 확인하고** 꼬리의
-  // 인자들을 설치된 같은 진입으로 넘긴다. 확인하는 것은 문자열 자체다.
-  const forwarded = /^npx --yes (@[^@\s]+\/[^@\s]+)@(\S+) (.+)$/.exec(portable)
-  check('the portable form names the bootstrap package at an exact version', forwarded !== null, portable)
-  const adopt = asJson(zero('asc-bootstrap', (forwarded?.[3] ?? '').split(' ')))
-  check('adopt writes a profile for this repository', adopt?.id === 'fixture', JSON.stringify(adopt?.id))
-  check('it reads the identity off the remote', adopt?.project?.repository === 'example/fixture')
-  check('it says what it left empty', (adopt?.warnings ?? []).some((w) => /canonical\.sources/.test(w)))
+  // 그 결과가 실제로 파일에 들어 있는가. 사람이 손으로 적어야 했던 것들이다.
+  const adopted = JSON.parse(await readFile(join(zeroHome, '.asc', 'profiles', 'fixture', 'profile.json'), 'utf8'))
+  check('it read the identity off the remote', adopted?.project?.repository === 'example/fixture',
+    JSON.stringify(adopted?.project))
 
-  // 3. 그 Profile로 붙는다.
-  // adopt가 낸 다음 걸음도 그대로 실행한다 — 여기서도 우리가 명령을 짓지 않는다.
-  //
-  // 다만 **어느 진입으로 보내는지는 이 환경의 제약이다.** portable의 `npx …` 형태는
-  // registry에서 그 버전을 받아오는 것이고, 아직 게시되지 않은 candidate로 도는 여기서는
-  // 그것이 성립하지 않는다(그리고 성립하는 척하면 게시 전에 게시 후를 증명했다고 적게 된다).
-  // 문자열이 맞는지는 문자열로 확인하고, 실행은 설치된 같은 진입으로 보낸다. registry
-  // 경로의 관측은 9B — 게시 뒤에 따로 한다.
-  const applyPortable = adopt?.actions?.[0]?.portable ?? ''
-  const applyForwarded = /^npx --yes (@[^@\s]+\/[^@\s]+)@(\S+) (.+)$/.exec(applyPortable)
-  check("adopt's next step is machine-runnable", applyForwarded !== null && /--json$/.test(applyPortable), applyPortable)
-  const zeroApply = asJson(zero('asc', (applyForwarded?.[3] ?? '').split(' ')))
-  check('attaching with the adopted profile', zeroApply?.changesApplied === true && zeroApply?.remaining?.length === 0)
+  // 두 번째 실행은 아무것도 바꾸지 않는다 — 멱등이다.
+  const zeroAgain = asJson(zero('asc', ['setup', 'apply', '--json']))
+  check('running it again changes nothing', (zeroAgain?.changes ?? []).length === 0, JSON.stringify(zeroAgain?.changes))
+
+  // remote 가 없는 저장소는 여전히 사람이 고른다 — 증명하는 것이 없기 때문이다.
+  const bare = join(base, 'work-bare')
+  await mkdir(bare, { recursive: true })
+  execFileSync('git', ['init', '-q', bare])
+  const bareRun = () => {
+    try {
+      return {
+        code: 0,
+        stdout: execFileSync(join(bin, binName('asc-bootstrap')), ['setup', 'plan', '--json'], {
+          cwd: bare,
+          env: zeroEnv,
+          encoding: 'utf8',
+          stdio: 'pipe',
+          shell: process.platform === 'win32',
+        }),
+      }
+    } catch (error) {
+      return { code: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }
+    }
+  }
+  const barePlan = asJson(bareRun())
+  check(
+    'a repository with no shared remote still stops for a person',
+    barePlan?.code === 'ASC_PROFILE_SELECTION_REQUIRED' && barePlan?.requiresUserAction === true,
+    barePlan?.code,
+  )
+  check(
+    'and the way out is still handed over as data',
+    (barePlan?.actions ?? []).some((action) => action.type === 'adopt_profile'),
+    (barePlan?.actions ?? []).map((a) => a.type).join(', '),
+  )
 
   // 4. agent가 스스로 READY를 판정한다.
   const zeroStatus = asJson(zero('asc', ['setup', 'status', '--json']))
