@@ -35,6 +35,24 @@ const xml = (value: string): string =>
  */
 export function launchAgentPlist(command: ServiceCommand): string {
   const args = [command.program, ...command.args].map((arg) => `    <string>${xml(arg)}</string>`).join('\n')
+  // 키를 정렬해 적는다 — 같은 환경이면 같은 문서여야 CURRENT 판정이 선다.
+  const env = Object.entries(command.environment ?? {}).sort(([a], [b]) => a.localeCompare(b))
+  const environment =
+    env.length === 0
+      ? ''
+      : `  <key>EnvironmentVariables</key>
+  <dict>
+${env.map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`).join('\n')}
+  </dict>
+`
+  // 회차가 무엇을 했는지 볼 자리. 없으면 launchd 는 출력을 버리고, 실패는 종료 코드 하나로만 남는다.
+  const logs = command.logPath
+    ? `  <key>StandardOutPath</key>
+  <string>${xml(command.logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${xml(command.logPath)}</string>
+`
+    : ''
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -45,7 +63,7 @@ export function launchAgentPlist(command: ServiceCommand): string {
   <array>
 ${args}
   </array>
-  <key>StartInterval</key>
+${environment}${logs}  <key>StartInterval</key>
   <integer>${command.intervalSeconds}</integer>
   <key>RunAtLoad</key>
   <true/>
