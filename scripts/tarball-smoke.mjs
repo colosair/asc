@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { runNpm } from './npm-exec.mjs'
@@ -195,7 +195,7 @@ try {
         code: 0,
         stdout: execFileSync(join(bin, binName(name)), args, {
           cwd: zeroWork,
-          env: isolated(zeroHome),
+          env: zeroEnv,
           encoding: 'utf8',
           stdio: 'pipe',
           shell: process.platform === 'win32',
@@ -249,6 +249,11 @@ try {
     env: isolated(zeroHome),
     stdio: 'pipe',
   })
+  // 설치된 것이 **이 프로세스에서 보여야** 설치된 것이다 (C-14 §3.3) — prefix 의 실행물
+  // 자리를 PATH 에 얹지 않으면 detect 는 BROKEN 이라 답하고, 그 판정은 맞다.
+  const zeroPrefixBin =
+    process.platform === 'win32' ? join(zeroHome, '.npm-global') : join(zeroHome, '.npm-global', 'bin')
+  const zeroEnv = isolated(zeroHome, { PATH: `${zeroPrefixBin}${delimiter}${process.env.PATH ?? ''}` })
 
   const beforeRepo = await treeOf(zeroWork)
   const beforeHome = await treeOf(zeroHome)
@@ -299,7 +304,7 @@ try {
         code: 0,
         stdout: execFileSync(join(bin, binName('asc-bootstrap')), ['setup', 'plan', '--json'], {
           cwd: bare,
-          env: isolated(zeroHome),
+          env: zeroEnv,
           encoding: 'utf8',
           stdio: 'pipe',
           shell: process.platform === 'win32',
