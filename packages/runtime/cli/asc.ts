@@ -142,6 +142,7 @@ import {
   RuntimeLease,
   fileScope,
   readBackground,
+  recordPass,
   renderBackground,
   staleAfter,
 } from '../core/runtime/background.ts'
@@ -4698,7 +4699,12 @@ async function tickAllWorkspaces(values: Record<string, unknown>, lease: Runtime
       stdio: values.json ? 'ignore' : 'inherit',
       env: process.env,
     })
-    results.push({ workspaceId: workspace.workspaceId, code: child.status ?? 1 })
+    const code = child.status ?? 1
+    results.push({ workspaceId: workspace.workspaceId, code })
+    // **회차가 어떻게 끝났는지 그 자리에 적는다** (Phase J). 이것이 없으면 실패는
+    // service.log 로만 흘러가고, 붙어 있는 workspace 가 여러 릴리스 동안 한 번도 돌지
+    // 못한 채 건강해 보인다 — 실측에서 셋 중 둘이 그 상태였다.
+    await recordPass(new MarkdownStateStore(workspace.root).scope('runtime'), code).catch(() => undefined)
     // 회차가 길어져도 이 기계의 lease 는 살아 있어야 한다 — 갱신하지 않으면 도는 중에
     // 죽은 것으로 보이고 두 번째 프로세스가 끼어든다.
     await lease.renew()
