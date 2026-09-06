@@ -2769,9 +2769,15 @@ async function runHost(
       }
       const claimed = await bindings.claim(spec, at)
       if (!claimed.ok) {
+        // 부딪힌 상대가 **어느 세션인지** 말한다. 같은 Run 이 다른 세션을 잡고 있는 경우와
+        // 이 세션을 다른 Run 이 잡고 있는 경우는 사람이 할 일이 다르다.
+        const other = claimed.current.logicalSessionId
         console.error(
-          `RUNTIME_CONFLICT: ${target} 의 owner는 ${claimed.current.physicalSessionId} 다. ` +
-            '죽은 세션이 확실하면 --force 로 rebind하라.',
+          other === target
+            ? `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
+              '죽은 세션이 확실하면 --force 로 rebind하라.'
+            : `RUNTIME_CONFLICT: 이 Run(${physical}) 은 지금 ${other} 을 잡고 있다. ` +
+              `한 Run 은 한 세션만 잡는다 — 먼저 놓아라: asc host claude release ${other} --physical ${physical}`,
         )
         return 1
       }
@@ -4475,14 +4481,14 @@ async function applyUpdate(plan: UpdatePlan, values: Record<string, unknown>): P
   let worst = 0
 
   // host 설치물은 버전마다 내용이 바뀐다. 새 runtime 에 낡은 hook 을 남기지 않는다.
-  // **사람이 고친 것은 덮지 않는다** — 그것은 남의 파일이고, 덮으면 그 사람의 수정이
-  // 말없이 사라진다. 남은 것은 말하고, 업데이트 자체는 계속 간다.
-  const host = await install(hostPaths(), undefined, { force: false })
-  for (const path of host.written) console.log(`host: ${path}`)
-  for (const skip of host.skipped) {
-    console.error(`host: ${skip.path} left as it is — ${skip.reason}`)
-    worst = 1
-  }
+  //
+  // **새로 설치된 build 가 자기 내용을 쓴다.** 이 프로세스는 아직 갈아 끼우기 **전의**
+  // build 이고, 그 build 의 `hookScript()` 는 옛 내용을 만든다 — 실기계에서 update 가
+  // "host: …/SKILL.md" 를 적고 끝났는데 probe 는 여전히 INSTALLED_STALE 이었다. 갱신했다고
+  // 말하면서 옛 내용을 다시 쓴 것이다.
+  //
+  // 사람이 고친 것을 덮지 않는 규칙은 그쪽(`host claude install`)이 그대로 진다.
+  worst = Math.max(worst, await refreshHost())
 
   // 등록물이 낡았으면 지금 형태로 수렴시킨다. 기존 STALE→수렴 경로를 그대로 쓴다.
   worst = Math.max(worst, await convergeService(values))
@@ -4538,6 +4544,31 @@ function diffState(before: Map<string, string>, after: Map<string, string>): str
   for (const [path, digest] of before) if (after.get(path) !== digest) changed.push(path)
   for (const path of after.keys()) if (!before.has(path)) changed.push(path)
   return changed.sort()
+}
+
+/**
+ * 새 build 에게 host 설치물을 자기 내용으로 맞추게 한다.
+ *
+ * 지금 도는 프로세스로 부르지 않는 이유는 하나다 — 이 프로세스는 교체되기 전의 build 다.
+ * 전역 실행물을 못 찾으면 갱신하지 않고 그 사실을 말한다. 조용히 건너뛰면 낡은 hook 이
+ * 새 runtime 옆에 남고, 그 조합은 아무도 시험한 적이 없다.
+ */
+async function refreshHost(): Promise<number> {
+  const entry = await globalRuntimeEntry()
+  if (!entry) {
+    console.error('host: could not find the installed runtime to refresh with — run `asc host claude install`')
+    return 1
+  }
+  const child = spawnSync(process.execPath, [entry, 'host', 'claude', 'install'], { encoding: 'utf8' })
+  const output = `${child.stdout ?? ''}${child.stderr ?? ''}`
+  for (const line of output.split('\n')) {
+    if (line.startsWith('installed:') || line.startsWith('skipped:')) console.log(`host: ${line}`)
+  }
+  if (child.status !== 0) {
+    console.error(`host: refresh failed${output.trim() ? ` — ${output.trim().split('\n').at(-1)}` : ''}`)
+    return 1
+  }
+  return 0
 }
 
 /**

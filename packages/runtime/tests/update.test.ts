@@ -171,3 +171,31 @@ describe('상태를 다시 정하지 않는다 — 이 명령의 존재 이유',
     }
   })
 })
+
+
+describe('갱신은 새 build 가 한다 (0.7.1)', () => {
+  it('update 경로가 이 프로세스의 host 설치 함수를 부르지 않는다', async () => {
+    // 실기계에서 update 가 "host: …/SKILL.md" 를 적고 끝났는데 probe 는 여전히
+    // INSTALLED_STALE 이었다. 갱신했다고 말하면서 **교체되기 전 build 의 내용**을 다시
+    // 쓴 것이다 — 이 프로세스의 hookScript() 는 옛 내용을 만든다.
+    const source = await readFile(CLI, 'utf8')
+    const start = source.indexOf('async function applyUpdate(')
+    const end = source.indexOf('async function refreshHost(')
+    assert.ok(start > 0 && end > start)
+    const block = source.slice(start, end)
+
+    assert.ok(!/\binstall\(hostPaths\(\)/.test(block), 'update 가 자기 build 로 host 를 쓴다')
+    assert.match(block, /refreshHost\(\)/)
+  })
+
+  it('갱신은 전역 실행물을 통해 나간다', async () => {
+    const source = await readFile(CLI, 'utf8')
+    const start = source.indexOf('async function refreshHost(')
+    const block = source.slice(start, source.indexOf('\n}', start))
+
+    assert.match(block, /globalRuntimeEntry\(\)/, '새로 설치된 자리를 찾는다')
+    assert.match(block, /'host', 'claude', 'install'/)
+    // 못 찾으면 조용히 넘어가지 않는다 — 낡은 hook 이 새 runtime 옆에 남는다
+    assert.match(block, /could not find the installed runtime/)
+  })
+})
