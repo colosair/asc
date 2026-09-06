@@ -18,6 +18,7 @@ const PROVIDES: readonly Capability[] = [
   'context.resource',
   'context.thread',
   'context.change',
+  'coordination.surface',
 ]
 
 /**
