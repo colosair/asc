@@ -16,6 +16,7 @@ describe('state.md 렌더', () => {
       const current = await store.getControlState()
       const result = await store.setControlState(current.version, {
         ...current,
+        version: current.version + 1,
         activeSessions: ['S-20260906-01'],
         writeBoundaryOccupancy: [{ sessionId: 'S-20260906-01', paths: ['src/**', 'docs/a.md'] }],
       })
