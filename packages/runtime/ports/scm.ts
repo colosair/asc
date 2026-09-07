@@ -19,6 +19,27 @@ export type ThreadSnapshot = {
 export type BaselineQuery = { sourceId: string; ref?: string; paths?: readonly string[] }
 
 /**
+ * ASC 가 의미를 알고 관리 실행 대상으로 다루는 canonical action vocabulary.
+ *
+ * `supports()` 는 술어라 "무엇을 할 수 있나" 를 물을 수 없다. 물으려면 후보 목록이
+ * 있어야 하고, 그 목록은 한 곳이어야 한다 — adapter 마다 두면 아무도 안 읽는 사본이
+ * 는다 (`GITLAB_ACTIONS` 가 그렇게 됐다: import 하는 곳이 테스트 하나뿐이다).
+ *
+ * **여기 없는 외부 행위가 있을 수 있다.** 이 목록은 "외부 쓰기 전부" 가 아니라 그중
+ * ASC 가 관리 실행으로 다루는 것이다. Guard 가 막는 것과도 같지 않다 — `gh api` 처럼
+ * 한 행위로 환원되지 않는 명령은 막히지만 여기 없다.
+ */
+export const MANAGED_EXTERNAL_ACTIONS = [
+  'git.push',
+  'coordination.publish',
+  'gitlab.mr.create',
+  'gitlab.mr.merge',
+  'gitlab.note.create',
+  'gitlab.issue.update',
+  'github.issue_comment.create',
+] as const
+
+/**
  * Grant가 지시하는 단일 외부 Action. Executor는 payload를 재작성하지 않는다 —
  * 사람이 승인한 내용 그대로 나간다.
  */

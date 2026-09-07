@@ -195,9 +195,11 @@ report as one.
 
 3. Keep the contract while working:
    - **Do not modify files outside the write boundary.** A worktree does not widen it.
-   - **No external writes**: git push, creating or editing PRs, issues or comments, gh/glab api.
-     If something needs publishing, report the result — the only thing that actually
-     reaches an external system is \`asc grant run\` after a person approved it.
+   - **Publish through the managed path, not by hand.** If something needs to reach an
+     external system, that happens through \`asc work publish\` — a person approves it and
+     \`asc grant run\` carries it out. This is the session contract's rule and it holds in
+     either mode; what changes with the mode is whether a raw write is *stopped*, not
+     whether it is the right way to publish.
    - If doneCriteria exist, they are the completion conditions. Where /goal is available
      you may set \`/goal <the doneCriteria restated as a condition>\`.
      But **/goal achieved is a self-assessment** — it is not an independent verifier PASS.
@@ -284,7 +286,9 @@ always an asc command, never uninstalling the hook.
 
 In MANUAL the guard blocks none of it. It leaves one line saying the write is leaving the
 managed path and pointing at \`asc work publish --review\`; what to do about that is the
-person's call, and the project's rules are what answer it.
+person's call, and the project's rules are what answer it. **Do not add a refusal of your
+own there** — a rule that stands in MANUAL as well is the same contradiction the guard was
+built to avoid, and it leaves the person with no working path in either mode.
 
 ## Progress reporting
 

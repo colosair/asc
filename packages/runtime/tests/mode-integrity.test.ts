@@ -229,3 +229,63 @@ describe('mode 전환은 막지 않고 드러낸다', () => {
     }
   })
 })
+
+// 같은 기록을 두 구현이 읽는다.
+//
+//   enforcementOf     core/policy/execution-mode.ts   zod 로 파싱된 상태를 받는다
+//   executionState    guard.ts 의 hook 안             파일을 직접 읽고 스스로 파싱한다
+//
+// 차단 패턴 쪽은 hookScript() 가 forbiddenIn 소스를 그대로 실어 이 중복을 피했지만,
+// 판정 쪽은 그럴 수 없다 — enforcementOf 는 파싱된 상태를 받으므로 hook 이 그대로 쓸 수
+// 없고, zod 를 hook 에 끌어들이면 hook 이 무거워진다. 그래서 통합하는 대신 **같은 자리에서
+// 같은 답이 나오는지** 를 고정한다. 갈리면 여기서 잡힌다.
+describe('mode 판정 두 구현이 같은 답을 낸다', () => {
+  const stored = (mode: string): string =>
+    JSON.stringify({ key: 'execution-mode', value: JSON.stringify({ mode, since: NOW, by: 'test' }) })
+
+  async function hookEnforces(file: string | undefined): Promise<boolean> {
+    const root = await tempDir('asc-parity-')
+    const asc = join(root, '.asc')
+    await mkdir(join(asc, 'adapters', 'policy'), { recursive: true })
+    if (file !== undefined) await writeFile(join(asc, 'adapters', 'policy', 'execution-mode.json'), file, 'utf8')
+    const dir = await tempDir('asc-parity-hook-')
+    const script = join(dir, 'guard-hook.mjs')
+    await writeFile(script, hookScript(), 'utf8')
+    const child = spawnSync(process.execPath, [script], {
+      input: JSON.stringify({ tool_name: 'Bash', session_id: 'p-none', cwd: root, tool_input: { command: 'git push origin main' } }),
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+    // 결합이 없는 자리다. ENFORCE 면 막고(2), ADVISE 면 한 줄 남기고 통과한다(0).
+    return (child.status ?? 1) !== 0
+  }
+
+  async function coreEnforces(file: string | undefined): Promise<boolean> {
+    const scope = new MemoryStateStore().scope('policy')
+    // 저장소는 값만 담는다 — hook 이 파일에서 벗겨내는 그 껍질을 여기서도 벗긴다.
+    if (file !== undefined) {
+      let value = file
+      try {
+        value = JSON.parse(file).value as string
+      } catch {
+        // 껍질조차 깨진 경우. 그대로 넣어 두 구현이 같은 쓰레기를 보게 한다.
+      }
+      await scope.set('execution-mode', value)
+    }
+    return enforcementOf(await readExecutionMode(scope)) === 'ENFORCE'
+  }
+
+  for (const [name, file] of [
+    ['기록 없음', undefined],
+    ['AUTO', stored('AUTO')],
+    ['MANUAL', stored('MANUAL')],
+    ['파싱 불가', '{ this is not json'],
+    ['모드 값이 이상함', JSON.stringify({ key: 'execution-mode', value: JSON.stringify({ mode: 'SOMETHING' }) })],
+  ] as const) {
+    it(`${name} — hook 과 core 가 같은 쪽으로 답한다`, async () => {
+      const hook = await hookEnforces(file)
+      const core = await coreEnforces(file)
+      assert.equal(hook, core, `hook=${hook} core=${core} — 두 구현이 갈렸다`)
+    })
+  }
+})

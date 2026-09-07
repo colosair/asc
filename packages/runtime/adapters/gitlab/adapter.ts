@@ -12,12 +12,23 @@ import { GitLabClient, discoverToken, encodeProject, glabAvailable, type Process
 
 const run = promisify(execFile)
 
+/**
+ * `canonical.read` 는 정본을 읽는 갈래이자 **관리 실행 통로(scm)가 걸리는 유일한 슬롯**이다
+ * (`composition/runtime.ts` 의 `PORT_OF`).
+ *
+ * 이 어댑터는 그 능력을 실제로 갖는다 — `scm.ts` 의 `getBaselines` · `review` · `verify` 가
+ * 전부 구현돼 있고, `git.push` 를 실행하고 원격에서 되돌려 읽는다. 그런데 선언에만 빠져
+ * 있어서 후보 필터(`core/binding/types.ts`)를 통과하지 못했고, 조립된 `GitLabScm` 이
+ * 매번 버려졌다. 그 결과 GitLab 이 정본인 저장소에서 AUTO 가 raw push 를 막고도 관리
+ * 경로를 내놓지 못하는 dead-end 가 났다.
+ */
 const PROVIDES: readonly Capability[] = [
   'observe.delta',
   'inventory.enumerate',
   'context.resource',
   'context.thread',
   'context.change',
+  'canonical.read',
   'coordination.surface',
 ]
 

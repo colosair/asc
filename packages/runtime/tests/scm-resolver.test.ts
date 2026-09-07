@@ -218,3 +218,101 @@ describe('관측 채널 — 선언된 binding 마다 하나씩 (설계 §8)', ()
     assert.match(built.unavailable.join('\n'), /지금 쓸 수 없다/)
   })
 })
+
+// 실사용 실패 — GitLab 이 정본인 저장소에서 AUTO 가 raw push 를 막고도 관리 경로를
+// 내놓지 못했다. 위 테스트들은 `provides` 를 손으로 써서 실제 어댑터를 부르지 않았고,
+// 그래서 선언과 구현이 어긋난 것을 잡지 못했다. 여기서는 어댑터 자신에게 묻는다.
+describe('선언과 구현이 어긋나지 않는다 (실제 어댑터)', () => {
+  it('GitLab 은 scm 슬롯에 걸리는 capability 를 선언한다', async () => {
+    const { GitLabAdapter } = await import('../adapters/gitlab/adapter.ts')
+    const provides = new GitLabAdapter().describe().provides
+    // canonical.read 는 PORT_OF 에서 scm 슬롯에 닿는 유일한 열쇠다. 이것이 없으면
+    // 후보 필터가 GitLab 을 먼저 걸러내고, 조립된 GitLabScm 이 버려진다.
+    assert.ok(provides.includes('canonical.read'), `provides=${provides.join(', ')}`)
+  })
+
+  it('scm 슬롯을 선언한 adapter 는 그 갈래를 실제로 만든다', async () => {
+    // 선언만 늘리면 "있다고 말하는데 없는" 상태가 된다 — 그쪽이 더 나쁘다.
+    for (const adapterId of ['gitlab', 'github'] as const) {
+      const ports = await buildRuntimePorts({
+        plan: planOf(binding({ adapterId, resource: 'team/project', provides: ['canonical.read'] })),
+        findToken: async () => 'token',
+      })
+      assert.ok(ports.scm, `${adapterId} 가 canonical.read 를 선언하고도 scm 을 만들지 않았다`)
+      assert.equal(ports.scm!.id, adapterId)
+    }
+  })
+
+  it('GitLab scm 은 git.push 를 수행하고 되돌려 읽는다', async () => {
+    const ports = await buildRuntimePorts({
+      plan: planOf(binding({ adapterId: 'gitlab', resource: 'team/project', provides: ['canonical.read'] })),
+      findToken: async () => 'token',
+    })
+    // 실행할 수 있다는 것과 확인할 수 있다는 것은 다른 질문이고, 둘 다 필요하다.
+    assert.equal(ports.scm!.supports?.('git.push'), true, 'git.push 를 수행하지 못한다')
+    assert.equal(ports.scm!.verifies?.('git.push'), true, 'git.push 를 되돌려 읽지 못한다')
+  })
+
+  it('GitHub mirror 가 있어도 선언된 역할이 GitLab 을 고른다', async () => {
+    // 실사용 구성: origin 은 자체 호스팅 GitLab, github 은 mirror. Profile 이 선언한
+    // 것은 GitLab 하나뿐이다. mirror 는 발견될 뿐 역할이 없다.
+    const declared = [{ role: 'code-primary', adapter: 'gitlab', resource: 'team/project' }]
+    const plan = planOf(
+      binding({ adapterId: 'gitlab', resource: 'team/project', role: 'code-primary', provides: ['canonical.read'] }),
+      binding({ adapterId: 'github', resource: 'org/mirror', provides: ['canonical.read'] }),
+    )
+    const roles = rolesFor(plan, declared)
+    assert.equal(roles['canonical.read'], 'code-primary', '선언되지 않은 mirror 가 역할을 흐렸다')
+
+    const ports = await buildRuntimePorts({ plan, roles, findToken: async () => 'token' })
+    assert.equal(ports.scm!.id, 'gitlab', 'mirror 가 executor 를 가져갔다')
+    // 다른 갈래를 아무도 안 맡은 것은 이 테스트의 관심이 아니다. canonical 이 갈렸는지만 본다.
+    assert.equal(
+      ports.unavailable.filter((u) => u.startsWith('canonical.read')).join(''),
+      '',
+      '역할로 갈렸는데도 AMBIGUOUS 가 남았다',
+    )
+  })
+})
+
+// AUTO dead-end — Guard 가 막는데 관리 경로가 없으면 그 사실이 이름으로 나와야 한다.
+// 실사용에서 사람이 mode manual 로 내려간 것은 화면이 그것을 권해서가 아니라, 막힌 뒤
+// 아무 말도 없었기 때문이다.
+describe('막는 것과 내보내는 것이 어긋나면 이름을 댄다', () => {
+  it('action key 가 붙은 금지 패턴은 관리 어휘 안에 있다', async () => {
+    const { FORBIDDEN_COMMAND_PATTERNS } = await import('../adapters/claude-code/guard.ts')
+    const { MANAGED_EXTERNAL_ACTIONS } = await import('../ports/scm.ts')
+    const vocabulary = new Set<string>(MANAGED_EXTERNAL_ACTIONS)
+    for (const entry of FORBIDDEN_COMMAND_PATTERNS) {
+      if (entry.action === undefined) continue // 한 행위로 환원되지 않는 패턴 — 정상이다
+      assert.ok(vocabulary.has(entry.action), `${entry.label} 의 action '${entry.action}' 가 어휘 밖이다`)
+    }
+  })
+
+  it('일부 패턴은 action 이 없어도 된다 — 억지 매핑을 강요하지 않는다', async () => {
+    const { FORBIDDEN_COMMAND_PATTERNS } = await import('../adapters/claude-code/guard.ts')
+    // 한 명령이 여러 행위를 덮는 경우가 실제로 있다. 전부 채우라고 요구하면 이 파일이
+    // provider 목록이 된다.
+    assert.ok(
+      FORBIDDEN_COMMAND_PATTERNS.some((entry) => entry.action === undefined),
+      '모든 패턴에 action 이 붙었다 — 억지 매핑이 들어갔는지 본다',
+    )
+  })
+
+  it('push 를 못 싣는 통로가 슬롯을 맡으면 git.push 가 dead-end 다', async () => {
+    // 실사용 실패 그대로: mirror 가 executor 를 맡았고 그 통로는 push 를 못 한다.
+    const ports = await buildRuntimePorts({
+      plan: planOf(binding({ adapterId: 'github', resource: 'org/mirror', provides: ['canonical.read'] })),
+      findToken: async () => 'token',
+    })
+    assert.equal(ports.scm!.supports?.('git.push'), false, '이 통로가 push 를 싣는다고 답한다')
+  })
+
+  it('GitLab 이 슬롯을 맡으면 git.push 는 dead-end 가 아니다', async () => {
+    const ports = await buildRuntimePorts({
+      plan: planOf(binding({ adapterId: 'gitlab', resource: 'team/project', provides: ['canonical.read'] })),
+      findToken: async () => 'token',
+    })
+    assert.equal(ports.scm!.supports?.('git.push'), true)
+  })
+})
