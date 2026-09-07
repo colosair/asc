@@ -20,18 +20,39 @@ import { observerSnippet } from './observer.ts'
 /**
  * Grant 없이 금지되는 외부 write 명령 패턴 (C-03 §5.3 차단 대상).
  * commit은 local write라 여기 없다 — Session Contract의 몫이다.
+ *
+ * `action` 은 이 명령이 관리 실행에서 어느 행위로 나가는지다. **없어도 정상이다** —
+ * `gh api` 처럼 한 행위로 환원되지 않는 패턴이 있고, 억지로 붙이면 이 파일이 provider
+ * 목록이 된다. 차단 판정은 `action` 을 보지 않는다. 이 필드는 "막았는데 나갈 길이
+ * 있는가" 를 물을 수 있게 하기 위한 것이고, 그 질문은 `action` 이 있는 것에만 성립한다.
  */
-export const FORBIDDEN_COMMAND_PATTERNS: readonly { pattern: RegExp; label: string }[] = [
-  { pattern: /\bgit\s+(?:[^\s]+\s+)*push\b/, label: 'git push' },
+export const FORBIDDEN_COMMAND_PATTERNS: readonly {
+  pattern: RegExp
+  label: string
+  action?: string
+}[] = [
+  { pattern: /\bgit\s+(?:[^\s]+\s+)*push\b/, label: 'git push', action: 'git.push' },
   { pattern: /\bgh\s+pr\s+(create|edit|ready|close|merge|comment|review)\b/, label: 'gh pr <write>' },
-  { pattern: /\bgh\s+issue\s+(create|edit|comment|close|reopen)\b/, label: 'gh issue <write>' },
+  {
+    pattern: /\bgh\s+issue\s+(create|edit|comment|close|reopen)\b/,
+    label: 'gh issue <write>',
+    action: 'github.issue_comment.create',
+  },
   { pattern: /\bgh\s+release\s+(create|edit|delete)\b/, label: 'gh release <write>' },
   // gh api는 통짜로 막는다. 읽기 호출까지 막히지만, worker가 필요로 하는 조회는
   // asc CLI가 대신한다 — write 성격 판별(-X·--method·-f)을 hook에서 흉내 내다 구멍을
   // 내는 것보다 넓게 막고 좁게 여는 편이 안전하다.
+  // 여러 행위를 한 명령으로 덮으므로 action 을 붙이지 않는다.
   { pattern: /\bgh\s+api\b/, label: 'gh api' },
-  { pattern: /\bglab\s+mr\s+(create|merge|close|update|approve)\b/, label: 'glab mr <write>' },
-  { pattern: /\bglab\s+(issue|release)\s+(create|edit|close|update|delete)\b/, label: 'glab <write>' },
+  // 이 패턴 하나가 create·merge·close·update·approve 를 함께 막는다. 그중 관리 경로가
+  // 있는 것은 create 와 merge 이고, 대표로 create 를 적는다 — 하나라도 못 나가면
+  // 그 명령은 dead-end 다.
+  { pattern: /\bglab\s+mr\s+(create|merge|close|update|approve)\b/, label: 'glab mr <write>', action: 'gitlab.mr.create' },
+  {
+    pattern: /\bglab\s+(issue|release)\s+(create|edit|close|update|delete)\b/,
+    label: 'glab <write>',
+    action: 'gitlab.issue.update',
+  },
   { pattern: /\bglab\s+api\b/, label: 'glab api' },
 ]
 

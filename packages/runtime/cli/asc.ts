@@ -56,7 +56,7 @@ import {
 } from '../core/attach/setup-plan.ts'
 import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claude-code/binding.ts'
 import { readHeartbeat } from '../adapters/claude-code/observer.ts'
-import { workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
+import { FORBIDDEN_COMMAND_PATTERNS, workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
 import { applyHostReport, assessReadiness, probe, type CapabilityName } from '../adapters/claude-code/probe.ts'
 import {
   controlPlaneAccess,
@@ -72,7 +72,7 @@ import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
 import { evaluateHealth, healthAlertLines } from '../core/monitor/health-alerts.ts'
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
-import type { ScmPort } from '../ports/scm.ts'
+import { MANAGED_EXTERNAL_ACTIONS, type ScmPort } from '../ports/scm.ts'
 import { servicePath } from '../core/distribution/external-command.ts'
 import {
   isTransientPath,
@@ -4605,16 +4605,26 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
   return axes
 }
 
-/** provider 에게 "이걸 할 수 있는가" 를 물을 때 쓰는 행위 목록. 화면 표시용이다. */
-const EXTERNAL_ACTIONS = [
-  'git.push',
-  'coordination.publish',
-  'gitlab.mr.create',
-  'gitlab.mr.merge',
-  'gitlab.note.create',
-  'gitlab.issue.update',
-  'github.issue_comment.create',
-] as const
+/**
+ * AUTO 에서 **막히지만 나갈 길이 없는** 행위들.
+ *
+ * 이것이 AUTO 를 거부할 사유는 아니다 — 나머지 행위는 정상이고, 하나 때문에 전부를
+ * 막으면 이번엔 반대편 dead-end 가 된다. 대신 이름을 댄다. 실사용에서 사람이
+ * `asc mode manual` 로 내려간 것은 화면이 그것을 권해서가 아니라 **막힌 뒤 아무 말도
+ * 없었기** 때문이다.
+ *
+ * 계산은 좁게 한다. Guard 의 금지 패턴 전부가 아니라, 그중 관리 행위로 환원되는 것
+ * (`action` 이 붙은 것)만 본다 — `gh api` 처럼 한 행위가 아닌 명령까지 세면 "나갈 길이
+ * 없다" 가 늘 참이 되어 화면이 무의미해진다.
+ */
+function deadEndActions(outward: ScmPort | null): string[] {
+  const blocked = new Set(
+    FORBIDDEN_COMMAND_PATTERNS.map((entry) => entry.action).filter((action): action is string => action !== undefined),
+  )
+  return MANAGED_EXTERNAL_ACTIONS.filter(
+    (action) => blocked.has(action) && !(outward?.supports?.(action) ?? false),
+  )
+}
 
 /**
  * `asc status` — 처음 묻는 자리 (§21·§22).
@@ -4654,11 +4664,13 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
           id: ports.scm.id,
           // 할 수 있는 행위와, 그 중 되돌려 읽을 수 있는 행위. 둘은 다른 사실이고,
           // 화면이 그것을 뭉개면 사람이 확인되지 않는 쓰기를 확인된 것으로 읽는다.
-          actions: EXTERNAL_ACTIONS.filter((action) => ports.scm!.supports?.(action) ?? false),
-          verifiable: EXTERNAL_ACTIONS.filter((action) => ports.scm!.verifies?.(action) ?? false),
+          actions: MANAGED_EXTERNAL_ACTIONS.filter((action) => ports.scm!.supports?.(action) ?? false),
+          verifiable: MANAGED_EXTERNAL_ACTIONS.filter((action) => ports.scm!.verifies?.(action) ?? false),
         }
       : null,
     unavailable: ports?.unavailable ?? [],
+    // 축이 READY 여도 개별 행위는 나갈 길이 없을 수 있다 — 그 목록.
+    deadEnd: deadEndActions(ports?.scm ?? null),
   }
   const sessions = store
     ? (await store.list('session')).filter((session) => session.status === 'ACTIVE' || session.status === 'PAUSED')
@@ -4761,6 +4773,10 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     if (external.write) {
       console.log(`  read-back available for: ${external.write.verifiable.join(', ') || 'nothing'}`)
     }
+    // Guard 가 막는데 이 통로가 싣지 않는 행위. AUTO 에서 그것들은 나갈 길이 없다.
+    if (external.deadEnd.length > 0) {
+      console.log(`  AUTO 에서 막히지만 관리 경로가 없는 행위: ${external.deadEnd.join(', ')}`)
+    }
     for (const reason of external.unavailable.slice(0, 3)) console.log(`  ${reason}`)
   }
   console.log('')
@@ -4801,6 +4817,9 @@ async function runMode(
   const current = await readExecutionMode(scope)
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
 
+  const outward = root ? await composedPorts(runtime).then((p) => p.scm ?? null).catch(() => null) : null
+  const deadEnds = deadEndActions(outward)
+
   const show = (state: ExecutionModeState, extra: Record<string, unknown> = {}): void => {
     if (values.json) {
       console.log(
@@ -4811,6 +4830,7 @@ async function runMode(
             ...(state.degraded ? { degraded: state.degraded } : {}),
             enforcement: enforcementOf(state),
             autoReadiness: { ready: readiness.ready, axes: readiness.axes },
+            ...(deadEnds.length > 0 ? { deadEnd: deadEnds } : {}),
             ...extra,
           },
           null,
@@ -4824,6 +4844,11 @@ async function runMode(
       console.log(`  ${axis.state.padEnd(16)} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
     }
     console.log(readiness.ready ? '  AUTO READY' : '  AUTO NOT AVAILABLE')
+    // 축이 전부 READY 여도 개별 행위는 나갈 길이 없을 수 있다. 그 사실을 여기서 말하지
+    // 않으면 사람은 실행 시점에야 알고, 그때는 이미 막힌 뒤다.
+    if (deadEnds.length > 0) {
+      console.log(`  AUTO 에서 막히지만 관리 경로가 없는 행위: ${deadEnds.join(', ')}`)
+    }
     for (const [key, value] of Object.entries(extra)) console.log(`${key}: ${String(value)}`)
   }
 
@@ -6616,6 +6641,15 @@ async function runGrant(
       if (outward.supports && !outward.supports(values.action as string)) {
         console.error(`'${String(values.action)}' 를 수행할 수 있는 통로가 없다 (${outward.id}).`)
         console.error('승인 뒤에 실패하는 것보다 지금 멈추는 편이 낫다 — 발급하지 않았다.')
+        // 무엇이 해결되지 않았는지 말한다. provider 이름과 행위 이름만 대면 다음에 무엇을
+        // 할지 알 수 없고, 그 침묵이 사람을 mode manual 로 보낸다 — 그것은 출구가 아니다.
+        const carried = MANAGED_EXTERNAL_ACTIONS.filter((a) => outward.supports?.(a) ?? false)
+        console.error(
+          `이 자리를 맡은 결합은 ${outward.id} 이고, 그 통로가 싣는 것은 ${
+            carried.length > 0 ? carried.join(', ') : '없다'
+          }.`,
+        )
+        console.error('어느 결합이 무엇을 싣는지: asc status 의 External write')
         return 2
       }
 
