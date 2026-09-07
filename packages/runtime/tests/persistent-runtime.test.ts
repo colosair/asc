@@ -138,7 +138,13 @@ describe('macOS LaunchAgent', () => {
 describe('Windows Scheduled Task', () => {
   it('공백이 든 경로가 통째로 깨지지 않는다', () => {
     const line = taskRunLine({ ...command, program: 'C:\\Program Files\\nodejs\\node.exe' })
-    assert.ok(line.startsWith('\\"C:\\Program Files\\nodejs\\node.exe\\"'), line)
+    assert.ok(line.startsWith('"C:\\Program Files\\nodejs\\node.exe"'), line)
+  })
+
+  it('따옴표를 손으로 이스케이프하지 않는다 — 실기계에서 Command 가 공백에서 잘렸다', () => {
+    const line = taskRunLine({ ...command, program: 'C:\\Program Files\\nodejs\\node.exe' })
+    // 등록된 XML 에 `\"C:\Program` 이 들어가던 회귀. Node 가 이스케이프를 하므로 여기서는 안 한다
+    assert.doesNotMatch(line, /\\"/)
   })
 
   it('분 단위 반복은 1분 아래로 내려가지 않는다', () => {
@@ -150,10 +156,25 @@ describe('Windows Scheduled Task', () => {
     const stale = schtasksAdapter({ exec: async () => 'Task To Run: something-else' })
     assert.equal((await stale.status(command)).kind, 'STALE')
 
-    const current = schtasksAdapter({
-      exec: async () => `Task To Run: ${taskRunLine(command).replace(/\\"/g, '"')}`,
-    })
+    // 조회 출력은 등록한 그 줄이다 — 비교 전에 형태를 바꿔야 한다면 등록이 틀린 것이다
+    const current = schtasksAdapter({ exec: async () => `Task To Run: ${taskRunLine(command)}` })
     assert.equal((await current.status(command)).kind, 'CURRENT')
+  })
+
+  it('방금 등록한 것을 CURRENT 로 읽는다 — 등록 직후 STALE 로 보이던 회귀', async () => {
+    let registered: string | null = null
+    const adapter = schtasksAdapter({
+      exec: async (_command, args) => {
+        if (args[0] === '/Create') {
+          registered = args[args.indexOf('/TR') + 1]!
+          return ''
+        }
+        return registered === null ? Promise.reject(new Error('not found')) : `Task To Run: ${registered}`
+      },
+    })
+    assert.equal((await adapter.status(command)).kind, 'ABSENT')
+    await adapter.install(command)
+    assert.equal((await adapter.status(command)).kind, 'CURRENT')
   })
 
   it('등록은 덮어쓰기로 수렴시키고, 이름은 우리 것 하나다', async () => {

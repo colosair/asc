@@ -49,6 +49,18 @@ describe('등록물이 가리킬 것', () => {
     assert.match(serviceRuntimeLine(resolved), /temporary location/)
   })
 
+  it('가리킬 진입점이 아예 없으면 등록하지 않는다 — 부재는 경로가 아니다', () => {
+    // 호출자가 부재를 `/dev/null/not-installed` 같은 문자열로 넘기던 회귀. isTransientPath 가
+    // 그것을 "사라지지 않는 자리"로 읽어 placeholder 가 그대로 등록됐다.
+    const resolved = resolveServiceRuntime({
+      runningNode: NODE24,
+      runningNodeVersion: 'v24.2.0',
+    })
+    assert.equal(resolved.kind, 'UNSTABLE')
+    assert.equal(resolved.kind === 'UNSTABLE' && resolved.reason, 'NO_STABLE_ENTRY')
+    assert.match(serviceRuntimeLine(resolved), /no installed ASC runtime/)
+  })
+
   it('전역 설치본 경로가 임시 자리면 그것도 쓰지 않는다', () => {
     const resolved = resolveServiceRuntime({
       runningEntry: GLOBAL,
