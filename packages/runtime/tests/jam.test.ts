@@ -616,3 +616,16 @@ describe('B-53 Gate — JAM Incremental Observation', () => {
     assert.deepEqual(batch.events[0]!.hints?.labels, ['front'])
   })
 })
+
+describe('JAM 을 부르는 경로는 하나의 해석을 쓴다', () => {
+  // 실기계 회귀: serve(mcp-client)만 resolveExternalCommand 를 거치고 doctor·setup heal 은
+  // bare `npx` 를 그대로 spawn 해 Windows 에서 ENOENT 로 죽었다. ASC 는 그것을 "JAM 을 쓸
+  // 수 없다" 로 읽어 Jira 증거가 통째로 비었다. 한 곳만 고쳐지는 상태로 되돌아가지 않게
+  // 소스 자체를 고정한다 — 같은 실패가 cli/asc.ts 의 execText 에서도 한 번 났다.
+  it('adapters/jam 안에 raw execFile 이 남아 있지 않다', async () => {
+    for (const file of ['adapter.ts', 'mcp-client.ts', 'setup.ts', 'event-source.ts', 'ports.ts']) {
+      const source = await readFile(new URL(`../adapters/jam/${file}`, import.meta.url), 'utf8')
+      assert.doesNotMatch(source, /promisify\(execFile\)/, `${file} 이 실행 해석을 우회한다`)
+    }
+  })
+})

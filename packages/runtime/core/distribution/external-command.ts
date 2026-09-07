@@ -14,10 +14,54 @@
 //      shell 옵션이 필요 없다.
 // 셋 다 실패하면 이름 그대로 돌려준다 — PATH에 진짜 실행 파일이 있는 환경이 그 경우다.
 
+import { execFile } from 'node:child_process'
 import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs'
 import { delimiter as winDelimiter, dirname, extname, isAbsolute, join } from 'node:path/win32'
+import { promisify } from 'node:util'
 
 export type ResolvedInvocation = { command: string; args: string[] }
+
+const execFileAsync = promisify(execFile)
+
+export type RunExternalOptions = {
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+  /** 출력 상한. 기본값(1MB)으로 잘리면 안 되는 호출만 지정한다. */
+  maxBuffer?: number
+  /** 실행 seam. 테스트가 여기로 가짜를 넣는다 — 사용자 기계를 건드리지 않는다. */
+  exec?: (
+    command: string,
+    args: readonly string[],
+    options: { cwd?: string; env?: NodeJS.ProcessEnv; maxBuffer?: number; windowsHide: boolean },
+  ) => Promise<{ stdout: string; stderr: string }>
+}
+
+/**
+ * 바깥 명령 하나를 실행한다. **Windows에서 콘솔 창을 띄우지 않는다.**
+ *
+ * Node의 `windowsHide` 기본값은 false다. 콘솔 서브시스템 실행 파일을 spawn하면 창이
+ * 뜨고, 상시 runtime처럼 사람이 부르지 않은 회차가 돌 때는 그것이 5분마다 화면을
+ * 가로채는 일이 된다 (Windows 실전 실측 — 사용자가 cmd 창을 계속 봤다).
+ *
+ * `windowsHide` 를 호출부마다 흩뿌리지 않고 여기 한 곳에 두는 이유는 하나다. 흩뿌리면
+ * 다음에 추가되는 호출부가 그것을 빠뜨리고, 빠뜨린 것은 창이 뜨고 나서야 드러난다.
+ * shim 해석(`resolveExternalCommand`)이 세 실행 지점 중 한 곳에만 들어가 있던 것과
+ * 같은 실패다 — 그래서 둘을 같은 자리에 묶는다.
+ */
+export async function runExternal(
+  command: string,
+  args: readonly string[],
+  options: RunExternalOptions = {},
+): Promise<{ stdout: string; stderr: string }> {
+  const resolved = resolveExternalCommand(command, args)
+  const exec = options.exec ?? execFileAsync
+  return exec(resolved.command, resolved.args, {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(options.env ? { env: options.env } : {}),
+    ...(options.maxBuffer ? { maxBuffer: options.maxBuffer } : {}),
+    windowsHide: true,
+  })
+}
 
 export type ResolveDeps = {
   platform?: NodeJS.Platform

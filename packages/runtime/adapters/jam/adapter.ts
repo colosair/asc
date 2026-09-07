@@ -4,16 +4,18 @@
 // 설계돼 있고, 에이전트에게는 "됐는지 아닌지"만 알려 준다. ASC가 토큰을 받아 넘기거나
 // 로그인을 대신 실행하면 그 설계를 우회하는 것이다 — 하지 않는다.
 
-import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 
 import type { AdapterDescriptor, BindingCandidate, Capability } from '../../core/binding/types.ts'
+import { runExternal } from '../../core/distribution/external-command.ts'
 import type { Adapter, DiscoveryContext, ProbeResult, RuntimeStatus } from '../../ports/adapter.ts'
 
-const run = promisify(execFile)
+// `runExternal` 을 쓰는 이유는 둘이다: Windows `.cmd` shim 해석과 콘솔 창 숨김.
+// 여기가 그것을 안 거치던 동안 doctor 는 bare `npx` 를 그대로 spawn 해 ENOENT 로 죽었고,
+// ASC 는 JAM 을 "쓸 수 없다" 로 읽었다. serve 경로(mcp-client)만 해석을 갖고 있었다.
+const run = runExternal
 
 /**
  * 실제로 되는 것만 적는다 (C-09 §1.1).
