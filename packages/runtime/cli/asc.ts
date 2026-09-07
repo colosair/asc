@@ -2166,9 +2166,17 @@ async function detectSelf(): Promise<string | null> {
   return user || null
 }
 
+/**
+ * 바깥 명령 하나의 표준 출력. 실패는 `null` 이다.
+ *
+ * `resolveCommand` 를 거친다 — 안 거치면 Windows 에서 `npm` 이 ENOENT 로 죽고, 이 함수는
+ * 그것을 "출력이 없다"와 구분하지 않으므로 **전역 설치본이 있는데 없다고 답한다.**
+ * 실기계에서 그렇게 됐고, 그 빈 답이 등록물에 placeholder 가 박히는 상류 원인이었다.
+ */
 async function execText(command: string, args: string[]): Promise<string | null> {
+  const [runnable, runArgs] = resolveCommand(command, args)
   try {
-    const { stdout } = await execFileAsync(command, args)
+    const { stdout } = await execFileAsync(runnable, runArgs)
     return stdout.trim() || null
   } catch {
     return null
@@ -4435,7 +4443,7 @@ async function serviceRuntime(): Promise<ServiceRuntimeResolution> {
   return resolveServiceRuntime({
     // **checkout 은 등록물이 가리킬 자리가 아니다.** 지금 도는 것을 후보로 쓰는 것은 그것이
     // 설치된 패키지일 때뿐이고, 아니면 전역 설치본만 남는다 — 없으면 등록하지 않는다.
-    runningEntry: runningFromInstalledPackage() ? fileURLToPath(import.meta.url) : '/dev/null/not-installed',
+    ...(runningFromInstalledPackage() ? { runningEntry: fileURLToPath(import.meta.url) } : {}),
     runningNode: process.execPath,
     runningNodeVersion: process.version,
     ...(stable ? { stableEntry: stable } : {}),
@@ -5401,8 +5409,9 @@ async function convergeService(values: Record<string, unknown>): Promise<number>
     console.log(`service: ${persistentRuntimeLine(adapter.id, plan)}`)
     return 0
   }
-  // 등록이 없던 기계라면 `install` 이 계획된다 — 업데이트가 등록을 새로 만들지는 않는다.
-  if (plan.action === 'install') {
+  // `install` 은 ABSENT 와 STALE 을 함께 접은 계획이다. 둘을 여기서 다시 가른다 —
+  // 없던 기계에 새로 만들지는 않지만, **낡은 등록은 수렴시킨다.** 그것이 이 함수의 일이다.
+  if (plan.state.kind === 'ABSENT') {
     console.log('service: not registered on this machine — leaving it that way (`asc runtime service install`)')
     return 0
   }

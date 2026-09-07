@@ -38,8 +38,13 @@ export function isTransientPath(path: string): boolean {
 }
 
 export type ServiceRuntimeInput = {
-  /** 지금 이 프로세스의 진입점 절대 경로. */
-  runningEntry: string
+  /**
+   * 지금 이 프로세스의 진입점 절대 경로.
+   *
+   * **없으면 넘기지 않는다.** 부재를 경로처럼 생긴 문자열로 표현하면 `isTransientPath` 가
+   * 그것을 "사라지지 않는 자리"로 읽고 등록물에 박는다 — 실기계에서 그렇게 됐다.
+   */
+  runningEntry?: string
   /** 지금 이 프로세스의 Node 실행 파일. */
   runningNode: string
   /** 지금 이 프로세스의 Node 버전 (`v24.1.0` 형태). */
@@ -70,14 +75,17 @@ export function resolveServiceRuntime(input: ServiceRuntimeInput): ServiceRuntim
   const entry =
     input.stableEntry && !isTransientPath(input.stableEntry)
       ? input.stableEntry
-      : !isTransientPath(input.runningEntry)
+      : input.runningEntry && !isTransientPath(input.runningEntry)
         ? input.runningEntry
         : null
   if (!entry) {
     return {
       kind: 'UNSTABLE',
       reason: 'NO_STABLE_ENTRY',
-      detail: `${input.runningEntry} is a temporary location — a registration pointing there breaks when it is cleared`,
+      // 없는 것과 임시 자리인 것은 다른 사실이다 — 사람이 무엇을 할지가 갈린다
+      detail: input.runningEntry
+        ? `${input.runningEntry} is a temporary location — a registration pointing there breaks when it is cleared`
+        : 'no installed ASC runtime to point at — install one first, then register',
     }
   }
 

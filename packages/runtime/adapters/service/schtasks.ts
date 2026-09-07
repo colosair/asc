@@ -24,10 +24,14 @@ export const TASK_NAME = SERVICE_LABEL
  * `/TR` 에 들어갈 한 줄.
  *
  * schtasks 는 명령을 문자열 하나로 받는다 — 경로에 공백이 있으면 통째로 깨지므로
- * 각 조각을 따옴표로 감싼다. 따옴표가 든 인자는 등록 자체를 깨뜨리므로 거른다.
+ * 각 조각을 따옴표로 감싼다.
+ *
+ * **따옴표는 `"` 하나다.** 셸을 거치지 않고 `execFile` 로 인자를 넘기므로 Windows 쪽
+ * 이스케이프는 Node 가 한다. 여기서 `\"` 를 손으로 넣으면 그 위에 한 겹이 더 붙어
+ * schtasks 가 백슬래시를 값으로 읽고, `C:\Program Files\...` 가 공백에서 잘린다.
  */
 export function taskRunLine(command: ServiceCommand): string {
-  const quote = (value: string) => `\\"${value}\\"`
+  const quote = (value: string) => `"${value}"`
   return [command.program, ...command.args].map(quote).join(' ')
 }
 
@@ -56,7 +60,7 @@ export function schtasksAdapter(deps: SchtasksDeps = {}): PersistentRuntimeAdapt
       // 조회가 실패하는 것은 대개 "없다"이다. 없는 것과 못 읽은 것을 구분할 방법이
       // schtasks 에는 없으므로, 없는 쪽으로 읽고 install 이 다시 판정하게 둔다.
       if (query === null) return { kind: 'ABSENT' } satisfies ServiceState
-      const wanted = taskRunLine(command).replace(/\\"/g, '"')
+      const wanted = taskRunLine(command)
       // 조회 출력에 우리 명령이 그대로 들어 있는가. 없으면 낡은 등록이다.
       return query.includes(wanted)
         ? ({ kind: 'CURRENT', detail: TASK_NAME } satisfies ServiceState)
