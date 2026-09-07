@@ -2630,6 +2630,37 @@ async function scmFor(resolved?: ResolvedRuntime): Promise<ScmPort | undefined> 
 }
 
 /**
+ * 이 Run 이 잡고 있던 세션을 놓는다.
+ *
+ * `host claude release` 와 `work finish` 가 같은 것을 해야 해서 여기 있다. 나뉘어 있던
+ * 동안 `finish` 는 이 일을 하지 않았고, 끝난 세션이 Run 을 계속 붙들어 다음 bind 가
+ * 거부됐다 (#63). 0.8.0 노트는 finish 가 "releases the physical binding" 이라고 적어
+ * 두었으므로, 안 하는 쪽이 계약 위반이다.
+ */
+async function releaseRuntimeBinding(
+  store: MarkdownStateStore,
+  target: string,
+  physical: string,
+  at: string,
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const bindings = claudeBindings(store)
+  const audit = auditLedger(store)
+  const running = (await audit.executionsOf(target)).filter(
+    (evidence) => evidence.status === 'RUNNING' && evidence.physicalReference === physical,
+  )
+  const released = await bindings.release(target, physical)
+  // 소유권은 사라져도 그 실행이 있었다는 사실은 남는다 (C-10 §1.3)
+  if (released) for (const evidence of running) await audit.endExecution(evidence.executionId, 'RELEASED', at)
+  if (!released) return { ok: false, detail: 'Release failed — you are not the owner' }
+  // **놓았다고 말하기 전에 확인한다.** guard 는 이 파일 하나로 관리 대상을 정하므로,
+  // 지워지지 않은 채 "released" 라고 적으면 그 세션의 외부 write 가 계속 막힌다.
+  const after = await bindings.get(target)
+  return after
+    ? { ok: false, detail: `Release did not take — ${target} is still bound to ${after.physicalSessionId}.` }
+    : { ok: true }
+}
+
+/**
  * Claude Host Adapter 표면 (C-03 §5). install/uninstall/probe는 프로젝트 밖(user-scope)
  * 이라 .asc 없이 돌고, bind/contract는 attach된 프로젝트에서 돈다.
  */
@@ -2802,21 +2833,9 @@ async function runHost(
       const audit = auditLedger(store)
 
       if (command === 'release') {
-        const running = (await audit.executionsOf(target)).filter(
-          (e) => e.status === 'RUNNING' && e.physicalReference === physical,
-        )
-        const released = await bindings.release(target, physical)
-        // 소유권은 사라져도 그 실행이 있었다는 사실은 남는다 (C-10 §1.3)
-        if (released) for (const evidence of running) await audit.endExecution(evidence.executionId, 'RELEASED', at)
-        if (!released) {
-          console.error('Release failed — you are not the owner')
-          return 1
-        }
-        // **놓았다고 말하기 전에 확인한다.** guard 는 이 파일 하나로 관리 대상을 정하므로,
-        // 지워지지 않은 채 "released" 라고 적으면 그 세션의 외부 write 가 계속 막힌다.
-        const after = await bindings.get(target)
-        if (after) {
-          console.error(`Release did not take — ${target} is still bound to ${after.physicalSessionId}.`)
+        const outcome = await releaseRuntimeBinding(store, target, physical, at)
+        if (!outcome.ok) {
+          console.error(outcome.detail)
           return 1
         }
         console.log(`${target} ownership released`)
@@ -2861,12 +2880,26 @@ async function runHost(
         // 부딪힌 상대가 **어느 세션인지** 말한다. 같은 Run 이 다른 세션을 잡고 있는 경우와
         // 이 세션을 다른 Run 이 잡고 있는 경우는 사람이 할 일이 다르다.
         const other = claimed.current.logicalSessionId
+        if (other === target) {
+          console.error(
+            `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
+              '죽은 세션이 확실하면 --force 로 rebind하라.',
+          )
+          return 1
+        }
+        // 같은 Run 이 다른 세션을 잡고 있는 경우에도 사람이 할 일은 둘로 갈린다.
+        // **끝난 세션이 아직 붙들고 있는 것**은 놓아야 할 잔재이고, 살아 있는 세션을
+        // 잡고 있는 것은 설계대로다 — 그때는 Run 을 나누는 것이 답이다. 둘을 같은
+        // 문장으로 말하던 동안 앞의 경우가 세 번이나 사람 실수로 읽혔다 (#63).
+        const holder = await store.get('session', other)
+        const finished = holder?.status === 'DONE'
         console.error(
-          other === target
-            ? `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
-              '죽은 세션이 확실하면 --force 로 rebind하라.'
+          finished
+            ? `RUNTIME_CONFLICT: 이 Run(${physical}) 은 끝난 세션 ${other} 을 아직 잡고 있다. ` +
+              `놓아라: asc host claude release ${other} --physical ${physical}`
             : `RUNTIME_CONFLICT: 이 Run(${physical}) 은 지금 ${other} 을 잡고 있다. ` +
-              `한 Run 은 한 세션만 잡는다 — 먼저 놓아라: asc host claude release ${other} --physical ${physical}`,
+              '한 Run 은 한 세션만 잡는다 — 그 세션을 계속 쓸 것이면 이 작업은 다른 Run 으로 하고, ' +
+              `아니면 먼저 놓아라: asc host claude release ${other} --physical ${physical}`,
         )
         return 1
       }
@@ -5081,6 +5114,22 @@ async function runWork(
       }
       const done = await runSession('done', session, values, store, runtime)
       if (done !== 0) return done
+
+      // 끝난 세션은 Run 도 놓는다. 이것이 빠져 있던 동안, 끝났다고 보고된 세션이
+      // Run 을 계속 붙들어 다음 bind 가 RUNTIME_CONFLICT 로 거부됐다 (#63).
+      //
+      // **DONE 을 되돌리지는 않는다.** handoff 는 이미 쓰였고, 반쯤 되돌린 상태가
+      // 이 결함이 만든 것보다 낫지 않다. 놓지 못했으면 그 사실을 말하고 종료 코드로
+      // 드러낸다 — 조용히 성공이라 적지 않는다.
+      // `--physical` 이 없는 경로는 여기 오지 못한다 — 결합이 있으면 `done` 이 먼저
+      // owner 를 요구하고, 결합이 없으면 놓을 것이 없다. 그래서 분기를 두지 않는다.
+      const physical = values.physical as string | undefined
+      if (physical && (await claudeBindings(store).get(session))) {
+        const released = await releaseRuntimeBinding(store, session, physical, new Date().toISOString())
+        if (released.ok) console.log(`${session} ownership released`)
+        else console.error(released.detail)
+      }
+
       // handoff 가 쓰였으면 거두는 것까지가 이 명령의 몫이다 — 상태·차단 해제·보관.
       return runController('collect', values, store, runtime)
     }
