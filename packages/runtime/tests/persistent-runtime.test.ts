@@ -21,7 +21,7 @@ import {
   type ServiceState,
 } from '../core/distribution/persistent-runtime.ts'
 import { launchAgentPlist, launchdAdapter, plistPath } from '../adapters/service/launchd.ts'
-import { TASK_NAME, schtasksAdapter, taskMinutes, taskRunLine } from '../adapters/service/schtasks.ts'
+import { TASK_NAME, durationMinutes, schtasksAdapter, taskMinutes, taskRunLine } from '../adapters/service/schtasks.ts'
 import {
   SERVICE_UNIT,
   TIMER_UNIT,
@@ -135,6 +135,30 @@ describe('macOS LaunchAgent', () => {
   })
 })
 
+/**
+ * schtasks `/Query /XML ONE` 이 돌려주는 모양. Command 와 Arguments 가 갈려 있는 것이
+ * 핵심이다 — status 는 그 둘을 다시 이어 붙여 등록한 줄과 비교한다.
+ */
+const registrationXml = (
+  overrides: { program?: string; runLine?: string; minutes?: number; interval?: string; logonType?: string } = {},
+): string => {
+  const line = overrides.runLine ?? taskRunLine({ ...command, ...(overrides.program ? { program: overrides.program } : {}) })
+  const [program = '', ...rest] = line.match(/"[^"]*"/g) ?? []
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2">
+  <Principals><Principal id="Author">
+    <LogonType>${overrides.logonType ?? 'InteractiveToken'}</LogonType>
+  </Principal></Principals>
+  <Triggers><TimeTrigger><Repetition>
+    <Interval>${overrides.interval ?? `PT${overrides.minutes ?? 5}M`}</Interval>
+  </Repetition></TimeTrigger></Triggers>
+  <Actions Context="Author"><Exec>
+    <Command>${program}</Command>
+    <Arguments>${rest.join(' ')}</Arguments>
+  </Exec></Actions>
+</Task>`
+}
+
 describe('Windows Scheduled Task', () => {
   it('공백이 든 경로가 통째로 깨지지 않는다', () => {
     const line = taskRunLine({ ...command, program: 'C:\\Program Files\\nodejs\\node.exe' })
@@ -147,35 +171,62 @@ describe('Windows Scheduled Task', () => {
     assert.doesNotMatch(line, /\\"/)
   })
 
+  it('간격이 달라진 등록은 낡은 것이다 — taskRunLine 에 간격이 없어 못 보던 회귀', async () => {
+    const adapter = schtasksAdapter({ exec: async () => registrationXml({ minutes: 60 }) })
+    const state = await adapter.status(command)
+    assert.equal(state.kind, 'STALE')
+    assert.match(state.kind === 'STALE' ? state.detail : '', /every 5 min/)
+  })
+
+  it('Task Scheduler 가 정규화한 간격을 같은 것으로 읽는다', async () => {
+    // /MO 60 으로 등록한 것이 PT1H 로 저장된다. 문자열로 비교하면 같은 등록을 낡았다고
+    // 읽는다 (실기계 실측)
+    assert.equal(durationMinutes('PT1H'), 60)
+    assert.equal(durationMinutes('PT60M'), 60)
+    assert.equal(durationMinutes('PT1H30M'), 90)
+    assert.equal(durationMinutes('나중에'), null)
+
+    const hourly = { ...command, intervalSeconds: 3600 }
+    const adapter = schtasksAdapter({ exec: async () => registrationXml({ interval: 'PT1H' }) })
+    assert.equal((await adapter.status(hourly)).kind, 'CURRENT')
+  })
+
   it('분 단위 반복은 1분 아래로 내려가지 않는다', () => {
     assert.equal(taskMinutes(300), 5)
     assert.equal(taskMinutes(10), 1)
   })
 
   it('조회에 우리 명령이 없으면 낡은 등록이다', async () => {
-    const stale = schtasksAdapter({ exec: async () => 'Task To Run: something-else' })
+    const stale = schtasksAdapter({ exec: async () => registrationXml({ program: 'C:\\other\\node.exe' }) })
     assert.equal((await stale.status(command)).kind, 'STALE')
 
     // 조회 출력은 등록한 그 줄이다 — 비교 전에 형태를 바꿔야 한다면 등록이 틀린 것이다
-    const current = schtasksAdapter({ exec: async () => `Task To Run: ${taskRunLine(command)}` })
+    const current = schtasksAdapter({ exec: async () => registrationXml() })
     assert.equal((await current.status(command)).kind, 'CURRENT')
   })
 
   it('방금 등록한 것을 CURRENT 로 읽는다 — 등록 직후 STALE 로 보이던 회귀', async () => {
-    let registered: string | null = null
+    let registered: string[] | null = null
     const adapter = schtasksAdapter({
       exec: async (_command, args) => {
         if (args[0] === '/Create') {
-          registered = args[args.indexOf('/TR') + 1]!
+          registered = [...args]
           return ''
         }
-        return registered === null ? Promise.reject(new Error('not found')) : `Task To Run: ${registered}`
+        if (registered === null) return Promise.reject(new Error('not found'))
+        return registrationXml({
+          runLine: registered[registered.indexOf('/TR') + 1]!,
+          minutes: Number(registered[registered.indexOf('/MO') + 1]),
+        })
       },
     })
     assert.equal((await adapter.status(command)).kind, 'ABSENT')
     await adapter.install(command)
     assert.equal((await adapter.status(command)).kind, 'CURRENT')
   })
+
+
+
 
   it('등록은 덮어쓰기로 수렴시키고, 이름은 우리 것 하나다', async () => {
     const calls: string[][] = []

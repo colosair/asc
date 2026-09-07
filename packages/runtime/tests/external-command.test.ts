@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { resolveExternalCommand, shimTarget } from '../core/distribution/external-command.ts'
+import { resolveExternalCommand, runExternal, shimTarget } from '../core/distribution/external-command.ts'
 
 const NPM_DIR = 'C:\\Users\\u\\AppData\\Roaming\\npm'
 const win = (files: Record<string, string>) => ({
@@ -86,5 +86,37 @@ describe('shimTarget — npm shim 두 세대', () => {
 
   it('모르는 형태는 null — 아는 척하지 않는다', () => {
     assert.equal(shimTarget('powershell -File thing.ps1 %*'), null)
+  })
+})
+
+describe('runExternal — 콘솔 창을 띄우지 않는다', () => {
+  const capture = () => {
+    const calls: { command: string; args: readonly string[]; options: Record<string, unknown> }[] = []
+    const exec = async (command: string, args: readonly string[], options: Record<string, unknown>) => {
+      calls.push({ command, args, options })
+      return { stdout: '', stderr: '' }
+    }
+    return { calls, exec: exec as never }
+  }
+
+  it('windowsHide 를 언제나 준다 — 빠뜨리면 5분짜리 회차가 화면을 가로챈다', async () => {
+    const { calls, exec } = capture()
+    await runExternal('git', ['status'], { exec })
+    assert.equal(calls[0]!.options.windowsHide, true)
+  })
+
+  it('cwd·env·maxBuffer 는 준 것만 넘긴다', async () => {
+    const { calls, exec } = capture()
+    await runExternal('git', ['status'], { exec, cwd: '/repo', maxBuffer: 42 })
+    assert.equal(calls[0]!.options.cwd, '/repo')
+    assert.equal(calls[0]!.options.maxBuffer, 42)
+    assert.ok(!('env' in calls[0]!.options), '주지 않은 것을 지어내지 않는다')
+  })
+
+  it('shim 해석을 거친다 — 실행과 해석이 같은 자리에 있어야 한 곳만 고쳐지지 않는다', async () => {
+    const { calls, exec } = capture()
+    await runExternal('/usr/bin/git', ['status'], { exec })
+    // 경로를 이미 갖춘 명령은 resolveExternalCommand 가 손대지 않는다
+    assert.equal(calls[0]!.command, '/usr/bin/git')
   })
 })

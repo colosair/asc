@@ -9,10 +9,11 @@
 // ASC 는 Jira 토큰을 받지도 저장하지도 않고, 프로젝트 키를 만들어 내지도 않는다.
 // 키는 Profile 에 이미 사람이 적어 둔 것이고, 그 결정을 다시 묻지 않는다.
 
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { runExternal } from '../../core/distribution/external-command.ts'
 
-const run = promisify(execFile)
+// adapter.ts 와 같은 이유로 `runExternal` 이다 — Windows `.cmd` shim 해석과 콘솔 창 숨김.
+// heal 은 `npx` 를 부르므로 해석 없이는 이 경로도 ENOENT 로 죽는다.
+const run = runExternal
 
 /** JAM 의 zero-install 진입. **버전을 여기 박지 않는다** — JAM 이 말한 값을 쓴다. */
 export const JAM_BOOTSTRAP = '@jam-mcp/bootstrap'
