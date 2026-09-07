@@ -101,6 +101,25 @@ describe('#63 — asc work finish 가 physical binding 을 놓는다', () => {
   })
 
 
+  it('끝난 세션이 Run 을 쥐고 있으면 status 가 그것을 든다', async () => {
+    // stale() 은 이 자리를 못 본다 — 이력으로만 판정하는데 RELEASED 가 안 남은 결합에는
+    // 볼 이력이 없다. 그래서 실기계에서 여섯 개가 일주일 동안 아무 화면에도 안 나왔다.
+    const { repo, home, cleanup } = await attached()
+    try {
+      hold(repo, home, 'S-20260907-01', '끝날 것')
+      // finish 를 거치지 않고 세션만 끝낸다 — 이 결함이 남긴 상태를 그대로 만든다
+      assert.equal(
+        run(repo, home, ['session', 'done', 'S-20260907-01', '--physical', PHYS, '--verified', 'v', '--next', 'n']).code,
+        0,
+      )
+      const status = run(repo, home, ['status'])
+      assert.match(status.stdout, /finished session\(s\) still hold a Run/)
+      assert.match(status.stdout, /S-20260907-01/)
+    } finally {
+      await cleanup()
+    }
+  })
+
   it('끝난 세션이 붙들고 있는 것과 살아 있는 세션을 잡고 있는 것을 갈라 말한다', async () => {
     // 하나는 놓아야 할 잔재이고 하나는 설계대로다. 같은 문장으로 말하던 동안 앞의 경우가
     // 세 번이나 사람 실수로 읽혔다.

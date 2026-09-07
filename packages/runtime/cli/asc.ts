@@ -4674,6 +4674,31 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   }
   if (service?.action === 'install') degraded.push('this machine has no persistent registration')
 
+  // 끝난 세션이 Run 을 아직 쥐고 있는가.
+  //
+  // `stale()` 은 이 자리를 못 본다 — 그 판정은 이력으로만 하고, RELEASED 가 남지 않은
+  // 결합에는 볼 이력이 없다. 그래서 finish 가 놓지 않던 동안 생긴 것들은 자동 정리도
+  // 비껴갔고, 실기계에서 여섯 개가 일주일을 그렇게 살았다. 다음 bind 가 실패하거나
+  // `uninstall plan` 을 읽을 때에야 한꺼번에 드러났다 (#63).
+  const heldByFinished = store
+    ? await (async () => {
+        const held = await claudeBindings(store).current()
+        const stuck: string[] = []
+        for (const binding of held) {
+          const session = await store.get('session', binding.logicalSessionId)
+          // 세션이 아예 없는 것도 끝난 것이다 — 보관으로 옮겨 갔다는 뜻이다
+          if (!session || session.status === 'DONE') stuck.push(binding.logicalSessionId)
+        }
+        return stuck
+      })()
+    : []
+  if (heldByFinished.length > 0) {
+    degraded.push(
+      `${heldByFinished.length} finished session(s) still hold a Run — ${heldByFinished.slice(0, 3).join(', ')}` +
+        `${heldByFinished.length > 3 ? ', …' : ''} (asc host claude release <S-ID> --physical <run>)`,
+    )
+  }
+
   const next = ((): string => {
     if (!root) return 'asc setup'
     if (setup.attachment === 'LOCK_DRIFT') return 'asc setup — the configuration moved away from the lock'
