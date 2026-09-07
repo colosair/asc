@@ -8,7 +8,7 @@
 대신하게 한다. 자동화가 목적이 아니라, 병렬 에이전트를 쓰면서도 사람이 프로젝트의
 이해·결정권·통제권을 잃지 않는 최소 계약 체계가 목적이다.
 
-설계 정본은 [operating-model.md](docs/design/operating-model.md) §0이고, 저장 위치와
+현재 제품 모델은 [current-operating-model.md](docs/design/current-operating-model.md)에 있고, 동결된 설계 v5.1(`OM §x`의 대상)은 [operating-model.md](docs/design/operating-model.md)다. 저장 위치와
 workspace 개념의 정본은 [C-11](docs/contracts/C-11_workspace-local-first.md)이다. 이 README는
 **진입점일 뿐이며 설계를 정의하지 않는다** — 아래 문서 지도를 따라가라.
 
@@ -22,7 +22,15 @@ workspace 개념의 정본은 [C-11](docs/contracts/C-11_workspace-local-first.m
 ## 설치
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.8.0 init
+npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
+```
+
+그 다음부터 평소 쓰는 말은 셋이다:
+
+```bash
+asc setup      # 이 기계와 이 프로젝트를 쓸 수 있게 만든다
+asc status     # 무엇이 준비됐고 무엇이 막혀 있는가
+asc work       # 작업 시작·게시·마무리
 ```
 
 **이 저장소를 clone하는 것은 ASC를 쓰는 방법이 아니다** — 아래 [기여자 경로](#기여자-경로)이며,
@@ -46,7 +54,7 @@ ASC는 패키지 둘로 나온다.
 | `@asc-agent/bootstrap` | zero-install 첫 진입. 자체 setup 정책이 없다 |
 
 ```text
-npx --yes @asc-agent/bootstrap@0.8.0 init
+npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
         ↓  bootstrap이 ASC의 평소 setup을 돌린다 (detect → plan → apply → verify)
         ↓  plan에 "이 machine에 runtime을 설치한다"가 변경으로 적힌다
         ↓  apply: npm install -g @asc-agent/runtime@0.8.0
@@ -69,7 +77,7 @@ ASC는 shell 설정도 PATH도 고치지 않는다. 설치는 됐는데 지금 �
 | 방식 | 진입 | 언제 |
 |---|---|---|
 | Zero-install | `npx --yes @asc-agent/bootstrap@0.8.0 <command> --json` | 아직 아무것도 설치 전 |
-| Persistent | `npm install -g @asc-agent/runtime@0.8.0` 후 `asc <command>` | 안정적인 로컬 명령 — 그리고 `npx` 자체가 서지 못하는 기계의 fallback |
+| Persistent | `asc setup` 이 설치하고 `asc update` 가 옮긴다 | 안정적인 로컬 명령. `npm install -g @asc-agent/runtime@0.8.0` 은 `npx` 자체가 서지 못할 때의 수동 대안이다 |
 | Development | `asc runtime use development <checkout>` | 패키지 대신 빌드된 checkout으로 |
 
 ASC 프로세스가 뜨기도 전에 `npx`/`npm exec` 가 죽으면 — package runner나 PATH의 문제 —
@@ -152,7 +160,7 @@ asc workspace list
 ASC가 대신 고르지 않고 후보만 알린다.
 
 ```bash
-asc init --profile <id> --workspace <W-id>
+asc setup --profile <id> --workspace <W-id>
 ```
 
 ### 저장소 안의 `.asc/` 가 이미 있다면 (legacy)
@@ -213,7 +221,8 @@ node packages/runtime/cli/asc.ts --help   # 소스를 그대로 실행한다
 
 | 무엇 | 어디 | 성격 |
 |---|---|---|
-| 설계 정본 (v5.1, 동결) | [docs/design/operating-model.md](docs/design/operating-model.md) | `OM §x` 참조 대상 |
+| 현재 제품 모델 | [docs/design/current-operating-model.md](docs/design/current-operating-model.md) | 지금의 계약 |
+| 역사 설계 (v5.1, 동결) | [docs/design/operating-model.md](docs/design/operating-model.md) | `OM §x` 참조 대상 |
 | 구현 계약 | [C-01](docs/contracts/C-01_approval-port.md) · [C-02](docs/contracts/C-02_port-interface.md) · [C-03](docs/contracts/C-03_operator-host-adapter.md) | Approval Port / Port 경계 / Operator·Host Adapter |
 | 구현 계약 (책임·진입) | [C-04](docs/contracts/C-04_responsibility.md) · [C-05](docs/contracts/C-05_skill-bundle.md) · [C-06](docs/contracts/C-06_bootstrap.md) | Responsibility·Bounded Query / Skill Bundle·Inbox Depth / Zero-base Bootstrap |
 | 구현 계약 (관찰·전달·독립성) | [C-07](docs/contracts/C-07_monitoring-completion.md) · [C-08](docs/contracts/C-08_presentation-digest.md) · [C-09](docs/contracts/C-09_capability-binding.md) | Monitoring Completion / Presentation·Digest / External-System Independence |

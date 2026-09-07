@@ -1,5 +1,19 @@
 # Releasing ASC
 
+What lives in this directory:
+
+```text
+this file                      the current release procedure — read this to run a release
+../releases/v<X.Y.Z>.md        the Release body for a version, current for the newest
+v<X.Y.Z>-checklist.md          that version's acceptance record — historical once shipped
+```
+
+A shipped version's checklist is evidence of what was measured at that time. It is not
+rewritten when the product moves on: an old checklist naming an old command is a record of
+what was run, not an instruction for today.
+
+---
+
 Two stages, two dispatches, one invariant:
 
 **A tag is created only after acceptance passes against the published packages.**

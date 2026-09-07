@@ -64,7 +64,15 @@ ASC ships as two packages:
 ### First run, on a machine with nothing installed
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.8.0 init
+npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
+```
+
+From there the everyday path is three words:
+
+```bash
+asc setup      # make this machine and this project ready
+asc status     # what is set up, what is running, what is blocked
+asc work       # start, publish and finish the work
 ```
 
 ### A profile for your project
@@ -99,7 +107,7 @@ not break an existing attachment — are in [docs/profiles.md](docs/profiles.md)
 The command does not appear by magic, and this is the whole chain:
 
 ```text
-npx --yes @asc-agent/bootstrap@0.8.0 init
+npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
         ↓  the bootstrap runs ASC's ordinary setup: detect → plan → apply → verify
         ↓  the plan lists "install the runtime on this machine" as a change
         ↓  apply runs: npm install -g @asc-agent/runtime@0.8.0
@@ -129,7 +137,7 @@ Every command exists in all three tiers; only the entry differs.
 | Tier | Entry | When |
 |---|---|---|
 | Zero-install | `npx --yes @asc-agent/bootstrap@0.8.0 <command> --json` | nothing is installed yet |
-| Persistent | `npm install -g @asc-agent/runtime@0.8.0`, then `asc <command>` | the stable local command — and the fallback when `npx` itself cannot start |
+| Persistent | `asc setup` installs it; `asc update` moves it | the stable local command. `npm install -g @asc-agent/runtime@0.8.0` is the manual fallback for when `npx` itself cannot start |
 | Development | `asc runtime use development <checkout>` | run a built checkout instead of the package |
 
 If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
@@ -271,12 +279,14 @@ project**, and attaching or moving a workspace does not change it.
 
 ## Host integration
 
-Claude Code as a host:
+`asc setup` installs the host integration, and `asc refresh` brings it back to the build
+you are running — those are the two commands a person needs. The rest is the advanced
+surface, for diagnosis and recovery:
 
 ```bash
-asc host claude install    # guard hook + skill bundle, into ~/.claude
-asc host claude guard      # worker settings, inside an attached project
 asc host claude probe      # capability measurement + install state
+asc host claude guard      # worker settings, inside an attached project
+asc host claude install    # writes the integration directly
 ```
 
 Host artefacts are **user-owned, not project-owned**. `install` writes to your home
@@ -314,17 +324,28 @@ running: N1 introduce runtime configuration
 an agent made without approval and why, the escalations it raised and the boundaries
 they name, independent validation, and who currently holds the session.
 
-## Upgrade and uninstall
+## Update, refresh, uninstall
 
-Upgrading the runtime is the same npm command with a new exact version:
+Three different jobs, three commands:
 
 ```bash
-npm install -g @asc-agent/runtime@<exact>
+asc update      # move to the newest published release, then verify it
+asc refresh     # same version — bring this runtime's own integration back to it
+asc uninstall   # remove the product; your state stays
 ```
 
-Updating the runtime can leave host artefacts behind — `asc setup plan` reports that as
-`INSTALLED_STALE` and lists the repair as a change. Runtime removal and deleting your data
-are **not the same command**: `ASC_HOME` state is kept unless you say otherwise.
+`update` installs the new release and then lets **that** build refresh the host
+integration, so a new runtime never runs next to an old hook. `refresh` is the one to
+reach for when the host shows `INSTALLED_STALE` at the version you already have: it
+converges the host files and the machine registration and touches nothing else — not the
+profile, not the workspace, not the identity, not sessions, not the execution mode.
+
+`uninstall` removes the registration, the host integration and the installed runtime, in
+that order, and keeps every byte of `ASC_HOME`. It refuses while a session or a physical
+run is still live rather than abandoning it. There is no purge command.
+
+`npm install -g @asc-agent/runtime@<exact>` still works and is the manual fallback when
+the package runner itself cannot start.
 
 ## Troubleshooting
 
@@ -334,7 +355,7 @@ are **not the same command**: `ASC_HOME` state is kept unless you say otherwise.
 | Setup says a decision is required | a real human boundary | read `code` and `nextActions` |
 | `ASC_DEVELOPMENT_SOURCE_INVALID` | the selected checkout is gone, is not ASC, or is unbuilt | follow the `nextCommand` it prints |
 | `probe` reports `STOP` | `claude` is not on `PATH` | a missing prerequisite, not an ASC failure |
-| Host shows `INSTALLED_STALE` | the runtime moved on | `asc host claude install` |
+| Host shows `INSTALLED_STALE` | the runtime moved on | `asc refresh` |
 
 ## Development
 
@@ -374,7 +395,8 @@ maintainer; the procedure is [docs/release/README.md](docs/release/README.md).
 
 | What | Where | Nature |
 |---|---|---|
-| Canonical design (v5.1, frozen) | [docs/design/operating-model.md](docs/design/operating-model.md) | referenced as `OM §x` |
+| Current product model | [docs/design/current-operating-model.md](docs/design/current-operating-model.md) | what ASC does today |
+| Historical design (v5.1, frozen) | [docs/design/operating-model.md](docs/design/operating-model.md) | the snapshot `OM §x` points at |
 | Contracts — ports and boundaries | [C-01](docs/contracts/C-01_approval-port.md) · [C-02](docs/contracts/C-02_port-interface.md) · [C-03](docs/contracts/C-03_operator-host-adapter.md) | Approval Port / Port boundary / Operator·Host Adapter |
 | Contracts — responsibility and entry | [C-04](docs/contracts/C-04_responsibility.md) · [C-05](docs/contracts/C-05_skill-bundle.md) · [C-06](docs/contracts/C-06_bootstrap.md) | Responsibility / Skill Bundle / Zero-base Bootstrap |
 | Contracts — observation and independence | [C-07](docs/contracts/C-07_monitoring-completion.md) · [C-08](docs/contracts/C-08_presentation-digest.md) · [C-09](docs/contracts/C-09_capability-binding.md) | Monitoring / Presentation·Digest / External-System Independence |
