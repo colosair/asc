@@ -64,7 +64,7 @@ ASC ships as two packages:
 ### First run, on a machine with nothing installed
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
+npx --yes @asc-agent/bootstrap@0.8.1 setup apply --json
 ```
 
 From there the everyday path is three words:
@@ -107,10 +107,10 @@ not break an existing attachment — are in [docs/profiles.md](docs/profiles.md)
 The command does not appear by magic, and this is the whole chain:
 
 ```text
-npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
+npx --yes @asc-agent/bootstrap@0.8.1 setup apply --json
         ↓  the bootstrap runs ASC's ordinary setup: detect → plan → apply → verify
         ↓  the plan lists "install the runtime on this machine" as a change
-        ↓  apply runs: npm install -g @asc-agent/runtime@0.8.0
+        ↓  apply runs: npm install -g @asc-agent/runtime@0.8.1
         ↓  npm owns the executable link (on Windows, npm's own asc.cmd)
         ↓  verify checks the installed version and that a NEW process can run it
 bootstrap exits
@@ -136,8 +136,8 @@ Every command exists in all three tiers; only the entry differs.
 
 | Tier | Entry | When |
 |---|---|---|
-| Zero-install | `npx --yes @asc-agent/bootstrap@0.8.0 <command> --json` | nothing is installed yet |
-| Persistent | `asc setup` installs it; `asc update` moves it | the stable local command. `npm install -g @asc-agent/runtime@0.8.0` is the manual fallback for when `npx` itself cannot start |
+| Zero-install | `npx --yes @asc-agent/bootstrap@0.8.1 <command> --json` | nothing is installed yet |
+| Persistent | `asc setup` installs it; `asc update` moves it | the stable local command. `npm install -g @asc-agent/runtime@0.8.1` is the manual fallback for when `npx` itself cannot start |
 | Development | `asc runtime use development <checkout>` | run a built checkout instead of the package |
 
 If `npx` or `npm exec` dies before any ASC process starts — a package-runner or `PATH`
@@ -169,7 +169,7 @@ to `stderr`.
 On a fresh machine, start from the bootstrap — there is no `asc` yet:
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.8.0 setup apply --json
+npx --yes @asc-agent/bootstrap@0.8.1 setup apply --json
 ```
 
 The document carries a stable shape:
@@ -181,7 +181,7 @@ The document carries a stable shape:
   "executionMode": "bootstrap",     // or installed-runtime
   "changes": [
     { "target": "runtime-install", "package": "@asc-agent/runtime",
-      "version": "0.8.0", "strategy": "npm-global", "from": "NOT_INSTALLED" },
+      "version": "0.8.1", "strategy": "npm-global", "from": "NOT_INSTALLED" },
     { "target": "attach-workspace", "scope": "local", "profile": "..." }
   ],
   "requiresUserAction": false,
@@ -191,9 +191,9 @@ The document carries a stable shape:
     // must exist before anything can be selected.
     { "type": "apply_setup",
       "display":  "asc setup apply",
-      "portable": "npx --yes @asc-agent/bootstrap@0.8.0 setup apply" }
+      "portable": "npx --yes @asc-agent/bootstrap@0.8.1 setup apply" }
   ],
-  "nextActions": ["npx --yes @asc-agent/bootstrap@0.8.0 setup apply"],
+  "nextActions": ["npx --yes @asc-agent/bootstrap@0.8.1 setup apply"],
   "evidence": ["project=/path", "git=yes", "attached=no", "runtime=NOT_INSTALLED"]
 }
 ```
