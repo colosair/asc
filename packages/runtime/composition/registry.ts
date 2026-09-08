@@ -34,6 +34,19 @@ export type ComposeInput = {
    * ASC가 추론하지 않는다 (C-09 §3.1).
    */
   roles?: readonly BindingRole[]
+  /**
+   * 후보가 없는 adapter 에게도 "도구 자체는 쓸 수 있는가" 를 물을 것인가 (0.8.4).
+   *
+   * 그 질문은 프로젝트와 무관한 사실이라 원래는 늘 물었다. 그런데 그 대답이 외부
+   * 프로세스를 띄우는 adapter 가 있고, 실측에서 그 한 번이 **명령마다 17초**였다 —
+   * Jira 와 아무 상관없는 저장소에서도 그랬고, Windows CI 의 한 시험이 60초 상한을 넘긴
+   * 것도 여기서 왔다.
+   *
+   * 그래서 기본값을 바꾼다: **여기 후보가 있는 adapter 에게만 묻는다.** 붙어 있지도 않은
+   * 도구의 설치 상태가 필요한 화면(setup)은 이 값을 켜서 그대로 받는다. 두 사실을 합치는
+   * 것이 아니라, 값을 치를 이유가 있을 때만 치른다.
+   */
+  includeRuntimes?: boolean
 }
 
 /**
@@ -57,16 +70,18 @@ export async function composeBindings(input: ComposeInput): Promise<BindingPlan>
   }
 
   for (const adapter of adapters) {
+    const candidates = await adapter.discover(context).catch(() => [])
+
     // 도구가 쓸 수 있는가와 이 프로젝트가 그 도구에 붙어 있는가는 다른 사실이다.
-    // 합치면 사람이 "설치할 일인지 붙일 일인지"를 알 수 없다.
-    if (adapter.runtime) {
+    // 합치면 사람이 "설치할 일인지 붙일 일인지"를 알 수 없다. 그래서 여전히 따로 묻되,
+    // **물을 이유가 있을 때만 묻는다** — 후보가 여기 있거나, 호출자가 그 사실을 달라고 했을 때.
+    if (adapter.runtime && (candidates.length > 0 || input.includeRuntimes === true)) {
       const status = await adapter
         .runtime(context)
         .catch((error: unknown) => ({ state: 'UNAVAILABLE' as const, detail: String(error) }))
       runtimes.push({ adapterId: adapter.describe().id, ...status })
     }
 
-    const candidates = await adapter.discover(context).catch(() => [])
     for (const candidate of candidates) {
       // probe가 터지는 것과 "안 된다"는 다르다. 예외를 UNAVAILABLE로 옮겨 적되
       // 이유를 남긴다 — 조용히 후보에서 빼면 왜 안 보이는지 알 수 없다.

@@ -195,7 +195,7 @@ import {
   type ReadinessAxis,
 } from '../core/policy/execution-mode.ts'
 import { reviewExternalAction, reviewLines, type ReviewOutcome } from '../core/execution/remote-review.ts'
-import type { ResolvedBinding } from '../core/binding/types.ts'
+import type { BindingPlan, ResolvedBinding } from '../core/binding/types.ts'
 import type { Adapter } from '../ports/adapter.ts'
 import type { ResolvedRuntime } from '../core/resolver/load.ts'
 import { SessionRuntime } from '../core/runtime/session.ts'
@@ -1409,7 +1409,9 @@ async function runInit(values: Record<string, unknown>): Promise<number> {
     // 등록된 adapter가 스스로 후보를 찾고 실측한다 — provider 목록을 여기서 순회하지
     // 않는다 (C-09 §7). adapter가 없으면 그 갈래는 애초에 없다.
     const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-    const bindings = await composeBindings({ context: { projectRoot, env: process.env } })
+    // setup 화면은 **붙어 있지 않은 도구의 설치 상태까지** 보여 준다 — 사람이 '설치할 일'
+    // 과 '붙일 일' 을 갈라야 하는 자리가 여기다. 그 값을 치를 이유가 있는 유일한 화면이다.
+    const bindings = await composeBindings({ context: { projectRoot, env: process.env }, includeRuntimes: true })
     // 붙었는지는 **모든 명령이 지나는 같은 문**으로 묻는다 (C-11 §3). 저장소 안의 `.asc`
     // 만 보면 local scope로 붙은 workspace를 못 본다 — 기본 경로인데 "아직 안 붙었다"고
     // 답하게 된다.
@@ -6499,14 +6501,7 @@ async function runFrontOpen(values: Record<string, unknown>): Promise<number> {
  * 이 workspace 의 조율 표면. 없으면 없다고 말한다 — 아무 데나 대신 게시하지 않는다.
  */
 async function coordinationSurfaceFor(resolved?: ResolvedRuntime) {
-  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const adapters = monitorAdapters()
-  const declared = resolved?.layers.profile.bindings ?? []
-  const plan = await composeBindings({
-    context: { projectRoot, env: process.env },
-    adapters,
-    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
-  })
+  const { plan, declared, projectRoot, adapters } = await bindingPlanFor(resolved)
   const ports = await buildRuntimePorts({
     plan,
     roles: rolesFor(plan, declared),
@@ -7211,14 +7206,7 @@ async function externalWritePort(runtime?: ResolvedRuntime): Promise<ScmPort | n
  * 그 형태였다. 여기서 나오는 것은 Composition 이 만든 Port 와, 만들지 못한 이유다.
  */
 async function composedPorts(runtime?: ResolvedRuntime): Promise<Awaited<ReturnType<typeof buildRuntimePorts>>> {
-  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const adapters = monitorAdapters()
-  const declared = runtime?.layers.profile.bindings ?? []
-  const plan = await composeBindings({
-    context: { projectRoot, env: process.env },
-    adapters,
-    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
-  })
+  const { plan, declared, projectRoot, adapters } = await bindingPlanFor(runtime)
   const ports = await buildRuntimePorts({
     plan,
     // **작업 항목을 누구에게 물을지까지 정한다** (0.8.4). `rolesFor` 만 쓰면 code 와 work 가
@@ -7328,11 +7316,7 @@ async function inboxReaders(resolved?: ResolvedRuntime): Promise<ResourceContext
   const declared = resolved?.layers.profile.bindings ?? []
   const readers: ResourceContextPort[] = []
   try {
-    const plan = await composeBindings({
-      context: { projectRoot, env: process.env },
-      adapters,
-      roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
-    })
+    const { plan } = await bindingPlanFor(resolved)
     const built = await buildObservationChannels({
       plan,
       roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
@@ -7367,6 +7351,39 @@ function reconcileLines(result: Awaited<ReturnType<typeof reconcileInbox>>): str
 }
 
 /**
+ * 결합 조립을 **한 프로세스에서 한 번만** 한다 (0.8.4).
+ *
+ * 조립은 공짜가 아니다: adapter 마다 probe 가 돌고, 그중에는 외부 프로세스를 띄우는 것도
+ * 있다. 그런데 한 명령이 같은 조립을 서너 번 했다 — readiness 축에서 한 번, 외부 통로
+ * 표시에서 한 번, 발견 목록에서 한 번, 관측 채널에서 한 번. 실측으로 `asc status` 가
+ * 36초였고 그중 대부분이 같은 probe 를 반복한 시간이었다. Windows CI 에서 한 시험이
+ * 60초 상한을 넘긴 것도 여기서 왔다.
+ *
+ * 한 번의 실행 안에서 결합 구성이 달라질 이유가 없으므로 그 회차 동안만 붙들어 둔다.
+ * 프로세스가 끝나면 사라진다 — 디스크에 남기지 않는다.
+ */
+const planCache = new Map<string, Promise<BindingPlan>>()
+
+async function bindingPlanFor(
+  runtime?: ResolvedRuntime,
+): Promise<{ plan: BindingPlan; declared: readonly { role: string; adapter: string; resource: string }[]; projectRoot: string; adapters: Adapter[] }> {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const declared = runtime?.layers.profile.bindings ?? []
+  const adapters = monitorAdapters()
+  const key = `${projectRoot}|${declared.map((b) => `${b.role}:${b.adapter}:${b.resource}`).join(',')}`
+  let pending = planCache.get(key)
+  if (!pending) {
+    pending = composeBindings({
+      context: { projectRoot, env: process.env },
+      adapters,
+      roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+    })
+    planCache.set(key, pending)
+  }
+  return { plan: await pending, declared, projectRoot, adapters }
+}
+
+/**
  * 이 workspace 가 실제로 무엇에 닿을 수 있는가 — **선언된 것과 발견된 것을 함께** (0.8.4 · C-2).
  *
  * `composedPorts` 는 조립된 결과만 준다. 그래서 "붙일 수 있는데 아무도 안 붙였다" 는 사실이
@@ -7379,13 +7396,7 @@ async function bindingSurvey(runtime?: ResolvedRuntime): Promise<{
   undeclared: UndeclaredBinding[]
   workItem: { assigned: boolean; candidates: UndeclaredBinding[] }
 }> {
-  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const declared = runtime?.layers.profile.bindings ?? []
-  const plan = await composeBindings({
-    context: { projectRoot, env: process.env },
-    adapters: monitorAdapters(),
-    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
-  })
+  const { plan, declared } = await bindingPlanFor(runtime)
   return {
     declared,
     undeclared: undeclaredBindings(plan, declared),
@@ -7407,14 +7418,7 @@ function declarationLine(binding: UndeclaredBinding): string {
  * 감시는 그때도 두 채널로 돌고 있었다.
  */
 async function composedReadChannels(runtime?: ResolvedRuntime): Promise<{ ids: string[]; unavailable: string[] }> {
-  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const adapters = monitorAdapters()
-  const declared = runtime?.layers.profile.bindings ?? []
-  const plan = await composeBindings({
-    context: { projectRoot, env: process.env },
-    adapters,
-    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
-  })
+  const { plan, declared, projectRoot, adapters } = await bindingPlanFor(runtime)
   const built = await buildObservationChannels({
     plan,
     roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },

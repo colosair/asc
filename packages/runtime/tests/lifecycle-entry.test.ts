@@ -9,6 +9,7 @@ import { describe, it } from 'node:test'
 import type { BindingPlan, Capability, ResolvedBinding } from '../core/binding/types.ts'
 import { undeclaredBindings, workItemGap, workItemRoles } from '../composition/runtime.ts'
 import { addressableHere, MANAGED_EXTERNAL_ACTIONS } from '../ports/scm.ts'
+import { composeBindings } from '../composition/registry.ts'
 
 const CODE: readonly Capability[] = [
   'observe.delta',
@@ -134,5 +135,46 @@ describe('C-10 — dead-end 는 이 workspace 가 실제로 쓰는 것만 센다
     for (const name of ['gitlab', 'github', 'jam']) {
       assert.doesNotMatch(predicate, new RegExp(`'${name}'`), `${name} 이 판정 안에 박혀 있다`)
     }
+  })
+})
+
+describe('조립은 값을 치를 이유가 있을 때만 밖에 묻는다 (0.8.4)', () => {
+  // 실측: 도구 하나의 "설치돼 있는가" 를 묻는 데 외부 프로세스가 떴고 한 번에 9초였다.
+  // 그것을 adapter 마다 무조건 물어서, 그 도구와 아무 상관없는 저장소의 모든 명령이
+  // 18초를 냈다. Windows CI 의 한 시험이 60초 상한을 넘긴 것도 여기서 왔다.
+  function tool(candidates: number, asked: { count: number }) {
+    return {
+      describe: () => ({ id: 'tool', version: '1', provides: [] as never[] }),
+      discover: async () =>
+        Array.from({ length: candidates }, () => ({ adapterId: 'tool', resource: 'R', provides: [] as never[] })),
+      probe: async () => ({ state: 'AVAILABLE' as const }),
+      runtime: async () => {
+        asked.count += 1
+        return { state: 'AVAILABLE' as const }
+      },
+    }
+  }
+
+  it('후보가 없으면 도구 상태를 묻지 않는다', async () => {
+    const asked = { count: 0 }
+    await composeBindings({ context: { projectRoot: '/x', env: {} }, adapters: [tool(0, asked)] })
+    assert.equal(asked.count, 0, '쓰지 않는 도구의 설치 상태에 외부 프로세스를 쓰지 않는다')
+  })
+
+  it('후보가 있으면 묻는다 — 그때는 값을 치를 이유가 있다', async () => {
+    const asked = { count: 0 }
+    await composeBindings({ context: { projectRoot: '/x', env: {} }, adapters: [tool(1, asked)] })
+    assert.equal(asked.count, 1)
+  })
+
+  it('setup 처럼 그 사실이 필요한 화면은 켜서 받는다', async () => {
+    const asked = { count: 0 }
+    const plan = await composeBindings({
+      context: { projectRoot: '/x', env: {} },
+      adapters: [tool(0, asked)],
+      includeRuntimes: true,
+    })
+    assert.equal(asked.count, 1, '"설치할 일" 과 "붙일 일" 을 가르는 화면은 여전히 물어야 한다')
+    assert.equal(plan.runtimes?.length, 1)
   })
 })
