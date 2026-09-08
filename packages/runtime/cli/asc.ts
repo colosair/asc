@@ -57,7 +57,8 @@ import {
 import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claude-code/binding.ts'
 import { readHeartbeat } from '../adapters/claude-code/observer.ts'
 import { judgePhysicalId, observedRunId } from '../adapters/claude-code/identity.ts'
-import { judgeReconcile, type OriginObservation } from '../core/approval/reconcile.ts'
+import { judgeReconcile, readOrigin, type OriginObservation } from '../core/approval/reconcile.ts'
+import type { ResourceContextPort } from '../ports/resource-context.ts'
 import { FORBIDDEN_COMMAND_PATTERNS, workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
 import { applyHostReport, assessReadiness, probe, type CapabilityName } from '../adapters/claude-code/probe.ts'
 import {
@@ -4780,8 +4781,10 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
   // 밖을 읽을 수 있는가 · 밖에 쓸 수 있는가. 두 답 모두 조립 결과에서 나온다.
   const ports = root ? await composedPorts(runtime).catch(() => null) : null
+  const channels = root ? await composedReadChannels(runtime).catch(() => null) : null
   const external = {
-    read: ports?.eventSource?.id ?? ports?.inventory?.id ?? null,
+    // 관측은 여러 채널이다. 하나로 접으면 둘 중 하나가 조용히 사라진다.
+    read: channels && channels.ids.length > 0 ? channels.ids.join(', ') : (ports?.eventSource?.id ?? ports?.inventory?.id ?? null),
     write: ports?.scm
       ? {
           id: ports.scm.id,
@@ -4791,7 +4794,13 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
           verifiable: MANAGED_EXTERNAL_ACTIONS.filter((action) => ports.scm!.verifies?.(action) ?? false),
         }
       : null,
-    unavailable: ports?.unavailable ?? [],
+    // 채널이 실제로 서 있으면 단일 Port 해석의 모호함은 이 화면의 사실이 아니다.
+    unavailable: [
+      ...(ports?.unavailable ?? []).filter(
+        (line) => !(channels && channels.ids.length > 0 && /^(observe\.delta|inventory\.enumerate)/.test(line)),
+      ),
+      ...(channels?.unavailable ?? []),
+    ],
     // 축이 READY 여도 개별 행위는 나갈 길이 없을 수 있다 — 그 목록.
     deadEnd: deadEndActions(ports?.scm ?? null, deadEndScope(runtime)),
   }
@@ -7212,7 +7221,12 @@ async function composedPorts(runtime?: ResolvedRuntime): Promise<Awaited<ReturnT
   })
   const ports = await buildRuntimePorts({
     plan,
-    roles: rolesFor(plan, declared),
+    // **작업 항목을 누구에게 물을지까지 정한다** (0.8.4). `rolesFor` 만 쓰면 code 와 work 가
+    // 둘 다 자원 조회를 제공하는 순간 아무 역할도 서지 않고, 선언해 둔 work 결합이 있는데도
+    // "후보가 둘 이상이라 고르지 않았다" 가 된다 — 실기계에서 jam 을 선언하자마자 그렇게
+    // 됐다. work ingress 는 이미 이렇게 하고 있었고, 여기만 빠져 있었다.
+    roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
+    ...jamComposition(projectRoot),
     repoRoot: projectRoot,
     ...(runtime?.layers.profile.canonical.sources
       ? {
@@ -7253,9 +7267,14 @@ async function reconcileInbox(
   )
   if (pending.length === 0) return { checked: 0, obsoleted: [], unreadable: [] }
 
-  const ports = await composedPorts(resolved).catch(() => null)
-  const context = ports?.resourceContext
-  if (!context) {
+  // **읽을 수 있는 통로를 전부 쓴다** (0.8.4).
+  //
+  // 요청의 참조가 어느 provider 의 것인지 Core 도 CLI 도 알지 못한다 — 그리고 알아서도
+  // 안 된다. 그래서 하나를 골라 묻지 않고, 이 workspace 가 가진 읽기 통로에 차례로 묻고
+  // 처음으로 실물을 돌려주는 답을 쓴다. 작업 항목 통로 하나만 쓰던 동안 GitLab 참조는
+  // 전부 "읽지 못했다" 로 떨어졌다 — 통로는 있었는데 엉뚱한 통로였다.
+  const readers = await inboxReaders(resolved)
+  if (readers.length === 0) {
     return {
       checked: 0,
       obsoleted: [],
@@ -7274,14 +7293,7 @@ async function reconcileInbox(
     const reference = request.source.reference
     let origin = seen.get(reference)
     if (!origin) {
-      origin = await context
-        .getResource(reference)
-        .then((snapshot) => ({ kind: 'READ', snapshot, at }) as OriginObservation)
-        .catch((error: unknown) => ({
-          kind: 'UNREADABLE',
-          detail: `${reference}: ${error instanceof Error ? error.message : String(error)}`,
-          at,
-        }) as OriginObservation)
+      origin = await readOrigin(readers, reference, at)
       seen.set(reference, origin)
     }
     const verdict = judgeReconcile(request, origin)
@@ -7307,6 +7319,35 @@ async function reconcileInbox(
   }
 
   return { checked: pending.length, obsoleted, unreadable }
+}
+
+/** 이 workspace 가 밖을 읽는 통로 전부. 관측 채널이 먼저고, 조립된 단일 통로가 뒤를 받친다. */
+async function inboxReaders(resolved?: ResolvedRuntime): Promise<ResourceContextPort[]> {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const adapters = monitorAdapters()
+  const declared = resolved?.layers.profile.bindings ?? []
+  const readers: ResourceContextPort[] = []
+  try {
+    const plan = await composeBindings({
+      context: { projectRoot, env: process.env },
+      adapters,
+      roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+    })
+    const built = await buildObservationChannels({
+      plan,
+      roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
+      ...jamComposition(projectRoot),
+      endpointFor: (binding) => endpointOf(adapters, binding),
+    })
+    for (const channel of built.channels) if (channel.resourceContext) readers.push(channel.resourceContext)
+  } catch {
+    // 채널을 못 세워도 아래 단일 통로가 남는다.
+  }
+  const single = await composedPorts(resolved)
+    .then((ports) => ports.resourceContext)
+    .catch(() => undefined)
+  if (single && !readers.some((reader) => reader.id === single.id)) readers.push(single)
+  return readers
 }
 
 /** 사람이 읽는 대조 결과. **조용히 끝내지 않는다** — 못 읽은 것이 있으면 그것부터 말한다. */
@@ -7355,6 +7396,32 @@ async function bindingSurvey(runtime?: ResolvedRuntime): Promise<{
 /** Profile 에 그대로 넣을 한 줄. 사람이 형식을 외우지 않게 한다. */
 function declarationLine(binding: UndeclaredBinding): string {
   return `{ "role": "${binding.declaration.role}", "adapter": "${binding.declaration.adapter}", "resource": "${binding.declaration.resource}" }`
+}
+
+/**
+ * 밖을 읽는 통로들 — **복수다** (설계 §8).
+ *
+ * 코드가 한 곳에 있고 작업 항목이 다른 곳에 있는 프로젝트에서 둘 다 보는 것은 요구이지
+ * 모호함이 아니다. 그런데 status 는 오래 단일 Port 로만 물었고, work 결합을 선언하는
+ * 순간 `observe.delta` 가 AMBIGUOUS 로 떨어져 화면이 "none assembled" 라고 말했다 —
+ * 감시는 그때도 두 채널로 돌고 있었다.
+ */
+async function composedReadChannels(runtime?: ResolvedRuntime): Promise<{ ids: string[]; unavailable: string[] }> {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const adapters = monitorAdapters()
+  const declared = runtime?.layers.profile.bindings ?? []
+  const plan = await composeBindings({
+    context: { projectRoot, env: process.env },
+    adapters,
+    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+  })
+  const built = await buildObservationChannels({
+    plan,
+    roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
+    ...jamComposition(projectRoot),
+    endpointFor: (binding) => endpointOf(adapters, binding),
+  })
+  return { ids: built.channels.map((channel) => channel.eventSource.id), unavailable: built.unavailable }
 }
 
 /** `owner/repo#19` 에서 저장소만. 짧은 참조를 풀 때 쓴다. */

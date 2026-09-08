@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import { MarkdownStateStore } from '../adapters/markdown/state-store.ts'
@@ -24,10 +24,11 @@ const CLI = fileURLToPath(new URL('../cli/asc.ts', import.meta.url))
  * 자식 프로세스의 것이라 console 을 가로채도 잡히지 않는다. 사람이 겪는 것과 같은 형태로
  * 부르는 편이 검사도 정확하다.
  */
-async function run(argv: string[]): Promise<Captured> {
+async function run(argv: string[], options: { cwd?: string } = {}): Promise<Captured> {
   const child = spawnSync(process.execPath, ['--experimental-strip-types', CLI, ...argv], {
     encoding: 'utf8',
     timeout: 60_000,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
   })
   return { code: child.status ?? 1, out: (child.stdout ?? '').trim(), err: child.stderr ?? '' }
 }
@@ -144,7 +145,12 @@ describe('Execution Mode — 명령 표면 (§10·§11·§12)', () => {
     await run(['mode', 'manual', '--json', '--root', root])
 
     // 이 임시 뿌리에는 승인 권한자도 외부 통로도 없다 — readiness 가 설 수 없는 자리다.
-    const raised = await run(['mode', 'auto', '--json', '--root', root])
+    //
+    // **cwd 도 그 임시 자리로 옮긴다.** 조립은 `--root` 가 아니라 cwd 의 저장소에서 결합을
+    // 발견하므로, 이 저장소 안에서 돌리면 개발자 기계의 원격이 executor 로 서고 이 시험은
+    // "나갈 길이 없다" 를 재현하지 못한다. 예전에는 host 통합이 낡아 있어서 guard 축이
+    // 대신 막아 주었을 뿐이다 — 시험이 기계 상태에 기대고 있었다.
+    const raised = await run(['mode', 'auto', '--json', '--root', root], { cwd: dirname(root) })
     assert.equal(raised.code, 1)
     const verdict = JSON.parse(raised.out) as { mode: string; applied: boolean; autoReadiness: { ready: boolean } }
     assert.equal(verdict.applied, false)

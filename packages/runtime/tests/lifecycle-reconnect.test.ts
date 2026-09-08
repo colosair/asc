@@ -8,7 +8,7 @@ import { describe, it } from 'node:test'
 
 import { ApprovalRequest } from '../core/model/entities.ts'
 import { transitionRequest, TransitionError } from '../core/model/transitions.ts'
-import { decisionSubject, judgeReconcile, supersedes } from '../core/approval/reconcile.ts'
+import { decisionSubject, judgeReconcile, readOrigin, supersedes } from '../core/approval/reconcile.ts'
 import { evaluateHealth, observationState } from '../core/monitor/health-alerts.ts'
 import { judgePhysicalId } from '../adapters/claude-code/identity.ts'
 import type { ResourceSnapshot } from '../ports/resource-context.ts'
@@ -251,5 +251,46 @@ describe('C-8 — 결합이 가리키는 것과 Guard 가 찾는 것이 같다',
     const verdict = judgePhysicalId({ provided: 'claude-main' })
     assert.equal(verdict.ok, false)
     assert.equal(verdict.ok === false && verdict.reason, 'NOT_A_RUN_ID')
+  })
+})
+
+describe('C-3 — 한 통로가 모른다고 원본이 없는 것은 아니다', () => {
+  // 실기계: 작업 항목 통로를 선언한 순간 자원 조회가 그쪽으로 넘어갔고, 코드 저장소의
+  // 이슈 참조는 전부 "읽지 못했다" 로 떨어졌다. 통로는 있었는데 엉뚱한 통로에게만 물었다.
+  const reader = (id: string, answer: () => Promise<ResourceSnapshot>) => ({ id, getResource: answer })
+
+  it('처음으로 실물을 돌려주는 통로를 쓴다', async () => {
+    const origin = await readOrigin(
+      [
+        reader('tracker', async () => ({ ...snapshot(), missing: true })),
+        reader('code', async () => snapshot({ state: 'closed', settled: true })),
+      ],
+      'group/project#122',
+      AT,
+    )
+    assert.equal(origin.kind, 'READ')
+    assert.equal(origin.kind === 'READ' && origin.snapshot.settled, true)
+  })
+
+  it('전부 실패했을 때만 못 읽었다고 말한다', async () => {
+    const origin = await readOrigin(
+      [
+        reader('tracker', async () => ({ ...snapshot(), missing: true })),
+        reader('code', async () => {
+          throw new Error('401')
+        }),
+      ],
+      'group/project#122',
+      AT,
+    )
+    assert.equal(origin.kind, 'UNREADABLE')
+    assert.match(origin.kind === 'UNREADABLE' ? origin.detail : '', /tracker/)
+    assert.match(origin.kind === 'UNREADABLE' ? origin.detail : '', /401/, '어느 통로가 왜 실패했는지 남는다')
+  })
+
+  it('통로가 하나도 없으면 그렇게 말한다', async () => {
+    const origin = await readOrigin([], 'group/project#122', AT)
+    assert.equal(origin.kind, 'UNREADABLE')
+    assert.match(origin.kind === 'UNREADABLE' ? origin.detail : '', /읽을 통로가 없다/)
   })
 })

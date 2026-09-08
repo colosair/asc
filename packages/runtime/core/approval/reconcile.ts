@@ -128,3 +128,31 @@ export function awaitsPerson(status: ApprovalRequest['status']): boolean {
 }
 
 export type { Priority }
+
+/**
+ * 참조 하나를 읽는다 — **가진 통로 전부에게 물어서**.
+ *
+ * 요청의 참조가 어느 provider 의 것인지 Core 는 모르고, 알아서도 안 된다. 그래서 하나를
+ * 골라 묻지 않는다. 처음으로 실물을 돌려주는 답을 쓰고, **전부 실패했을 때만** 못 읽었다고
+ * 말한다 — 한 통로가 모른다는 것은 원본이 없다는 뜻이 아니다.
+ *
+ * 실기계에서 이 구분이 없어 이렇게 났다: 작업 항목 통로를 선언한 순간 자원 조회가 그쪽으로
+ * 넘어갔고, 코드 저장소의 이슈 참조는 전부 "읽지 못했다" 로 떨어졌다. 통로는 있었는데
+ * 엉뚱한 통로에게만 물은 것이다.
+ */
+export async function readOrigin(
+  readers: readonly { id: string; getResource: (reference: string) => Promise<ResourceSnapshot> }[],
+  reference: string,
+  at: string,
+): Promise<OriginObservation> {
+  const failures: string[] = []
+  for (const reader of readers) {
+    const snapshot = await reader.getResource(reference).catch((error: unknown) => {
+      failures.push(`${reader.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return null
+    })
+    if (snapshot && !snapshot.missing) return { kind: 'READ', snapshot, at }
+    if (snapshot?.missing) failures.push(`${reader.id}: 이 통로에는 없다`)
+  }
+  return { kind: 'UNREADABLE', detail: `${reference} — ${failures.join(' / ') || '읽을 통로가 없다'}`, at }
+}
