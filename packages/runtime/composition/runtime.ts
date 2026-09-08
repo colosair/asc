@@ -269,6 +269,87 @@ export function rolesFor(
 }
 
 /**
+ * 발견됐는데 **선언되지 않은** 결합 (0.8.4 · C-2).
+ *
+ * 이 workspace 에서 실제로 이랬다: 저장소에 `.jira-agent/project.yaml` 이 있고 JAM 이
+ * AVAILABLE 로 발견되며 작업 항목 통로에 필요한 capability 를 정확히 갖추고 있는데,
+ * Profile 이 그것을 선언하지 않았다는 이유로 **어느 화면에도 나오지 않았다.** AVAILABLE
+ * 도 UNAVAILABLE 도 아닌 침묵이다. 그래서 `asc work start <JIRA-KEY>` 는 언제나
+ * "미확인 work-item" 으로 끝났고, 사람은 무엇을 붙여야 하는지 알 방법이 없었다.
+ *
+ * **자동으로 승격하지 않는다.** 발견은 후보이지 결합이 아니라는 규칙(C-11 §7)은 그대로다.
+ * 여기서 하는 일은 하나뿐이다 — 있는 것을 있다고 말하고, 붙이는 방법을 함께 준다.
+ */
+export type UndeclaredBinding = {
+  adapterId: string
+  resource: string
+  state: ResolvedBinding['state']
+  provides: readonly Capability[]
+  discoveredBy?: string
+  /** 지금 못 쓰는 이유. 상태만 주면 고칠 수가 없다. */
+  detail?: string
+  /**
+   * 이 후보의 capability 모양이 어느 자리에 맞는가. **provider 이름으로 가르지 않는다** —
+   * 작업 항목 통로는 목록과 자원을 알고 변경을 모르고, 코드 통로는 변경을 안다
+   * (workItemRoles 가 쓰는 것과 같은 기준이다).
+   */
+  shape: 'work-item' | 'code' | 'other'
+  /** Profile 에 그대로 넣을 수 있는 한 줄. 사람이 형식을 외우지 않게 한다. */
+  declaration: { role: string; adapter: string; resource: string }
+}
+
+const SHAPE_ROLE: Record<UndeclaredBinding['shape'], string> = {
+  'work-item': 'work',
+  code: 'code-primary',
+  other: 'secondary',
+}
+
+export function undeclaredBindings(
+  plan: BindingPlan,
+  declared: readonly { role: string; adapter: string; resource: string }[],
+): UndeclaredBinding[] {
+  // **쓸 수 있는 것만 싣지 않는다.** 지금 못 쓰는 것을 빼면 그것이 곧 그 침묵이다 —
+  // 실기계에서 JAM 이 UNCONFIGURED 로 떨어졌고, 쓸 수 있는 것만 보여 주던 동안 화면은
+  // 그 사실을 한 번도 말하지 않았다. 못 쓰는 이유는 사람이 고칠 수 있는 것이다.
+  return plan.bindings
+    .filter((binding) => !declared.some((d) => d.adapter === binding.adapterId && d.resource === binding.resource))
+    .map((binding) => {
+      const shape: UndeclaredBinding['shape'] =
+        binding.provides.includes('context.resource') &&
+        binding.provides.includes('inventory.enumerate') &&
+        !binding.provides.includes('context.change')
+          ? 'work-item'
+          : binding.provides.includes('context.change')
+            ? 'code'
+            : 'other'
+      return {
+        adapterId: binding.adapterId,
+        resource: binding.resource,
+        state: binding.state,
+        provides: binding.provides,
+        ...(binding.discoveredBy ? { discoveredBy: binding.discoveredBy } : {}),
+        ...(binding.detail ? { detail: binding.detail } : {}),
+        shape,
+        declaration: { role: SHAPE_ROLE[shape], adapter: binding.adapterId, resource: binding.resource },
+      }
+    })
+}
+
+/**
+ * 작업 항목 통로가 **누구에게도 배정되지 않았는가**, 그리고 배정할 수 있는 후보가 있는가.
+ *
+ * `workItemRoles` 가 빈 객체를 돌려준다는 사실만으로는 사람이 할 일을 알 수 없다 — 후보가
+ * 없는 것과 선언이 없는 것은 다른 문제이고, 뒤엣것은 한 줄로 고쳐진다.
+ */
+export function workItemGap(
+  plan: BindingPlan,
+  declared: readonly { role: string; adapter: string; resource: string }[],
+): { assigned: boolean; candidates: UndeclaredBinding[] } {
+  const assigned = Object.keys(workItemRoles(plan, declared)).length > 0
+  return { assigned, candidates: undeclaredBindings(plan, declared).filter((b) => b.shape === 'work-item') }
+}
+
+/**
  * 관측 capability — 이 셋은 **하나를 고르는 문제가 아니다** (설계 §8).
  *
  * 코드가 GitLab 에 있고 작업 항목이 Jira 에 있는 프로젝트에서 둘 다 봐야 한다는 것은

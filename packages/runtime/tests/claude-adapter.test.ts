@@ -946,7 +946,10 @@ describe('F6 — 일이 시작되면 논리 세션 안에서 시작된다', () =
   it('S6 — MANUAL 은 아무것도 hard-block 하지 않는다 (0.8.0 Axis C)', () => {
     // 막는 판정 전체가 AUTO 블록 안에 있다. MANUAL 에서는 그 문이 서지 않는다.
     // 0.8.0 보정 P0-1 — 세 자리를 가른다: 고르지 않음 / 고른 값 / 읽지 못함.
-    assert.match(script, /const state = executionState\(ascRoot\)/)
+    // 0.8.4 — 이 Run 의 답을 먼저 본다. 값이 workspace 에만 있으면 한 Run 의 결정이
+    // 다른 Run 의 집행 강도를 바꾼다.
+    assert.match(script, /const state = executionState\(ascRoot, observedSessionId\)/)
+    assert.match(script, /record\.runs \? record\.runs\[runId\] : undefined/)
     assert.match(script, /if \(state\.enforcement === 'ADVISE'\) \{/)
     assert.match(script, /if \(state\.degraded\) \{/)
     assert.match(script, /if \(state\.mode === 'AUTO'\) \{/)

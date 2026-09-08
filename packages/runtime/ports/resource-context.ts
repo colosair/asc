@@ -43,6 +43,18 @@ export type ResourceSnapshot = {
   blockedBy?: readonly string[]
   /** 사라졌거나 접근할 수 없다. 없는 것과 못 읽는 것을 구분해야 판정이 성립한다. */
   missing?: boolean
+  /**
+   * 이 리소스가 **자기 수명에서 끝났는가** — 닫힘·병합·해결 (0.8.4).
+   *
+   * `state` 는 provider 의 낱말이라 Core 가 읽을 수 없다 ('closed' · 'merged' · 'Done' ·
+   * '완료' 는 서로 다른 어휘다). 그 번역은 adapter 만 할 수 있고, Core 는 이 한 칸으로
+   * 묻는다. **모르면 비워 둔다** — false 로 적으면 "열려 있다"는 주장이 되고, 그것은
+   * 관측이 아니라 추측이다.
+   *
+   * 이것이 "내 일이 끝났다"는 뜻은 아니다. 이 스레드가 더 이상 사람의 결정을 기다리지
+   * 않는다는 사실 하나뿐이다.
+   */
+  settled?: boolean
 }
 
 export type CommentQuery = {

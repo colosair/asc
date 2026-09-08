@@ -16,7 +16,13 @@ import { describe, it } from 'node:test'
 
 import { hookScript } from '../adapters/claude-code/guard.ts'
 import { MemoryStateStore } from '../adapters/memory/state-store.ts'
-import { enforcementOf, readExecutionMode, writeExecutionMode } from '../core/policy/execution-mode.ts'
+import {
+  clearExecutionModeForRun,
+  enforcementOf,
+  readExecutionMode,
+  resolveExecutionMode,
+  writeExecutionMode,
+} from '../core/policy/execution-mode.ts'
 import { tempDir } from './support/temp.ts'
 
 const NOW = '2026-09-07T12:00:00+09:00'
@@ -288,4 +294,110 @@ describe('mode 판정 두 구현이 같은 답을 낸다', () => {
       assert.equal(hook, core, `hook=${hook} core=${core} — 두 구현이 갈렸다`)
     })
   }
+})
+
+describe('0.8.4 — Execution Mode 는 Run 이 답한다', () => {
+  // 실기계에서 이렇게 났다: 관제 세션이 자기 인수 시험을 위해 `asc mode manual` 을 쳤고,
+  // 그 순간 같은 workspace 에서 12시간째 AUTO 로 돌던 다른 Run 의 강제가 풀렸다. 그 Run 은
+  // 자기가 내리지 않은 변화를 세 시간 뒤에야 알았다. 값이 workspace 에만 있었기 때문이다.
+
+  async function project(record: unknown): Promise<string> {
+    const root = await tempDir('asc-runscope-')
+    const asc = join(root, '.asc')
+    await mkdir(join(asc, 'adapters', 'claude-code'), { recursive: true })
+    await mkdir(join(asc, 'adapters', 'policy'), { recursive: true })
+    for (const run of ['run-a', 'run-b']) {
+      await writeFile(
+        join(asc, 'adapters', 'claude-code', `runtime-binding-${run}.json`),
+        JSON.stringify({
+          key: `runtime-binding:${run}`,
+          value: JSON.stringify({
+            logicalSessionId: `S-2026-${run}`,
+            provider: 'claude-code',
+            physicalSessionId: run,
+            updatedAt: NOW,
+          }),
+        }),
+        'utf8',
+      )
+    }
+    await writeFile(
+      join(asc, 'adapters', 'policy', 'execution-mode.json'),
+      JSON.stringify({ key: 'execution-mode', value: JSON.stringify(record) }),
+      'utf8',
+    )
+    return root
+  }
+
+  async function hook(cwd: string, sessionId: string, command: string): Promise<number> {
+    const dir = await tempDir('asc-runscope-hook-')
+    const script = join(dir, 'guard-hook.mjs')
+    await writeFile(script, hookScript(), 'utf8')
+    const child = spawnSync(process.execPath, [script], {
+      input: JSON.stringify({ tool_name: 'Bash', session_id: sessionId, cwd, tool_input: { command } }),
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+    return child.status ?? 1
+  }
+
+  it('한 Run 이 내려가도 다른 Run 의 강제는 그대로다', async () => {
+    const cwd = await project({
+      mode: 'AUTO',
+      since: NOW,
+      runs: { 'run-a': { mode: 'MANUAL', since: NOW, by: 'colosair', reason: 'acceptance' } },
+    })
+    assert.equal(await hook(cwd, 'run-a', 'git push origin main'), 0, '자기 답이 MANUAL 인 Run 은 통과한다')
+    assert.equal(await hook(cwd, 'run-b', 'git push origin main'), 2, '다른 Run 은 workspace 의 AUTO 그대로다')
+  })
+
+  it('workspace 값을 바꿔도 자기 답을 가진 Run 은 자기 답을 쓴다', async () => {
+    const scope = new MemoryStateStore().scope('policy')
+    await writeExecutionMode(scope, 'AUTO', 'colosair', NOW)
+    await writeExecutionMode(scope, 'MANUAL', 'colosair', NOW, { id: 'run-a', reason: 'acceptance' })
+    await writeExecutionMode(scope, 'MANUAL', 'colosair', NOW)
+
+    const own = await readExecutionMode(scope, 'run-a')
+    assert.equal(own.mode, 'MANUAL')
+    assert.equal(own.decidedFor, 'run')
+    assert.equal(own.reason, 'acceptance')
+
+    await writeExecutionMode(scope, 'AUTO', 'colosair', NOW)
+    const stillOwn = await readExecutionMode(scope, 'run-a')
+    assert.equal(stillOwn.mode, 'MANUAL', 'workspace 가 AUTO 로 올라가도 이 Run 의 답은 그대로다')
+    const other = await readExecutionMode(scope, 'run-b')
+    assert.equal(other.mode, 'AUTO')
+    assert.equal(other.decidedFor, 'workspace')
+    assert.equal(other.runOverrides, 1, '자기 답을 가진 Run 이 있다는 사실이 화면에 남는다')
+  })
+
+  it('지우면 workspace 값으로 돌아간다', async () => {
+    const scope = new MemoryStateStore().scope('policy')
+    await writeExecutionMode(scope, 'AUTO', 'colosair', NOW)
+    await writeExecutionMode(scope, 'MANUAL', 'colosair', NOW, { id: 'run-a' })
+    assert.equal(await clearExecutionModeForRun(scope, 'run-a'), true)
+    assert.equal((await readExecutionMode(scope, 'run-a')).mode, 'AUTO')
+    assert.equal(await clearExecutionModeForRun(scope, 'run-a'), false, '없던 것을 지웠다고 말하지 않는다')
+  })
+
+  it('두 구현이 Run 축에서도 같은 답을 낸다', async () => {
+    const record = {
+      mode: 'AUTO' as const,
+      since: NOW,
+      runs: { 'run-a': { mode: 'MANUAL' as const, since: NOW } },
+    }
+    const cwd = await project(record)
+    for (const [runId, expected] of [
+      ['run-a', 'ADVISE'],
+      ['run-b', 'ENFORCE'],
+    ] as const) {
+      const blocked = (await hook(cwd, runId, 'git push origin main')) === 2
+      assert.equal(
+        blocked ? 'ENFORCE' : 'ADVISE',
+        expected,
+        `${runId}: hook 과 core 의 판정이 갈리면 화면과 차단이 서로 다른 말을 한다`,
+      )
+      assert.equal(enforcementOf(resolveExecutionMode(record, runId)), expected)
+    }
+  })
 })

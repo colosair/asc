@@ -29,12 +29,40 @@ export type ExecutionMode = z.infer<typeof ExecutionMode>
 /** policy scope 안의 키. freeze 정책이 사는 그 자리다 — 새 저장소를 만들지 않는다. */
 export const EXECUTION_MODE_KEY = 'execution-mode'
 
+/**
+ * 한 Run 만의 답 (0.8.4).
+ *
+ * mode 가 묻는 것은 "결정된 행위를 **누가** 실행하는가" 이고, 실행하는 것은 workspace 가
+ * 아니라 Run 이다. 그런데 값이 workspace 에만 있으면, 같은 workspace 에서 도는 두 Run 이
+ * 서로의 집행 강도를 바꾼다 — 실기계에서 한 Run 의 인수 시험이 다른 Run 의 12시간짜리
+ * AUTO 를 말없이 내렸다. 그 Run 은 자기가 내리지 않은 변화를 세 시간 뒤에야 알았다.
+ *
+ * 그래서 Run 이 자기 답을 가질 수 있게 한다. **축을 늘리는 것이 아니다** — 값은 여전히
+ * MANUAL·AUTO 둘이고, 달라지는 것은 그 값을 누구에게 묻느냐다. Run 의 답이 없으면
+ * workspace 값이 그 Run 의 답이다.
+ */
+export const ExecutionModeForRun = z.object({
+  mode: ExecutionMode,
+  since: z.string().optional(),
+  by: z.string().optional(),
+  /** 왜 이 Run 만 다른가. 화면이 "누가 내렸나" 뿐 아니라 "왜" 도 말할 수 있게. */
+  reason: z.string().optional(),
+})
+export type ExecutionModeForRun = z.infer<typeof ExecutionModeForRun>
+
 export const ExecutionModeRecord = z.object({
   mode: ExecutionMode,
   /** 언제 정해졌는가. 기록이 없는 workspace 와 명시적으로 정한 workspace 를 가른다. */
   since: z.string().optional(),
   /** 누가 정했는가. AUTO→MANUAL 은 Controller 권한이 필요하다 (§11). */
   by: z.string().optional(),
+  /**
+   * physical Run id → 그 Run 만의 답. 없으면 위의 workspace 값이 답이다.
+   *
+   * 키가 Run id 인 이유: guard 가 실제로 손에 쥐는 값이 그것뿐이다. 논리 세션으로 키를
+   * 잡으면 hook 이 결합을 한 번 더 뒤져야 하고, 결합이 없는 Run 은 자기 답을 가질 수 없다.
+   */
+  runs: z.record(z.string(), ExecutionModeForRun).optional(),
 })
 export type ExecutionModeRecord = z.infer<typeof ExecutionModeRecord>
 
@@ -61,6 +89,19 @@ export type ExecutionModeState = {
   since?: string
   by?: string
   degraded?: ModeStateProblem
+  /**
+   * 이 답을 누가 냈는가 — workspace 의 기본값인가, 이 Run 만의 값인가.
+   *
+   * 화면이 이것을 말하지 않으면 사람은 자기가 고르지 않은 값을 자기 것으로 읽는다.
+   * 읽지 못한 자리에서는 없다.
+   */
+  decidedFor?: 'workspace' | 'run'
+  /** decidedFor 가 'run' 일 때 그 Run 의 physical id. */
+  runId?: string
+  /** 이 Run 만 다른 이유. run 값에만 있다. */
+  reason?: string
+  /** 이 workspace 에서 자기 답을 가진 Run 의 수. 0 이면 전부 workspace 값을 쓴다. */
+  runOverrides?: number
 }
 
 /**
@@ -85,7 +126,13 @@ export function modeLine(state: ExecutionModeState): string {
       ? 'Execution Mode: unreadable — the stored record is not valid. Raw external writes stay blocked until it is fixed.'
       : 'Execution Mode: unreadable — the stored record could not be read. Raw external writes stay blocked until it is fixed.'
   }
-  return `Execution Mode: ${state.mode}${state.chosen ? '' : ' (never chosen — nothing is being enforced)'}`
+  const scope =
+    state.decidedFor === 'run'
+      ? ' (this run only)'
+      : state.runOverrides
+        ? ` (workspace default — ${state.runOverrides} run(s) answer for themselves)`
+        : ''
+  return `Execution Mode: ${state.mode}${state.chosen ? '' : ' (never chosen — nothing is being enforced)'}${scope}`
 }
 
 /**
@@ -107,7 +154,11 @@ export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'MANUAL'
  * 없으면 아무도 고르지 않은 것이고, 못 읽으면 무엇이 저장돼 있었는지 모르는 것이다.
  * 뒤엣것을 MANUAL 로 적는 순간 저장된 AUTO 가 파일 하나로 풀린다.
  */
-export async function readExecutionMode(scope: ScopedStore): Promise<ExecutionModeState> {
+export async function readExecutionMode(
+  scope: ScopedStore,
+  /** 묻는 Run. 주면 그 Run 의 답을 먼저 본다. 없으면 workspace 값이 답이다. */
+  runId?: string,
+): Promise<ExecutionModeState> {
   let raw: string | null
   try {
     raw = await scope.get(EXECUTION_MODE_KEY)
@@ -116,9 +167,40 @@ export async function readExecutionMode(scope: ScopedStore): Promise<ExecutionMo
   }
   if (raw === null) return { mode: DEFAULT_EXECUTION_MODE, chosen: false }
   try {
-    return { ...ExecutionModeRecord.parse(JSON.parse(raw)), chosen: true }
+    return resolveExecutionMode(ExecutionModeRecord.parse(JSON.parse(raw)), runId)
   } catch {
     return { chosen: true, degraded: 'MODE_STATE_INVALID' }
+  }
+}
+
+/**
+ * 기록 하나를 특정 Run 의 답으로 푼다.
+ *
+ * **workspace 값을 지우지 않는다.** Run 의 답은 그 Run 에만 서고, 나머지 Run 은 그대로
+ * workspace 값을 쓴다. 그래서 한 Run 의 시험이 다른 Run 의 강도를 바꿀 수 없다.
+ */
+export function resolveExecutionMode(record: ExecutionModeRecord, runId?: string): ExecutionModeState {
+  const runs = record.runs ?? {}
+  const overrides = Object.keys(runs).length
+  const own = runId ? runs[runId] : undefined
+  if (own) {
+    return {
+      mode: own.mode,
+      chosen: true,
+      decidedFor: 'run',
+      runId,
+      ...(own.since ? { since: own.since } : {}),
+      ...(own.by ? { by: own.by } : {}),
+      ...(own.reason ? { reason: own.reason } : {}),
+      ...(overrides > 0 ? { runOverrides: overrides } : {}),
+    }
+  }
+  const { runs: _runs, ...workspace } = record
+  return {
+    ...workspace,
+    chosen: true,
+    decidedFor: 'workspace',
+    ...(overrides > 0 ? { runOverrides: overrides } : {}),
   }
 }
 
@@ -127,10 +209,60 @@ export async function writeExecutionMode(
   mode: ExecutionMode,
   by: string | undefined,
   now: string = new Date().toISOString(),
+  /** 이 Run 에만 적용한다. 없으면 workspace 값을 바꾼다. */
+  run?: { id: string; reason?: string },
 ): Promise<ExecutionModeRecord> {
-  const record = ExecutionModeRecord.parse({ mode, since: now, ...(by ? { by } : {}) })
+  // 기존 기록을 먼저 읽는다 — 다른 Run 의 답을 덮어쓰지 않기 위해서다. 읽지 못하면
+  // 그 자리는 비어 있던 것으로 보고 새로 쓴다: 손상된 기록을 보존할 이유가 없다.
+  let current: ExecutionModeRecord | undefined
+  try {
+    const raw = await scope.get(EXECUTION_MODE_KEY)
+    if (raw !== null) current = ExecutionModeRecord.parse(JSON.parse(raw))
+  } catch {
+    current = undefined
+  }
+
+  const record = run
+    ? ExecutionModeRecord.parse({
+        mode: current?.mode ?? DEFAULT_EXECUTION_MODE,
+        ...(current?.since ? { since: current.since } : {}),
+        ...(current?.by ? { by: current.by } : {}),
+        runs: {
+          ...(current?.runs ?? {}),
+          [run.id]: { mode, since: now, ...(by ? { by } : {}), ...(run.reason ? { reason: run.reason } : {}) },
+        },
+      })
+    : ExecutionModeRecord.parse({
+        mode,
+        since: now,
+        ...(by ? { by } : {}),
+        // workspace 값을 바꿔도 Run 의 답은 그대로다. 자기 답을 가진 Run 은 자기 답을 쓴다.
+        ...(current?.runs && Object.keys(current.runs).length > 0 ? { runs: current.runs } : {}),
+      })
   await scope.set(EXECUTION_MODE_KEY, JSON.stringify(record))
   return record
+}
+
+/** 한 Run 의 답을 지운다. 지운 뒤 그 Run 은 workspace 값을 쓴다. */
+export async function clearExecutionModeForRun(scope: ScopedStore, runId: string): Promise<boolean> {
+  let current: ExecutionModeRecord
+  try {
+    const raw = await scope.get(EXECUTION_MODE_KEY)
+    if (raw === null) return false
+    current = ExecutionModeRecord.parse(JSON.parse(raw))
+  } catch {
+    return false
+  }
+  if (!current.runs || !(runId in current.runs)) return false
+  const { [runId]: _dropped, ...rest } = current.runs
+  const record = ExecutionModeRecord.parse({
+    mode: current.mode,
+    ...(current.since ? { since: current.since } : {}),
+    ...(current.by ? { by: current.by } : {}),
+    ...(Object.keys(rest).length > 0 ? { runs: rest } : {}),
+  })
+  await scope.set(EXECUTION_MODE_KEY, JSON.stringify(record))
+  return true
 }
 
 /**

@@ -335,7 +335,7 @@ ${logic}
  * 그러면 저장돼 있던 AUTO 가 파일 손상·권한·I/O 하나로 조용히 풀린다 (fail-open).
  * 여기서 강제한다고 해서 AUTO 라고 말하지는 않는다 — 화면에는 "읽지 못했다" 로 나간다.
  */
-function executionState(ascRoot) {
+function executionState(ascRoot, runId) {
   const file = join(ascRoot, 'adapters', 'policy', 'execution-mode.json')
   let raw
   try {
@@ -346,9 +346,19 @@ function executionState(ascRoot) {
     return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_UNREADABLE' }
   }
   try {
-    const mode = JSON.parse(JSON.parse(raw).value).mode
+    const record = JSON.parse(JSON.parse(raw).value)
+    // **이 Run 의 답이 먼저다** (0.8.4). 실행하는 것은 workspace 가 아니라 Run 이고,
+    // 자기 답이 없는 Run 만 workspace 값을 쓴다. 여기가 CLI 와 갈리면 화면과 차단이
+    // 서로 다른 말을 하게 되므로, 두 구현의 일치는 테스트로 고정돼 있다.
+    const own = runId && record.runs ? record.runs[runId] : undefined
+    const mode = own ? own.mode : record.mode
     if (mode !== 'AUTO' && mode !== 'MANUAL') return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_INVALID' }
-    return { enforcement: mode === 'AUTO' ? 'ENFORCE' : 'ADVISE', mode, chosen: true }
+    return {
+      enforcement: mode === 'AUTO' ? 'ENFORCE' : 'ADVISE',
+      mode,
+      chosen: true,
+      decidedFor: own ? 'run' : 'workspace',
+    }
   } catch {
     return { enforcement: 'ENFORCE', degraded: 'MODE_STATE_INVALID' }
   }
@@ -472,7 +482,7 @@ const ascRoot = registered ? registered.root : findAscRoot(cwd)
 if (!ascRoot) process.exit(0)
 
 const managed = findManaged(ascRoot, observedSessionId)
-const state = executionState(ascRoot)
+const state = executionState(ascRoot, observedSessionId)
 
 // 관찰은 차단과 섞이지 않는다 — 실패해도 아래 판정에 닿지 않고, 두 mode 모두에서 돈다.
 // 일을 관리하는 것(Agent Management)은 실행을 누가 하느냐(Execution Mode)와 다른 축이다.
@@ -554,7 +564,7 @@ if (state.mode === 'AUTO') {
         '  asc work start <WORK-KEY>                # 작업 항목이 있으면',
         '  asc work start                           # 이어갈 세션을 고르거나 계약을 제안받는다',
         '읽기·조회는 막지 않는다 — 막는 것은 관리 밖의 변경뿐이다.',
-        '자동 실행을 원하지 않으면: asc mode manual',
+        '이 Run 만 손으로 하려면: asc mode manual --this-run (workspace 의 다른 Run 은 그대로다)',
       ].join('\\n'),
     )
     process.exit(2)
@@ -572,7 +582,7 @@ if (state.mode === 'AUTO') {
           '  asc work start <WORK-KEY>                # 작업 항목이 있으면',
           '  asc work start                           # 이어갈 세션을 고르거나 계약을 제안받는다',
           '  asc host claude bind <S-ID> --physical ' + id,
-          '자동 실행을 원하지 않으면: asc mode manual',
+          '이 Run 만 손으로 하려면: asc mode manual --this-run (workspace 의 다른 Run 은 그대로다)',
         ].join('\\n'),
       )
       process.exit(2)

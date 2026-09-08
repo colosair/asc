@@ -242,7 +242,22 @@ export class JamAdapter implements Adapter {
     return this.#lastRemedy
   }
 
+  /**
+   * 이 인스턴스가 이미 물어본 진단. **한 회차 안에서 두 번 묻지 않는다** (0.8.4).
+   *
+   * `runtime()` 과 `probe()` 가 같은 것을 묻는데 각각 외부 프로세스를 띄웠다 — 실측으로
+   * 한 번에 9초, 그래서 이 도구를 쓰는 프로젝트의 모든 명령이 18초를 냈다. 조립 한 회차
+   * 안에서 도구의 설치 상태가 달라질 이유가 없으므로 그 회차 동안만 붙들어 둔다.
+   * 인스턴스가 사라지면 같이 사라진다 — 디스크에 남기지 않는다.
+   */
+  #statusOnce: Promise<RuntimeStatus> | null = null
+
   async #status(context: DiscoveryContext): Promise<RuntimeStatus> {
+    this.#statusOnce ??= this.#askStatus(context)
+    return this.#statusOnce
+  }
+
+  async #askStatus(context: DiscoveryContext): Promise<RuntimeStatus> {
     const read = this.#doctor ?? ((ctx: DiscoveryContext) => this.#defaultDoctor(ctx))
     const doctor = await read(context).catch((error: unknown) => ({ error: String(error) }) as JamDoctor)
 
