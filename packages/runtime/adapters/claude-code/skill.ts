@@ -36,10 +36,13 @@ description: >-
   Triggers — "start this work", "continue the ASC session", "publish it", "wrap it up",
   "proceed with ASC", "ASC로 진행해", "ASC 세션 이어서", "이거 작업해", "게시해",
   "마무리해", or the explicit /asc.
-  Also triggers on work-status questions in an ASC-attached project — "is this
-  implemented?", "what's left to do?", "what should I do now?", "현황 파악",
-  "이거 구현됐나", "남은 작업", "지금 뭐 해야 하나" — because answering those by
-  exploring the host directly skips ASC's freshness and evidence gates.
+  Also triggers on questions about a **work item** in an ASC-attached project — "is this
+  implemented?", "what's left on this ticket?", "what should I do next on this work?",
+  "이거 구현됐나", "이 작업 남은 것", "이 티켓 지금 뭐 해야 하나" — because answering those
+  by exploring the host directly skips ASC's freshness and evidence gates.
+  It does not answer "what is waiting for me from other people" — that question is about
+  incoming notifications, and a project may route it elsewhere. Ask for the inbox by name
+  when that is the question.
   Do not use it in a project where ASC is not attached.
 ---
 
