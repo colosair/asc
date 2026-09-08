@@ -74,7 +74,7 @@ import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
 import { evaluateHealth, healthAlertLines, observationState } from '../core/monitor/health-alerts.ts'
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
-import { MANAGED_EXTERNAL_ACTIONS, type ScmPort } from '../ports/scm.ts'
+import { MANAGED_EXTERNAL_ACTIONS, addressableHere, type ScmPort } from '../ports/scm.ts'
 import { servicePath } from '../core/distribution/external-command.ts'
 import {
   isTransientPath,
@@ -98,6 +98,9 @@ import {
   buildRuntimePorts,
   closeToolClients,
   rolesFor,
+  undeclaredBindings,
+  workItemGap,
+  type UndeclaredBinding,
   workItemRoles,
 } from '../composition/runtime.ts'
 import { proposeBindings } from '../composition/propose.ts'
@@ -229,6 +232,7 @@ Human decisions
   asc inbox                 what is waiting for a person
   asc inbox show <REQUEST_ID>
   asc inbox decide <REQUEST_ID> <approve|revise|defer|dismiss|queue> --as <actor>
+  asc coordination          what we asked outside, and whether it reached anyone
 
 Runtime
   asc runtime status        which build is in use, and whether it observes
@@ -3088,6 +3092,27 @@ async function runProceed(
       for (const line of outcome.result.limitations) console.log(`  한계      ${line}`)
       for (const line of outcome.result.missing) console.log(`  미확인    ${line}`)
       console.log(`\n다음 행동: ${outcome.nextAction}`)
+      // **"work-item 이 없다" 로 끝내지 않는다** (0.8.4 · C-1/C-2). 실기계에서 이 문장은
+      // 참이었지만 아무 도움이 되지 않았다 — 붙일 수 있는 통로가 저장소에 이미 있었고,
+      // 선언되지 않았다는 이유로 어느 화면에도 나오지 않았다. 무엇을 붙이면 되는지까지
+      // 말하는 것이 이 자리의 몫이다.
+      if (outcome.result.missing.includes('work-item')) {
+        const survey = await bindingSurvey(resolved).catch(() => null)
+        if (survey && !survey.workItem.assigned) {
+          console.log('')
+          console.log(
+            survey.workItem.candidates.length > 0
+              ? '작업 항목을 읽을 통로가 배정되지 않았다. 붙일 수 있는 후보가 이 저장소에 있다:'
+              : '작업 항목을 읽을 통로가 이 조립에 없다 — Profile bindings 에 work 결합을 더해야 한다.',
+          )
+          for (const candidate of survey.workItem.candidates) {
+            console.log(`  ${candidate.adapterId}:${candidate.resource}  ${candidate.state}`)
+            if (candidate.detail) console.log(`    지금 못 쓰는 이유: ${candidate.detail}`)
+            console.log(`    Profile bindings 에 추가: ${declarationLine(candidate)}`)
+          }
+          console.log('  지금 무엇이 보이는지: asc status')
+        }
+      }
       return outcome.result.state === 'UNDECIDABLE' ? 1 : 0
     }
     case 'PROPOSE_CONTRACT':
@@ -3914,6 +3939,16 @@ async function runQuery(
     return 0
   }
 
+  // **외부 대기를 적는 데 세 걸음을 물리지 않는다** (0.8.4 · C-6).
+  //
+  // "게임 파트 답을 기다린다" 를 남기려면 예전에는 X-ID 를 사람이 지어내고, 세션을 손으로
+  // 지목해야 했다. 그 둘 다 이미 알 수 있는 것이다 — 모르면 그때 묻는다. 실기계에서
+  // `asc coordination` 이 비어 있던 이유의 절반이 이 마찰이었다(나머지 절반은 세션 자체가
+  // 열리지 않은 것이다).
+  if (command === 'open' && !target) {
+    target = await nextQueryId(ledger)
+  }
+
   if (!target) {
     console.error(`Usage: asc query ${command ?? '<command>'} <X-ID>`)
     return 2
@@ -3921,13 +3956,19 @@ async function runQuery(
 
   if (command === 'open') {
     const domain = (values.domain as string[] | undefined)?.[0]
-    if (!values.session || !domain || !values.question) {
-      console.error('--session, --domain and --question are required.')
+    if (!domain || !values.question) {
+      console.error('--domain and --question are required.')
       return 2
     }
-    const session = await store.get('session', values.session as string)
+    const chosen = (values.session as string | undefined) ?? (await soleActiveSession(store))
+    if (!chosen) {
+      console.error('어느 세션이 묻는지 정해지지 않았다 — --session <S-ID> 로 지목하라.')
+      console.error('활성 세션이 하나뿐이면 지목하지 않아도 된다.')
+      return 2
+    }
+    const session = await store.get('session', chosen)
     if (!session) {
-      console.error(`Session '${values.session}' was not found.`)
+      console.error(`Session '${chosen}' was not found.`)
       return 1
     }
     const expected = values['expect-response'] as 'DECIDE' | 'ANSWER' | undefined
@@ -4679,13 +4720,32 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
  * (`action` 이 붙은 것)만 본다 — `gh api` 처럼 한 행위가 아닌 명령까지 세면 "나갈 길이
  * 없다" 가 늘 참이 되어 화면이 무의미해진다.
  */
-function deadEndActions(outward: ScmPort | null): string[] {
+function deadEndActions(outward: ScmPort | null, providers?: DeadEndScope): string[] {
   const blocked = new Set(
     FORBIDDEN_COMMAND_PATTERNS.map((entry) => entry.action).filter((action): action is string => action !== undefined),
   )
   return MANAGED_EXTERNAL_ACTIONS.filter(
-    (action) => blocked.has(action) && !(outward?.supports?.(action) ?? false),
+    (action) =>
+      blocked.has(action) &&
+      !(outward?.supports?.(action) ?? false) &&
+      addressableHere(action, providers),
   )
+}
+
+/** 이 workspace 가 실제로 쓰는 provider 들. **이름을 박아 넣지 않는다** — 조립에서 온다. */
+type DeadEndScope = {
+  /** Profile 이 선언한 결합의 adapter id. 팀이 쓰기로 한 것들이다. */
+  declared: ReadonlySet<string>
+  /** 이 빌드가 아는 adapter id 전부. 이름공간이 provider 의 것인지 가르는 데만 쓴다. */
+  known: ReadonlySet<string>
+}
+
+/** 선언된 adapter id 와 이 빌드가 아는 adapter id. 한 곳에서만 만든다. */
+function deadEndScope(runtime?: ResolvedRuntime): DeadEndScope {
+  return {
+    declared: new Set((runtime?.layers.profile.bindings ?? []).map((binding) => binding.adapter)),
+    known: new Set(monitorAdapters().map((adapter) => adapter.describe().id)),
+  }
 }
 
 /**
@@ -4733,8 +4793,11 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
       : null,
     unavailable: ports?.unavailable ?? [],
     // 축이 READY 여도 개별 행위는 나갈 길이 없을 수 있다 — 그 목록.
-    deadEnd: deadEndActions(ports?.scm ?? null),
+    deadEnd: deadEndActions(ports?.scm ?? null, deadEndScope(runtime)),
   }
+  // 붙일 수 있는데 아무도 안 붙인 것 (0.8.4 · C-2). 자동 승격하지 않는다 — 말만 한다.
+  const survey = root ? await bindingSurvey(runtime).catch(() => null) : null
+
   const sessions = store
     ? (await store.list('session')).filter((session) => session.status === 'ACTIVE' || session.status === 'PAUSED')
     : []
@@ -4798,6 +4861,9 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
           executionMode: mode ? { mode: mode.mode, chosen: mode.chosen } : null,
           autoReadiness: { ready: readiness.ready, axes: readiness.axes },
           external,
+          ...(survey
+            ? { bindings: { declared: survey.declared, undeclared: survey.undeclared, workItem: survey.workItem } }
+            : {}),
           work: sessions.map((session) => ({ id: session.id, status: session.status, role: session.role })),
           awaitingHuman: waiting.length,
           ...(service ? { service } : {}),
@@ -4842,6 +4908,32 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     }
     for (const reason of external.unavailable.slice(0, 3)) console.log(`  ${reason}`)
   }
+  // **침묵을 남기지 않는다.** AVAILABLE 도 UNAVAILABLE 도 아닌 자리가 있었다: 발견됐고
+  // 쓸 수 있는데 Profile 이 말하지 않아 어느 화면에도 나오지 않는 결합이다. 그 침묵이
+  // `asc work start <KEY>` 를 매번 "미확인 work-item" 으로 끝냈다.
+  if (survey && survey.undeclared.length > 0) {
+    console.log('')
+    console.log('Discovered, not declared (nothing uses these until the Profile says so):')
+    for (const binding of survey.undeclared) {
+      const where = binding.discoveredBy ? ` · found by ${binding.discoveredBy}` : ''
+      console.log(`  ${binding.adapterId}:${binding.resource}  ${binding.state}  [${binding.shape}]${where}`)
+      if (binding.detail) console.log(`    지금 못 쓰는 이유: ${binding.detail}`)
+      console.log(`    Profile bindings 에 추가: ${declarationLine(binding)}`)
+    }
+  }
+  if (survey && !survey.workItem.assigned) {
+    console.log('')
+    console.log(
+      survey.workItem.candidates.length > 0
+        ? '작업 항목을 읽을 통로가 배정되지 않았다 — 그래서 `asc work start <WORK-KEY>` 가 "미확인 work-item" 으로 끝난다.'
+        : '작업 항목을 읽을 통로가 없다 — `asc work start <WORK-KEY>` 는 결론을 낼 수 없다.',
+    )
+    for (const candidate of survey.workItem.candidates) {
+      console.log(`  후보: ${candidate.adapterId}:${candidate.resource}  ${candidate.state}`)
+      if (candidate.detail) console.log(`        지금 못 쓰는 이유: ${candidate.detail}`)
+      console.log(`        Profile bindings 에 추가: ${declarationLine(candidate)}`)
+    }
+  }
   console.log('')
   if (sessions.length > 0) {
     console.log('Work in progress:')
@@ -4850,6 +4942,18 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     console.log('Work in progress: none')
   }
   if (waiting.length > 0) console.log(`Waiting for a person: ${waiting.length} (asc inbox)`)
+  // **결정권이 선언되지 않았다는 사실을 말한다** (0.8.4 · C-11).
+  //
+  // ASC 가 추측하지 않는 것은 옳다. 그런데 화면이 그 사실도 말하지 않으면 사람은 조사
+  // 결과에서 "확인 못 함 — owner·결정 영역이 선언되지 않았다" 만 보고 그것이 고칠 수 있는
+  // 것인지조차 알 수 없다. 실기계에서 소유권 판단 세 건이 전부 사람 손으로 갔고 ASC 는
+  // 호출되지도 않았다. 새 승인 체계를 만들지 않는다 — 비어 있다는 것과 채우는 자리만 말한다.
+  if (root && runtime && !runtime.ownership) {
+    console.log('')
+    console.log('Decision authority: not declared — 이 workspace 에서 소유권·결정 영역을 판정할 수 없다.')
+    console.log(`  채우는 자리: Profile '${runtime.layers.profile.id}' 의 ownership`)
+    console.log('  선언 전까지 조사 결과는 책임·관련성을 "확인 못 함" 으로 남긴다 — 그것이 추측하지 않는다는 뜻이다.')
+  }
   if (service) console.log(`Background: ${service.line}`)
   if (background) for (const line of renderBackground(background)) console.log(line)
   if (degraded.length > 0) {
@@ -4886,7 +4990,7 @@ async function runMode(
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
 
   const outward = root ? await composedPorts(runtime).then((p) => p.scm ?? null).catch(() => null) : null
-  const deadEnds = deadEndActions(outward)
+  const deadEnds = deadEndActions(outward, deadEndScope(runtime))
 
   const show = (state: ExecutionModeState, extra: Record<string, unknown> = {}): void => {
     if (values.json) {
@@ -6409,6 +6513,98 @@ async function coordinationSurfaceFor(resolved?: ResolvedRuntime) {
  * 본문을 파일로 받는 이유는 하나다: 사람이 읽을 글이 셸을 지나며 조용히 달라지는 것을
  * 막는다. 그리고 **내부 메모가 섞일 자리를 주지 않는다** — 나가는 것은 제목·본문·라벨뿐이다.
  */
+/**
+ * 다음 X-ID. 사람이 번호를 지어내게 하지 않는다 — 지어낸 번호는 충돌하거나 규칙을 어긴다.
+ */
+async function nextQueryId(ledger: { list: () => Promise<{ query: { id: string } }[]> }): Promise<string> {
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+  const used = new Set((await ledger.list()).map((entry) => entry.query.id))
+  for (let n = 1; n < 100; n += 1) {
+    const id = `X-${today}-${String(n).padStart(2, '0')}`
+    if (!used.has(id)) return id
+  }
+  return `X-${today}-99`
+}
+
+/** 활성 세션이 하나뿐이면 그것이 답이다. 여럿이면 고르지 않는다 — 그것은 사람의 몫이다. */
+async function soleActiveSession(store: MarkdownStateStore): Promise<string | undefined> {
+  const active = (await store.list('session')).filter((session) => session.status === 'ACTIVE')
+  return active.length === 1 ? active[0]!.id : undefined
+}
+
+/**
+ * `asc coordination attach` — **이미 밖에 있는 것**을 기대에 잇는다 (0.8.4 · C-6).
+ *
+ * `publish` 와 다른 행위다. publish 는 남의 저장소에 글을 만들므로 승인된 계약을 지난다.
+ * attach 는 아무것도 만들지 않는다 — 사람이 이미 손으로 연 이슈를 **읽어서** 그것이 정말
+ * 거기 있다는 것을 확인하고, 그 사실을 증거로 적는다. 쓰기가 없으므로 Grant 도 없다.
+ *
+ * 이 갈래가 없어서 이런 상태가 남았다: 실제로는 #146 에서 게임 파트의 답을 기다리는데
+ * `asc coordination` 은 "기록된 외부 기대가 없다" 고 말했다. 사람이 raw 로 연 이슈를
+ * ASC 가 알 방법이 자체적으로 없었던 것이다.
+ *
+ * **게시했다고 적지 않는다.** evidenceSource 가 그 둘을 가른다.
+ */
+async function runCoordinationAttach(
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  resolved?: ResolvedRuntime,
+): Promise<number> {
+  const queryId = typeof values.query === 'string' ? values.query : undefined
+  const known = (values.known as string[] | undefined) ?? []
+  if (!queryId || known.length === 0) {
+    console.error('coordination attach needs --query <X-ID> and --known <ref>')
+    console.error('  밖에 이미 있는 것을 잇는다 — 새로 만들지 않는다 (만드는 것은 publish 다).')
+    return 2
+  }
+
+  const ledger = queryLedger(store, resolved)
+  const entry = (await ledger.list()).find((row) => row.query.id === queryId)
+  if (!entry) {
+    console.error(`${queryId} 를 찾지 못했다 — 기대를 먼저 연다: asc query open --domain <d> --question <t>`)
+    return 1
+  }
+
+  const { surface, unavailable } = await coordinationSurfaceFor(resolved)
+  if (!surface) {
+    console.error('조율 표면이 조립되지 않았다 — 밖에 있는 것을 읽을 수 없으니 잇지 않는다.')
+    for (const line of unavailable) console.error(`  ${line}`)
+    return 1
+  }
+
+  const objectType = typeof values.kind === 'string' ? values.kind : 'issue'
+  const audience = (values.audience as string[] | undefined) ?? []
+  const at = new Date().toISOString()
+  let attached = 0
+
+  for (const objectId of known) {
+    // **읽어서 확인한다.** 있다고 적는 것과 있는 것을 확인하는 것은 다르다.
+    const snapshot = await surface.read({ objectType, objectId }).catch(() => null)
+    if (!snapshot) {
+      console.error(`${objectId} 를 읽지 못했다 — 없는 것인지 못 보는 것인지 모른다. 잇지 않는다.`)
+      continue
+    }
+    const recorded = await coordinationLedger(store).publishRecorded({
+      evidenceId: `${queryId}:${objectType}:${objectId}`,
+      queryId,
+      identity: snapshot.identity,
+      audience,
+      publishedAt: at,
+      observedAt: at,
+      // 우리가 만든 것이 아니다. 밖에서 읽어 온 사실이다.
+      evidenceSource: 'observed (attached to an object that already existed)',
+    })
+    console.log(
+      recorded.ok
+        ? `${queryId} ← ${snapshot.identity.objectType} ${snapshot.identity.objectId} (${snapshot.title})`
+        : `${queryId} ← ${objectId} 는 이미 적혀 있다`,
+    )
+    if (snapshot.closed) console.log('  원본이 닫혀 있다 — 답을 기다리는 자리가 아닐 수 있다.')
+    attached += 1
+  }
+  return attached > 0 ? 0 : 1
+}
+
 async function runCoordinationPublish(
   values: Record<string, unknown>,
   store: MarkdownStateStore,
@@ -6620,6 +6816,8 @@ async function runCoordination(
   resolved?: ResolvedRuntime,
 ): Promise<number> {
   if (command === 'publish') return runCoordinationPublish(values, store, resolved)
+  // 밖에 이미 있는 것을 잇는다 — 읽기뿐이라 계약을 요구하지 않는다.
+  if (command === 'attach') return runCoordinationAttach(values, store, resolved)
   if (command === 'observe') return runCoordinationObserve(values, store, root, resolved)
   if (command !== undefined && command !== 'status') {
     console.error(`Unknown coordination command: ${command}\n\n${USAGE}`)
@@ -6631,6 +6829,14 @@ async function runCoordination(
     return 0
   }
   for (const line of coordinationLines(views)) console.log(line)
+  // **빈 화면이 아무 말도 하지 않으면 그것은 '없다' 가 아니라 '적을 길을 못 찾았다' 가 된다.**
+  if (views.length === 0) {
+    console.log('')
+    console.log('밖에 물어 둔 것을 여기서 보려면 먼저 기대를 연다:')
+    console.log('  asc query open --domain <결정영역> --question <물음>   # X-ID 는 자동으로 붙는다')
+    console.log('  asc coordination attach --query <X-ID> --known <group/project#123>   # 이미 연 이슈에 잇는다')
+    console.log('  asc coordination publish --query <X-ID> --grant <G-ID> …            # 새로 내보낼 때만')
+  }
   return 0
 }
 
@@ -7117,6 +7323,38 @@ function reconcileLines(result: Awaited<ReturnType<typeof reconcileInbox>>): str
     )
   }
   return lines
+}
+
+/**
+ * 이 workspace 가 실제로 무엇에 닿을 수 있는가 — **선언된 것과 발견된 것을 함께** (0.8.4 · C-2).
+ *
+ * `composedPorts` 는 조립된 결과만 준다. 그래서 "붙일 수 있는데 아무도 안 붙였다" 는 사실이
+ * 어느 화면에도 나오지 않았다. 실기계에서 JAM 이 그랬다: 선언 파일이 저장소에 있고 도구가
+ * AVAILABLE 인데 Profile 이 말하지 않아 완전히 침묵했고, 그 침묵이 `asc work start
+ * <JIRA-KEY>` 를 매번 "미확인 work-item" 으로 끝냈다.
+ */
+async function bindingSurvey(runtime?: ResolvedRuntime): Promise<{
+  declared: readonly { role: string; adapter: string; resource: string }[]
+  undeclared: UndeclaredBinding[]
+  workItem: { assigned: boolean; candidates: UndeclaredBinding[] }
+}> {
+  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
+  const declared = runtime?.layers.profile.bindings ?? []
+  const plan = await composeBindings({
+    context: { projectRoot, env: process.env },
+    adapters: monitorAdapters(),
+    roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+  })
+  return {
+    declared,
+    undeclared: undeclaredBindings(plan, declared),
+    workItem: workItemGap(plan, declared),
+  }
+}
+
+/** Profile 에 그대로 넣을 한 줄. 사람이 형식을 외우지 않게 한다. */
+function declarationLine(binding: UndeclaredBinding): string {
+  return `{ "role": "${binding.declaration.role}", "adapter": "${binding.declaration.adapter}", "resource": "${binding.declaration.resource}" }`
 }
 
 /** `owner/repo#19` 에서 저장소만. 짧은 참조를 풀 때 쓴다. */

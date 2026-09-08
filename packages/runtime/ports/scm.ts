@@ -102,3 +102,24 @@ export interface ScmPort {
    */
   execute(action: ExternalAction): Promise<ExternalActionResult>
 }
+
+/**
+ * 이 행위가 **이 workspace 에서 물어볼 만한 것인가** (0.8.4 · C-10).
+ *
+ * GitLab 하나만 선언한 저장소에서 다른 provider 의 행위를 "나갈 길 없는 행위" 로 매 화면에
+ * 띄우고 있었다. 참인 문장이지만 그 프로젝트가 영영 하지 않을 행위이고, 그런 줄이 늘면
+ * 정작 진짜 dead-end 가 묻힌다.
+ *
+ * **provider 이름을 여기 적지 않는다.** action key 의 이름공간이 이 빌드가 아는 adapter id
+ * 중 하나인데 이 workspace 가 선언하지 않았다면 그 행위는 여기 것이 아니다. 이름공간이
+ * 어느 adapter id 도 아니면(provider 중립인 것들) 늘 센다 — 어느 결합이 맡든 해야 할 일이다.
+ */
+export function addressableHere(
+  action: string,
+  providers?: { declared: ReadonlySet<string>; known: ReadonlySet<string> },
+): boolean {
+  if (!providers) return true
+  const namespace = action.split('.')[0] ?? ''
+  if (!providers.known.has(namespace)) return true
+  return providers.declared.has(namespace)
+}

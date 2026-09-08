@@ -217,13 +217,13 @@ describe('C-4 — 관측 상태를 한 낱말로 말한다', () => {
 })
 
 describe('C-8 — 결합이 가리키는 것과 Guard 가 찾는 것이 같다', () => {
-  // 실측: --physical windows-ssafesta-57 로 묶인 결합을 guard 는 영영 찾지 못했다.
+  // 실측: --physical windows-worker-57 로 묶인 결합을 guard 는 영영 찾지 못했다.
   // guard 는 hook payload 의 session_id 로만 찾는다.
   const RUN = 'f44a9a81-b331-499a-8264-9a269f5767d7'
   const OTHER = '11111111-2222-4333-8444-555555555555'
 
   it('사람이 붙인 라벨은 신원이 아니다', () => {
-    const verdict = judgePhysicalId({ provided: 'windows-ssafesta-57', observed: RUN })
+    const verdict = judgePhysicalId({ provided: 'windows-worker-57', observed: RUN })
     assert.equal(verdict.ok, false)
     assert.equal(verdict.ok === false && verdict.reason, 'NOT_A_RUN_ID')
     assert.equal(verdict.ok === false && verdict.observed, RUN, '무엇을 써야 하는지까지 말한다')

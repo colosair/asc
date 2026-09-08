@@ -2,7 +2,7 @@
 //
 // 실기계에서 이랬다:
 //
-//   asc host claude bind S-… --physical windows-ssafesta-57   → 성공했다고 기록됐다
+//   asc host claude bind S-… --physical windows-worker-57   → 성공했다고 기록됐다
 //   guard 는 hook payload 의 session_id 로 결합을 찾는다        → 그 결합을 못 본다
 //
 // 그래서 "결합돼 있다"고 화면이 말하는 Run 이 AUTO 에서 계속 "논리 세션 밖" 으로 막혔다.
@@ -62,7 +62,7 @@ export type PhysicalIdVerdict =
  *
  * **모양을 요구하는 것이 이 함수의 전부다.** 그 이상은 못 한다 — 다른 Run 의 id 가 진짜인지
  * 여기서 확인할 방법이 없고, 확인하는 척하면 그것이 또 하나의 거짓말이 된다. 다만 이
- * 한 가지로 실제 사고는 닫힌다: `windows-ssafesta-57` 같은 라벨은 어떤 Run 도 아니어서
+ * 한 가지로 실제 사고는 닫힌다: `windows-worker-57` 같은 라벨은 어떤 Run 도 아니어서
  * guard 가 영영 찾지 못했고, 그 결합은 있는데도 없는 것으로 다뤄졌다.
  */
 export function judgePhysicalId(input: { provided?: string; observed?: string }): PhysicalIdVerdict {
