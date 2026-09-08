@@ -55,7 +55,14 @@ describe('Execution Mode — 기록과 기본값', () => {
     const written = await writeExecutionMode(scope, 'MANUAL', 'controller-a', NOW)
     assert.equal(written.mode, 'MANUAL')
     const read = await readExecutionMode(scope)
-    assert.deepEqual(read, { mode: 'MANUAL', since: NOW, by: 'controller-a', chosen: true })
+    // decidedFor 는 이 답이 누구 것인지를 말한다 (0.8.4). Run 의 답이 없으면 workspace 다.
+    assert.deepEqual(read, {
+      mode: 'MANUAL',
+      since: NOW,
+      by: 'controller-a',
+      chosen: true,
+      decidedFor: 'workspace',
+    })
   })
 })
 

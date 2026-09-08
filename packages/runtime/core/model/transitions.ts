@@ -12,7 +12,7 @@ export type TransitionRule<S extends string> = {
   /** 이 전이를 수행할 수 있는 주체. 비어 있는 전이는 만들지 않는다. */
   actors: readonly ActorRole[]
   /** 전이 성립에 필요한 부가 조건의 이름 — 래퍼가 실제 값 존재를 확인한다. */
-  requires?: 'checkpoint' | 'handoff' | 'decision' | 'result'
+  requires?: 'checkpoint' | 'handoff' | 'decision' | 'result' | 'obsolescence'
 }
 
 export type TransitionFailure = 'ILLEGAL_TRANSITION' | 'FORBIDDEN_ACTOR' | 'MISSING_REQUIREMENT'
@@ -99,13 +99,18 @@ export const REQUEST_TRANSITIONS: readonly TransitionRule<ApprovalRequest['statu
   { from: 'DEFERRED', to: 'QUEUED', actors: ['controller'], requires: 'decision' },
   { from: 'DEFERRED', to: 'DISMISSED', actors: ['controller'], requires: 'decision' },
   { from: 'APPROVED', to: 'DONE', actors: ['executor'], requires: 'result' },
+  // **결정 전에 물음이 사라진 자리** (0.8.4). Monitor 만 낸다 — 이것은 사람의 처분이
+  // 아니라 밖에서 읽어 온 사실이고, Controller 가 이 칸을 쓰면 그것은 dismiss 를 다른
+  // 이름으로 부르는 것이 된다.
+  { from: 'AWAITING_APPROVAL', to: 'OBSOLETE', actors: ['monitor'], requires: 'obsolescence' },
+  { from: 'DEFERRED', to: 'OBSOLETE', actors: ['monitor'], requires: 'obsolescence' },
 ]
 
 export function transitionRequest(
   request: ApprovalRequest,
   to: ApprovalRequest['status'],
   actor: ActorRole,
-  patch: Partial<Pick<ApprovalRequest, 'decision' | 'resultRef'>> = {},
+  patch: Partial<Pick<ApprovalRequest, 'decision' | 'resultRef' | 'obsolete'>> = {},
 ): ApprovalRequest {
   const rule = resolve(REQUEST_TRANSITIONS, request.status, to, actor)
   const next: ApprovalRequest = { ...request, ...patch, status: to, version: request.version + 1 }
@@ -114,6 +119,15 @@ export function transitionRequest(
   }
   if (rule.requires === 'result' && !next.resultRef) {
     throw new TransitionError('MISSING_REQUIREMENT', `${request.id}: DONE requires a result reference`)
+  }
+  // 근거 없이 물음을 지우지 않는다. 이 칸이 비면 그것은 조용한 dismiss 이고, 그러면
+  // "아무도 결정하지 않았다" 는 사실이 기록에서 사라진다.
+  if (rule.requires === 'obsolescence' && !next.obsolete) {
+    throw new TransitionError('MISSING_REQUIREMENT', `${request.id}: OBSOLETE requires recorded evidence`)
+  }
+  // 사람의 결정을 흉내 내지 않는다 — OBSOLETE 는 처분이 아니다.
+  if (to === 'OBSOLETE' && next.decision) {
+    throw new TransitionError('MISSING_REQUIREMENT', `${request.id}: OBSOLETE must not carry a decision`)
   }
   return next
 }

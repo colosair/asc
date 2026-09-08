@@ -70,6 +70,9 @@ describe('전이표는 설계 정본과 1:1 대응한다', () => {
         'DEFERRED->QUEUED',
         'DEFERRED->DISMISSED',
         'APPROVED->DONE',
+        // 결정 전에 물음이 사라진 자리 (0.8.4). Monitor 만 내고, 근거 없이는 못 간다.
+        'AWAITING_APPROVAL->OBSOLETE',
+        'DEFERRED->OBSOLETE',
       ]),
     )
     // 승인 상태에서 외부 반영 없이 곧장 끝나는 경로는 없다 — DONE은 Executor 결과가 있어야 한다.

@@ -159,6 +159,8 @@ export class GitHubResourceContext extends GitHubContextBase implements Resource
       labels: labelNames(issue.labels),
       updatedAt: issue.updated_at,
       revisionMarker: marker([issue.updated_at, issue.comments, issue.state]),
+      // GitHub 은 issue·pull request 를 'closed' 하나로 닫는다 (병합도 그 안이다).
+      settled: issue.state === 'closed',
     }
   }
 

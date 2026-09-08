@@ -8,6 +8,8 @@
 // 이 파일에도 프로젝트 고유값은 없다. 누가 "나"인지, 어떤 라벨이 급한지는 config가 들고 온다.
 
 import { ApprovalRequest, type MonitorEvent, type Priority } from '../model/entities.ts'
+import { transitionRequest } from '../model/transitions.ts'
+import { decisionSubject, supersedes } from '../approval/reconcile.ts'
 import type { EventSource, RawEvent } from '../../ports/event-source.ts'
 import type { InventoryItem, InventoryPage, InventoryPort } from '../../ports/inventory.ts'
 import type { OwnershipMap } from '../policy/ownership.ts'
@@ -574,6 +576,8 @@ export class MonitorEngine {
           eventKey: event.eventKey,
           reference: event.reference,
           ...(thread && !thread.missing ? { threadLastEventId: thread.lastEventId } : {}),
+          // 같은 사람 결정을 가리키는 키 (0.8.4 · C-5). eventKey 는 전송 중복만 막는다.
+          subject: decisionSubject({ reference: event.reference, type: verdict.type, signals: verdict.signals }),
         },
         situation: situationOf(event, verdict, raw),
         // 깊이는 유형이 정한다. 참고용 알림에 전체 보고서를 붙이면 정작 급한 것이 묻힌다.
@@ -603,6 +607,13 @@ export class MonitorEngine {
         return null
       }
 
+      // **같은 물음의 옛 요청은 이 자리에서 물러난다** (C-5).
+      //
+      // 사람이 결정한 것은 건드리지 않는다. 물러나는 것은 아직 아무도 답하지 않은,
+      // 같은 자원·같은 성격·같은 신호의 **더 오래된** 요청뿐이다. 실기계에서 이슈 하나가
+      // 요청 둘이 되어 같은 처분을 1.2초 간격으로 두 번 받았다.
+      await this.#supersedeOlder(request, requestId)
+
       // 조사까지 끝났으니 이 이벤트는 처리된 것이다
       const stored = (await this.#store.get('event', event.eventKey))!
       await this.#store.compareAndSet('event', event.eventKey, stored.version, {
@@ -623,6 +634,38 @@ export class MonitorEngine {
       // 한 건이 실패해도 나머지는 계속 간다 (OM §10.5)
       await this.#saveProgress(event.eventKey, progress)
       return null
+    }
+  }
+
+  /**
+   * 같은 물음의 옛 요청을 OBSOLETE 로 물린다.
+   *
+   * **조용히 지우지 않는다** — 근거와 대체 요청 id 를 함께 적는다. 이것은 처분이 아니므로
+   * `decision` 은 비어 있는 채로 남고, 나중에 "아무도 결정하지 않았다" 를 읽을 수 있다.
+   */
+  async #supersedeOlder(incoming: ApprovalRequest, requestId: string): Promise<void> {
+    const subject = incoming.source.subject
+    if (!subject) return
+    for (const existing of await this.#store.list('request')) {
+      if (existing.id === requestId) continue
+      if (!supersedes({ subject, detectedAt: incoming.detectedAt }, existing)) continue
+      const next = transitionRequest(existing, 'OBSOLETE', 'monitor', {
+        obsolete: {
+          reason: 'SUPERSEDED',
+          evidence: `${requestId} 이 같은 물음(${subject})의 더 새로운 판이다`,
+          supersededBy: requestId,
+          observedAt: this.#now(),
+        },
+      })
+      const moved = await this.#store.compareAndSet('request', existing.id, existing.version, next)
+      if (!moved.ok) continue
+      await this.#store.appendHistory({
+        at: this.#now(),
+        actor: 'monitor',
+        kind: 'request_superseded',
+        ref: existing.id,
+        detail: `${existing.id} → OBSOLETE · ${requestId} 이 같은 물음의 최신판이다`,
+      })
     }
   }
 

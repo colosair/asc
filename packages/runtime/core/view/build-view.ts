@@ -42,6 +42,7 @@ export function storedPacketOf(request: ApprovalRequest): StoredPacket {
     ...(request.source.threadLastEventId !== undefined
       ? { threadLastEventId: request.source.threadLastEventId }
       : {}),
+    ...(request.obsolete ? { obsolete: request.obsolete } : {}),
   }
 }
 
@@ -124,6 +125,8 @@ export async function assess(
 
   const verify = (freshness: Freshness) => ({ freshness, verification: { localContext, source } })
 
+  // 결정 전에 사라진 것을 "이미 결정됨" 으로 말하지 않는다. 아무도 결정하지 않았다.
+  if (request.status === 'OBSOLETE') return verify('OBSOLETE')
   if (DECIDED_STATUSES.has(request.status)) return verify('ALREADY_DECIDED')
   if (overlay.canonicalChanges.length > 0) return verify('SOURCE_CHANGED')
 

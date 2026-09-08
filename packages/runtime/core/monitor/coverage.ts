@@ -155,7 +155,16 @@ export class CoverageLedger {
  * 사람이 읽는 상태. **"100% 감지 보장"이라고 쓰지 않는다** (C-07 §8.1) — provider 장애·자격
  * 문제·전달 실패·가시성 변화 중 어느 것도 ASC가 통제하지 못한다.
  */
-export function renderHealth(sourceId: string, health: CoverageHealth): string[] {
+export function renderHealth(
+  sourceId: string,
+  health: CoverageHealth,
+  /**
+   * 지금 이 관측이 성립하는가 (0.8.4). 주지 않으면 마지막 시도의 성공 여부만 적는다 —
+   * 그것은 최신성이 아니고, 화면이 그 둘을 한 낱말로 뭉개면 18시간 멈춘 감시가
+   * "정상" 으로 읽힌다.
+   */
+  observation?: { state: string; detail: string },
+): string[] {
   const or = (value: string | undefined) => value ?? '(없음)'
   return [
     `${sourceId}`,
@@ -164,6 +173,8 @@ export function renderHealth(sourceId: string, health: CoverageHealth): string[]
     `  마지막 전수(census):    ${or(health.lastCensusAt)}`,
     `  확인 기준선:            ${or(health.coverageWatermark)}`,
     `  목록 완주:              ${health.paginationComplete ? '예' : '아니오 (이 상태로는 상실을 판정하지 않는다)'}`,
-    `  연결 상태:              ${health.sourceHealthy ? '정상' : `이상 — ${or(health.detail)}`}`,
+    // 마지막 시도에서 외부가 읽혔는가. **이것만으로 "정상" 이라고 말하지 않는다.**
+    `  마지막 시도:            ${health.sourceHealthy ? '읽혔다' : `읽지 못했다 — ${or(health.detail)}`}`,
+    ...(observation ? [`  관측 상태:              ${observation.state} — ${observation.detail}`] : []),
   ]
 }

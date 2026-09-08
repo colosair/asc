@@ -15,6 +15,7 @@ const FRESHNESS_NOTE: Record<Freshness, string> = {
   STALE_CONTEXT: '주의 — 알림 이후 작업 맥락이 바뀌었다',
   SOURCE_CHANGED: '주의 — 알림 이후 원본(스레드·정본)이 바뀌었다',
   ALREADY_DECIDED: '이미 결정된 요청이다',
+  OBSOLETE: '결정 전에 물음이 사라졌다 — 아무도 결정하지 않았다',
 }
 
 /**
@@ -25,6 +26,10 @@ function freshnessLine(view: DecisionView): string[] {
   const unverifiedSource = view.verification.source === 'UNAVAILABLE'
   const scope = unverifiedSource && view.freshness === 'CURRENT' ? ' (로컬 기준)' : ''
   const lines = [`상태: ${view.stored.status} (v${view.version})  ·  ${FRESHNESS_NOTE[view.freshness]}${scope}`]
+  // 왜 사라졌는지가 상태보다 중요하다 — 처분이 아니라 관측이라는 사실이 여기서만 보인다.
+  if (view.stored.obsolete) {
+    lines.push(`근거: ${view.stored.obsolete.evidence} (관측 ${view.stored.obsolete.observedAt})`)
+  }
   if (unverifiedSource) lines.push('원본 변경 여부 미확인 — 외부 연결 없음')
   if (view.verification.localContext === 'NOT_APPLICABLE') {
     lines.push('현재 작업과의 관계 판단 불가 — 요청이 영향 세션을 지목하지 않았다')

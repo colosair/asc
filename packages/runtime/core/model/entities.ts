@@ -128,6 +128,17 @@ export const RequestStatus = z.enum([
   'DEFERRED',
   'DISMISSED',
   'DONE',
+  /**
+   * 사람이 결정하기 전에 **결정할 것이 없어졌다** (0.8.4).
+   *
+   * DISMISSED 와 다르다. DISMISSED 는 사람이 "안 한다" 고 정한 것이고, 이것은 아무도
+   * 정하지 않았는데 물음 자체가 사라진 것이다. 그 둘을 같은 칸에 넣으면 하지 않은 결정이
+   * 한 것으로 기록되고, 나중에 "왜 이걸 넘겼나" 를 물을 근거가 사라진다.
+   *
+   * **왜 사라졌는지는 반드시 증거와 함께 적는다** (`obsolete`). 근거 없이 이 상태로
+   * 옮기는 경로는 없다.
+   */
+  'OBSOLETE',
 ])
 export type RequestStatus = z.infer<typeof RequestStatus>
 
@@ -151,6 +162,18 @@ export const ApprovalRequest = z.object({
     eventKey: EventKey,
     reference: z.string().min(1), // Issue #19, PR #50 등 사람이 읽는 참조
     threadLastEventId: z.string().optional(),
+    /**
+     * **같은 사람 결정**을 가리키는 키 (0.8.4 · C-5).
+     *
+     * `eventKey` 는 전송 단위의 중복만 막는다 — 한 스레드에 답이 두 번 달리면 사건도
+     * 둘이고 요청도 둘이 된다. 실기계에서 같은 이슈 하나가 REQ 둘이 됐고, 사람은 1.2초
+     * 간격으로 같은 처분을 두 번 내렸다.
+     *
+     * 반대로 "같은 이슈면 무조건 하나" 도 틀리다 — 한 스레드 안에 서로 다른 결정이 설 수
+     * 있다. 그래서 자원 신원 하나가 아니라 **자원 + 사건의 종류 + 신호**로 잡는다.
+     * 신호가 다르면(호명 ↔ 리뷰 요청) 다른 물음이고, 같으면 같은 물음의 최신판이다.
+     */
+    subject: z.string().min(1).optional(),
   }),
   situation: z.string(),
   context: z.string().default(''),
@@ -195,6 +218,26 @@ export const ApprovalRequest = z.object({
     })
     .optional(),
   resultRef: z.string().optional(), // 외부 반영 결과 (comment URL 등)
+  /**
+   * 왜 더 이상 결정할 것이 없는가 (0.8.4). `status === 'OBSOLETE'` 일 때만 있다.
+   *
+   * 사람의 결정을 흉내 내지 않는다 — `decision` 은 비어 있는 채로 남고, 여기에는 그렇게
+   * 판정한 **근거**만 적힌다.
+   */
+  obsolete: z
+    .object({
+      /**
+       * ORIGIN_SETTLED  원본이 자기 수명에서 끝났다 (닫힘·병합)
+       * SUPERSEDED      같은 물음의 더 새로운 요청이 이 자리를 대신한다
+       */
+      reason: z.enum(['ORIGIN_SETTLED', 'SUPERSEDED']),
+      /** 무엇을 읽고 그렇게 판정했는가. 사람이 그대로 읽는다. */
+      evidence: z.string().min(1),
+      /** 이 요청을 대신하는 요청 (SUPERSEDED 일 때). */
+      supersededBy: RequestId.optional(),
+      observedAt: Timestamp,
+    })
+    .optional(),
 })
 export type ApprovalRequest = z.infer<typeof ApprovalRequest>
 

@@ -126,6 +126,79 @@ export function evaluateHealth(
 
 const minutes = (ms: number): number => Math.floor(ms / 60_000)
 
+/**
+ * 지금 관측이 어디까지 성립하는가 — **한 낱말로** (0.8.4).
+ *
+ * 고친 것은 이 모순이다:
+ *
+ * ```text
+ * asc monitor status  연결 상태: 정상
+ * asc front           [HOT_PATH_STALE] 빠른 경로가 조용한 지 1192분
+ * ```
+ *
+ * 둘 다 참이었다. `sourceHealthy` 는 **마지막으로 돌았을 때** 외부를 읽었는가이고,
+ * 그 마지막이 18시간 전이라는 사실은 그 값에 들어 있지 않다. 그런데 화면은 그것을
+ * "정상" 이라고만 말했다 — 관측이 18시간 멈춘 자리에서 사람이 읽을 수 있는 가장 나쁜
+ * 낱말이다. "변경 없음" 과 "못 봄" 을 합치지 않는다는 이 파일의 불변식(⑫)이 정작
+ * 화면 한 줄에서 깨져 있었다.
+ *
+ * ```text
+ * UNKNOWN      한 번도 돌지 않았다
+ * NOT_RUNNING  돌 것이 없다 — 이 기계에 상시 등록이 없다
+ * DEGRADED     마지막 시도에서 외부를 읽지 못했다
+ * STALE        읽기는 됐는데 너무 오래됐다 — 지금 상태를 안다고 말할 수 없다
+ * HEALTHY      최근에 돌았고 읽혔다
+ * ```
+ */
+export type ObservationState = 'HEALTHY' | 'STALE' | 'NOT_RUNNING' | 'DEGRADED' | 'UNKNOWN'
+
+export type ObservationVerdict = {
+  state: ObservationState
+  /** 왜 그 상태인가. 사람이 그대로 읽는다. */
+  detail: string
+  /** 이 판정을 만든 경고들. 비어 있으면 막는 것이 없다. */
+  alerts: readonly HealthAlert[]
+}
+
+/** 이 판정을 STALE 로 만드는 경고들. 나머지는 경고이되 최신성의 문제는 아니다. */
+const STALENESS: ReadonlySet<HealthAlertKind> = new Set(['HOT_PATH_STALE', 'RECONCILE_STALE', 'CENSUS_STALE'])
+
+/**
+ * 경고 목록 하나를 상태 하나로 접는다.
+ *
+ * **판정 순서가 곧 의미다**: 한 번도 안 돈 것 → 돌 것이 없는 것 → 읽지 못한 것 →
+ * 오래된 것. 뒤엣것으로 앞엣것을 덮으면 사람이 할 일이 뒤바뀐다.
+ *
+ * `registered` 는 이 기계에 상시 등록이 있는가다. 없는데 오래됐으면 그것은 운영 사고가
+ * 아니라 **애초에 도는 것이 없는 상태**이고, 그 둘은 사람이 할 일이 다르다.
+ */
+export function observationState(
+  alerts: readonly HealthAlert[],
+  options: { registered?: boolean } = {},
+): ObservationVerdict {
+  const never = alerts.find((alert) => alert.kind === 'NEVER_RAN')
+  if (never) return { state: 'UNKNOWN', detail: never.detail, alerts }
+
+  const stale = alerts.filter((alert) => STALENESS.has(alert.kind))
+  if (options.registered === false && stale.length > 0) {
+    return {
+      state: 'NOT_RUNNING',
+      detail: `${stale[0]!.detail} — 이 기계에 상시 등록이 없어 스스로 다시 돌지 않는다 (asc runtime service status)`,
+      alerts,
+    }
+  }
+
+  const unhealthy = alerts.find((alert) => alert.kind === 'SOURCE_UNHEALTHY')
+  if (unhealthy) return { state: 'DEGRADED', detail: unhealthy.detail, alerts }
+
+  if (stale.length > 0) return { state: 'STALE', detail: stale[0]!.detail, alerts }
+
+  const incomplete = alerts.find((alert) => alert.kind === 'PAGINATION_INCOMPLETE')
+  if (incomplete) return { state: 'DEGRADED', detail: incomplete.detail, alerts }
+
+  return { state: 'HEALTHY', detail: '최근에 돌았고 외부를 읽었다', alerts }
+}
+
 /** 사람이 읽는 블록. 조용한 실패를 조용하게 두지 않는 것이 목적이다. */
 export function healthAlertLines(alerts: readonly HealthAlert[]): string[] {
   if (alerts.length === 0) return []

@@ -44,7 +44,7 @@ async function attached(): Promise<{ repo: string; home: string; cleanup: () => 
   return { repo, home, cleanup: () => rm(base, { recursive: true, force: true }) }
 }
 
-const PHYS = 'run-1'
+const PHYS = '11111111-2222-4333-8444-555555555555'
 
 /** 세션 하나를 발급하고 시작해 이 Run 에 묶는다. */
 function hold(repo: string, home: string, id: string, goal: string): void {

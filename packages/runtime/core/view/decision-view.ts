@@ -17,6 +17,11 @@ export const Freshness = z.enum([
   'STALE_CONTEXT', // 로컬 작업 맥락이 변했다 (Active Session 교체 등)
   'SOURCE_CHANGED', // 대상 스레드 또는 canonical source가 변했다
   'ALREADY_DECIDED', // 다른 채널에서 이미 결정됐다
+  /**
+   * 결정 전에 물음이 사라졌다 (0.8.4). ALREADY_DECIDED 와 다르다 — 아무도 결정하지 않았다.
+   * 그 둘을 한 낱말로 부르면 하지 않은 결정이 한 것으로 읽힌다.
+   */
+  'OBSOLETE',
 ])
 export type Freshness = z.infer<typeof Freshness>
 
@@ -60,6 +65,10 @@ export const StoredPacket = z.object({
   draft: z.string().optional(),
   snapshot: z.array(CanonicalSnapshot),
   threadLastEventId: z.string().optional(),
+  /** 왜 물음이 사라졌는가. `status === 'OBSOLETE'` 일 때만 있다 (0.8.4). */
+  obsolete: z
+    .object({ reason: z.enum(['ORIGIN_SETTLED', 'SUPERSEDED']), evidence: z.string(), observedAt: Timestamp })
+    .optional(),
 })
 export type StoredPacket = z.infer<typeof StoredPacket>
 

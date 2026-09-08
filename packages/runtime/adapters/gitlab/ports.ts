@@ -222,6 +222,10 @@ export class GitLabResourceContext extends GitLabBase implements ResourceContext
       labels: row.labels ?? [],
       updatedAt: row.updated_at,
       revisionMarker: marker([row.updated_at, row.sha, row.state, row.user_notes_count]),
+      // provider 의 낱말을 Core 가 읽을 수 있는 사실 하나로 옮긴다 (0.8.4). GitLab 은
+      // issue 를 'closed', merge request 를 'merged'·'closed' 로 닫는다. 그 밖의 값은
+      // 열려 있다는 뜻이므로 false 로 적는다 — 여기서는 어휘를 다 알고 있다.
+      settled: row.state === 'closed' || row.state === 'merged',
     }
   }
 

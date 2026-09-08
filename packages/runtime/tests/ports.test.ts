@@ -181,8 +181,15 @@ describe('Shared Decision View Model', () => {
     assert.equal(withOverlay.current?.observedAt, LATER)
   })
 
-  it('freshness는 정해진 4종뿐이다', () => {
-    assert.deepEqual(Freshness.options, ['CURRENT', 'STALE_CONTEXT', 'SOURCE_CHANGED', 'ALREADY_DECIDED'])
+  it('freshness는 정해진 5종뿐이다', () => {
+    // OBSOLETE 는 ALREADY_DECIDED 와 다르다 — 아무도 결정하지 않았다 (0.8.4).
+    assert.deepEqual(Freshness.options, [
+      'CURRENT',
+      'STALE_CONTEXT',
+      'SOURCE_CHANGED',
+      'ALREADY_DECIDED',
+      'OBSOLETE',
+    ])
     assert.equal(Freshness.safeParse('FRESH').success, false)
   })
 

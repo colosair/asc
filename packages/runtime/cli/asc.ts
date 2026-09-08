@@ -35,7 +35,7 @@ import { IDENTITY_FILE } from './identity-config.ts'
 import { TextRenderer } from '../adapters/text/renderer.ts'
 import { ApprovalService } from '../core/approval/service.ts'
 import { Executor } from '../core/execution/executor.ts'
-import { transitionGrant } from '../core/model/transitions.ts'
+import { transitionGrant, transitionRequest } from '../core/model/transitions.ts'
 import { applyTransition } from '../core/runtime/store-ops.ts'
 import { GrantService } from '../core/execution/grant.ts'
 import { DecisionKind } from '../core/model/entities.ts'
@@ -56,6 +56,8 @@ import {
 } from '../core/attach/setup-plan.ts'
 import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claude-code/binding.ts'
 import { readHeartbeat } from '../adapters/claude-code/observer.ts'
+import { judgePhysicalId, observedRunId } from '../adapters/claude-code/identity.ts'
+import { judgeReconcile, type OriginObservation } from '../core/approval/reconcile.ts'
 import { FORBIDDEN_COMMAND_PATTERNS, workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
 import { applyHostReport, assessReadiness, probe, type CapabilityName } from '../adapters/claude-code/probe.ts'
 import {
@@ -69,7 +71,7 @@ import {
 } from '../adapters/claude-code/install.ts'
 import { MonitorEngine } from '../core/monitor/engine.ts'
 import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
-import { evaluateHealth, healthAlertLines } from '../core/monitor/health-alerts.ts'
+import { evaluateHealth, healthAlertLines, observationState } from '../core/monitor/health-alerts.ts'
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
 import { MANAGED_EXTERNAL_ACTIONS, type ScmPort } from '../ports/scm.ts'
@@ -178,6 +180,7 @@ import { buildFinalReport, renderFinalReport } from '../core/runtime/report.ts'
 import { FreezeLedger, freezeLines, judgeAction } from '../core/policy/remote-freeze.ts'
 import {
   ExecutionMode,
+  clearExecutionModeForRun,
   enforcementOf,
   judgeAutoReadiness,
   modeLine,
@@ -815,6 +818,11 @@ function parseArgsOrThrow(argv: string[]) {
       unresolved: { type: 'string', multiple: true },
       'run-id': { type: 'string' },
       physical: { type: 'string' },
+      // Execution Mode 를 이 Run 에만 적용한다 (0.8.4). 값이 workspace 에만 있으면
+      // 한 Run 의 결정이 다른 Run 의 집행 강도를 바꾼다 — 실기계에서 그렇게 났다.
+      'this-run': { type: 'boolean', default: false },
+      run: { type: 'string' },
+      'clear-run': { type: 'boolean', default: false },
       worker: { type: 'string' },
       kind: { type: 'string' },
       force: { type: 'boolean', default: false },
@@ -1016,10 +1024,33 @@ async function runParsedCommand(
 
   // 남은 것은 inbox 다. 이름만 치면 목록이다 — 사람이 물은 것은 "무엇이 기다리는가" 이고,
   // 그 답을 얻으려고 하위 명령을 하나 더 외우게 하지 않는다 (§49).
+  /**
+   * 조회 화면을 만드는 Operator 는 **원격 통로를 쥔 것**이어야 한다 (0.8.4).
+   *
+   * 넘기지 않으면 `assess` 가 언제나 `source: UNAVAILABLE` 로 답하고, 화면은 연결이
+   * 있는데도 "원본 변경 여부 미확인 — 외부 연결 없음" 이라 말한다. 확인한 것과 확인하지
+   * 못한 것을 가르는 것이 그 줄의 존재 이유인데, 늘 뒤엣것으로만 말하면 아무 말도 안 하는
+   * 것과 같다. 필요한 화면에서만 만든다 — 조립은 공짜가 아니다.
+   */
+  const viewOperator = async (): Promise<LocalOperator> => {
+    const scm = await composedPorts(guard.runtime)
+      .then((ports) => ports.scm)
+      .catch(() => undefined)
+    return new LocalOperator({ store, ...(scm ? { scm } : {}) })
+  }
+
   switch (command ?? 'list') {
     case 'list': {
+      // **목록을 보여 주기 전에 원본과 맞춘다** (0.8.4). 이 화면은 "지금 사람이 결정해야
+      // 하는 것" 이라 주장하므로, 그 주장이 참인지 확인하는 것이 이 명령의 일이다.
+      const reconciled = await reconcileInbox(store, guard.runtime)
       const items = await operator.list({ all: Boolean(values.all), ...(priority ? { priority } : {}) })
-      console.log(values.json ? JSON.stringify(items, null, 2) : renderer.renderList(items).text)
+      if (values.json) {
+        console.log(JSON.stringify({ items, reconciled }, null, 2))
+        return 0
+      }
+      console.log(renderer.renderList(items).text)
+      for (const line of reconcileLines(reconciled)) console.log(line)
       return 0
     }
 
@@ -1028,14 +1059,18 @@ async function runParsedCommand(
         console.error('A request id is required: asc inbox show REQ-0042')
         return 2
       }
-      const outcome = await operator.get(target)
+      const reconciled = await reconcileInbox(store, guard.runtime, [target])
+      const outcome = await (await viewOperator()).get(target)
       if (!outcome.ok) {
         console.error(`${target} was not found.`)
         return 1
       }
-      console.log(
-        values.json ? JSON.stringify(outcome.view, null, 2) : renderer.renderDecision(outcome.view, 'full').text,
-      )
+      if (values.json) {
+        console.log(JSON.stringify({ ...outcome.view, reconciled }, null, 2))
+        return 0
+      }
+      console.log(renderer.renderDecision(outcome.view, 'full').text)
+      for (const line of reconcileLines(reconciled)) console.log(line)
       return 0
     }
 
@@ -1084,7 +1119,7 @@ async function runParsedCommand(
     }
 
     case 'latest': {
-      const outcome = await operator.resolveLatest({ ...(priority ? { priority } : {}) })
+      const outcome = await (await viewOperator()).resolveLatest({ ...(priority ? { priority } : {}) })
       if (outcome.kind === 'none') {
         console.log('No pending requests')
         return 0
@@ -2824,11 +2859,38 @@ async function runHost(
         }
       }
 
-      if (!values.physical) {
-        console.error('--physical <Claude session id> is required.')
-        return 2
+      // **결합이 가리키는 값과 guard 가 조회하는 값을 같게 한다** (0.8.4).
+      //
+      // release 는 그대로 둔다 — 이미 잘못 묶인 결합을 푸는 것이 이 명령의 일이고,
+      // 거기에까지 모양을 요구하면 고칠 방법이 없어진다.
+      let physical: string
+      if (command === 'release') {
+        if (!values.physical) {
+          console.error('--physical <Claude session id> is required.')
+          return 2
+        }
+        physical = values.physical as string
+      } else {
+        const verdict = judgePhysicalId({
+          ...(typeof values.physical === 'string' ? { provided: values.physical } : {}),
+          ...(observedRunId() ? { observed: observedRunId()! } : {}),
+        })
+        if (!verdict.ok) {
+          console.error(`이 결합은 만들지 않는다 — ${verdict.reason}`)
+          console.error(`  ${verdict.detail}`)
+          if (verdict.observed) {
+            console.error(`  asc host claude bind ${target} --physical ${verdict.observed}`)
+          }
+          return 2
+        }
+        physical = verdict.id
+        if (verdict.source === 'observed') console.log(`physical run: ${physical} (observed)`)
+        // 다른 Run 을 묶는 것은 막지 않는다. 다만 그 사실을 말한다 — 이 Run 은 그 결합의
+        // 효력을 받지 않는다.
+        if (verdict.source === 'other-run') {
+          console.log(`physical run: ${physical} (다른 Run 이다 — 지금 도는 Run 은 ${verdict.observed})`)
+        }
       }
-      const physical = values.physical as string
 
       const audit = auditLedger(store)
 
@@ -4653,7 +4715,8 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   const background = await backgroundHere(values)
 
   const store = root ? new MarkdownStateStore(root) : null
-  const mode = store ? await readExecutionMode(store.scope('policy')) : null
+  // 이 Run 의 답을 묻는다 — 화면이 guard 와 같은 것을 말해야 한다 (0.8.4).
+  const mode = store ? await readExecutionMode(store.scope('policy'), observedRunId()) : null
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
   // 밖을 읽을 수 있는가 · 밖에 쓸 수 있는가. 두 답 모두 조립 결과에서 나온다.
   const ports = root ? await composedPorts(runtime).catch(() => null) : null
@@ -4814,7 +4877,12 @@ async function runMode(
   runtime?: ResolvedRuntime,
 ): Promise<number> {
   const scope = store.scope('policy')
-  const current = await readExecutionMode(scope)
+
+  // **누구의 실행을 묻는가** (0.8.4). 이 Run 이 자기 답을 가지고 있으면 그것이 답이고,
+  // 없으면 workspace 값이 답이다. `--run` 은 남의 Run 을 들여다볼 때만 쓴다.
+  const askedRun =
+    typeof values.run === 'string' ? values.run : values['this-run'] ? observedRunId() : observedRunId()
+  const current = await readExecutionMode(scope, askedRun)
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
 
   const outward = root ? await composedPorts(runtime).then((p) => p.scm ?? null).catch(() => null) : null
@@ -4828,6 +4896,9 @@ async function runMode(
             mode: state.mode ?? null,
             chosen: state.chosen,
             ...(state.degraded ? { degraded: state.degraded } : {}),
+            ...(state.decidedFor ? { decidedFor: state.decidedFor } : {}),
+            ...(state.runId ? { run: state.runId } : {}),
+            ...(state.runOverrides ? { runOverrides: state.runOverrides } : {}),
             enforcement: enforcementOf(state),
             autoReadiness: { ready: readiness.ready, axes: readiness.axes },
             ...(deadEnds.length > 0 ? { deadEnd: deadEnds } : {}),
@@ -4852,8 +4923,41 @@ async function runMode(
     for (const [key, value] of Object.entries(extra)) console.log(`${key}: ${String(value)}`)
   }
 
+  if (values['clear-run']) {
+    const target = runTarget(values)
+    if (!target.ok) {
+      console.error(target.detail)
+      return 2
+    }
+    if (!target.run) {
+      console.error('--clear-run 은 어느 Run 인지와 함께 쓴다: --this-run 또는 --run <id>.')
+      return 2
+    }
+    const cleared = await clearExecutionModeForRun(scope, target.run.id)
+    if (cleared) {
+      await store.appendHistory({
+        at: new Date().toISOString(),
+        actor: (values.as as string | undefined) ?? 'unattributed',
+        kind: 'execution_mode',
+        ref: 'execution-mode',
+        detail: `run ${target.run.id} cleared — workspace 값을 따른다`,
+      })
+    }
+    console.log(
+      cleared
+        ? `${target.run.id} 의 자기 답을 지웠다 — 이제 workspace 값을 따른다.`
+        : `${target.run.id} 은 자기 답을 가진 적이 없다. 바뀐 것 없다.`,
+    )
+    show(await readExecutionMode(scope, target.run.id))
+    return 0
+  }
+
   if (command === undefined || command === 'status') {
     show(current)
+    // 자기 답을 가진 Run 이 있으면 workspace 값만 보고 판단하지 않게 한다.
+    if (current.decidedFor === 'workspace' && current.runOverrides) {
+      console.log(`  이 workspace 에서 ${current.runOverrides} 개 Run 이 자기 답을 가지고 있다 (asc mode --run <id>)`)
+    }
     return 0
   }
 
@@ -4889,15 +4993,21 @@ async function runMode(
       }
       return 1
     }
-    const record = await writeExecutionMode(scope, 'AUTO', values.as as string | undefined)
+    const target = runTarget(values)
+    if (!target.ok) {
+      console.error(target.detail)
+      return 2
+    }
+    await writeExecutionMode(scope, 'AUTO', values.as as string | undefined, undefined, target.run)
+    const applied = await readExecutionMode(scope, target.run?.id ?? askedRun)
     await store.appendHistory({
-      at: record.since ?? new Date().toISOString(),
+      at: applied.since ?? new Date().toISOString(),
       actor: (values.as as string | undefined) ?? 'unattributed',
       kind: 'execution_mode',
       ref: 'execution-mode',
-      detail: `${current.mode ?? current.degraded ?? 'unknown'} → AUTO`,
+      detail: modeTransitionLine(current, 'AUTO', target.run),
     })
-    show({ ...record, chosen: true }, { applied: 'true' })
+    show(applied, { applied: 'true' })
     return 0
   }
 
@@ -4911,16 +5021,69 @@ async function runMode(
   //
   // 대신 **크게 남긴다**: 누가 그렇게 했다고 말하는지, 언제 바뀌었는지가 기록에 남고
   // 화면에 나온다. 실수하는 Agent 에게 필요한 것은 잠금이 아니라 드러남이다.
-  const record = await writeExecutionMode(scope, 'MANUAL', values.as as string | undefined)
+  const target = runTarget(values)
+  if (!target.ok) {
+    console.error(target.detail)
+    return 2
+  }
+  await writeExecutionMode(scope, 'MANUAL', values.as as string | undefined, undefined, target.run)
+  const applied = await readExecutionMode(scope, target.run?.id ?? askedRun)
   await store.appendHistory({
-    at: record.since ?? new Date().toISOString(),
+    at: applied.since ?? new Date().toISOString(),
     actor: (values.as as string | undefined) ?? 'unattributed',
     kind: 'execution_mode',
     ref: 'execution-mode',
-    detail: `${current.mode ?? current.degraded ?? 'unknown'} → MANUAL`,
+    detail: modeTransitionLine(current, 'MANUAL', target.run),
   })
-  show({ ...record, chosen: true }, { applied: 'true' })
+  show(applied, { applied: 'true' })
   return 0
+}
+
+/**
+ * 이 변경이 누구에게 적용되는가.
+ *
+ * 기본값은 여전히 workspace 다 — 혼자 쓰는 자리에서 매번 `--this-run` 을 치게 하면 그것이
+ * 새 마찰이 된다. 달라진 것은 **한 Run 만 바꿀 수 있다는 것**이고, 그 선택지가 없어서
+ * 관제 세션의 인수 시험이 남의 12시간짜리 AUTO 를 내렸다.
+ */
+function runTarget(
+  values: Record<string, unknown>,
+): { ok: true; run?: { id: string; reason?: string } } | { ok: false; detail: string } {
+  const explicit = typeof values.run === 'string' ? values.run : undefined
+  if (explicit && values['this-run']) {
+    return { ok: false, detail: '--run 과 --this-run 은 같이 쓸 수 없다 — 어느 Run 인지 하나로 말하라.' }
+  }
+  if (explicit) {
+    return {
+      ok: true,
+      run: { id: explicit, ...(typeof values.reason === 'string' ? { reason: values.reason } : {}) },
+    }
+  }
+  if (!values['this-run']) return { ok: true }
+  const observed = observedRunId()
+  if (!observed) {
+    return {
+      ok: false,
+      detail:
+        '--this-run 을 썼는데 이 Run 의 id 를 관측하지 못했다. --run <id> 로 Run 을 지목하라 ' +
+        '(guard 가 조회하는 값과 같아야 한다).',
+    }
+  }
+  return {
+    ok: true,
+    run: { id: observed, ...(typeof values.reason === 'string' ? { reason: values.reason } : {}) },
+  }
+}
+
+/** 무엇이 무엇으로 바뀌었는지 — **누구에게** 까지 한 줄에. 원장이 그 셋을 다 담아야 한다. */
+function modeTransitionLine(
+  before: ExecutionModeState,
+  after: ExecutionMode,
+  run?: { id: string; reason?: string },
+): string {
+  const from = before.mode ?? before.degraded ?? 'unknown'
+  const who = run ? `run ${run.id}` : 'workspace'
+  return `${from} → ${after} (${who})${run?.reason ? ` — ${run.reason}` : ''}`
 }
 
 /**
@@ -5225,7 +5388,7 @@ async function runWork(
             verifiable: outward.verifies?.(action.action) ?? false,
             unknown: ['this write path cannot be read before use'],
           }
-      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'))) === 'ENFORCE'
+      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'), observedRunId())) === 'ENFORCE'
       const review = reviewExternalAction({
         action: action.action,
         target: action.target,
@@ -6545,19 +6708,40 @@ async function runMonitor(
 
   // 어디까지 확인했는지 보여주기만 한다. 판정하지도, 무엇을 고치지도 않는다.
   if (command === 'status') {
+    // **"마지막 시도가 성공했다" 와 "지금 최신이다" 는 다른 사실이다** (0.8.4).
+    // 이 화면은 오래 앞엣것만 말했고, 그동안 `asc front` 는 같은 workspace 를 두고
+    // HOT_PATH_STALE 이라 말하고 있었다. 이제 둘이 같은 판정기를 지난다.
+    const registered = (await serviceHealth(values))?.action !== 'install'
+    const at = new Date().toISOString()
+    const verdictOf = async (channel: (typeof channels)[number]) => {
+      const health = await channel.engine.health()
+      const alerts = evaluateHealth(health, at, HEALTH_THRESHOLDS)
+      return { health, verdict: observationState(alerts, { registered }) }
+    }
     if (values.json) {
       const perChannel = []
       for (const channel of channels) {
-        perChannel.push({ channel: channel.label, source: channel.sourceId, health: await channel.engine.health() })
+        const { health, verdict } = await verdictOf(channel)
+        perChannel.push({
+          channel: channel.label,
+          source: channel.sourceId,
+          health,
+          observation: { state: verdict.state, detail: verdict.detail, alerts: verdict.alerts },
+        })
       }
-      console.log(JSON.stringify({ repo, channels: perChannel }, null, 2))
+      console.log(JSON.stringify({ repo, registered, channels: perChannel }, null, 2))
       return 0
     }
+    let stale = false
     for (const channel of channels) {
+      const { health, verdict } = await verdictOf(channel)
+      if (verdict.state !== 'HEALTHY') stale = true
       console.log(`[${channel.label}]`)
-      console.log(renderHealth(repo, await channel.engine.health()).join('\n'))
+      console.log(renderHealth(repo, health, verdict).join('\n'))
     }
-    return 0
+    // 화면을 읽는 사람이 다음에 할 일까지. 상태만 주고 끝내면 그것을 고칠 자리가 없다.
+    if (!registered) console.log('\n이 기계에는 상시 등록이 없다 — 관측은 명령을 칠 때만 돈다 (asc setup apply).')
+    return stale ? 1 : 0
   }
 
   if (command === 'reconcile' || command === 'census') {
@@ -6751,7 +6935,7 @@ async function runGrant(
         return 2
       }
       // 강제가 서 있는 자리에서는 되돌려 읽을 수 없는 행위를 실행하지 않는다 (P1-2).
-      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'))) === 'ENFORCE'
+      const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'), observedRunId())) === 'ENFORCE'
       const outcome = await new Executor({
         store,
         scm,
@@ -6836,6 +7020,103 @@ async function composedPorts(runtime?: ResolvedRuntime): Promise<Awaited<ReturnT
     endpointFor: (binding) => endpointOf(adapters, binding),
   })
   return ports
+}
+
+/**
+ * Inbox 를 원본의 **지금 상태**와 맞춘다 (0.8.4 · C-3).
+ *
+ * `AWAITING_APPROVAL` 을 "지금 사람이 결정해야 하는 것" 으로 내보내는 이상, 그 물음이
+ * 아직 서 있는지는 우리가 확인할 몫이다. 지금까지는 아무도 확인하지 않았고 — 원본 상태를
+ * 근거로 하는 전이가 전이표에 아예 없었다 — 닫힌 이슈가 결정 대기로 몇 시간씩 남았다.
+ *
+ * 규칙 넷:
+ *   · 이미 결정된 것은 건드리지 않는다
+ *   · 사람의 결정을 지어내지 않는다 — OBSOLETE 는 처분이 아니고 근거를 달고 간다
+ *   · 못 읽은 것을 최신으로 치지 않는다 — 못 읽었다고 말한다
+ *   · 통로가 없으면 조용히 통과하지 않는다. 그 사실을 돌려준다
+ */
+async function reconcileInbox(
+  store: MarkdownStateStore,
+  resolved: ResolvedRuntime | undefined,
+  only?: readonly string[],
+): Promise<{ checked: number; obsoleted: string[]; unreadable: string[]; detail?: string }> {
+  const pending = (await store.list('request')).filter(
+    (request) =>
+      (request.status === 'AWAITING_APPROVAL' || request.status === 'DEFERRED') &&
+      (only === undefined || only.includes(request.id)),
+  )
+  if (pending.length === 0) return { checked: 0, obsoleted: [], unreadable: [] }
+
+  const ports = await composedPorts(resolved).catch(() => null)
+  const context = ports?.resourceContext
+  if (!context) {
+    return {
+      checked: 0,
+      obsoleted: [],
+      unreadable: pending.map((request) => request.id),
+      detail: '원본을 읽을 통로가 조립되지 않았다 — 목록은 감지 시점의 상태다 (asc status)',
+    }
+  }
+
+  const at = new Date().toISOString()
+  const obsoleted: string[] = []
+  const unreadable: string[] = []
+  // 같은 자원을 여러 요청이 가리킬 수 있다. 한 번만 읽는다.
+  const seen = new Map<string, OriginObservation>()
+
+  for (const request of pending) {
+    const reference = request.source.reference
+    let origin = seen.get(reference)
+    if (!origin) {
+      origin = await context
+        .getResource(reference)
+        .then((snapshot) => ({ kind: 'READ', snapshot, at }) as OriginObservation)
+        .catch((error: unknown) => ({
+          kind: 'UNREADABLE',
+          detail: `${reference}: ${error instanceof Error ? error.message : String(error)}`,
+          at,
+        }) as OriginObservation)
+      seen.set(reference, origin)
+    }
+    const verdict = judgeReconcile(request, origin)
+    if (verdict.kind === 'UNKNOWN') {
+      unreadable.push(request.id)
+      continue
+    }
+    if (verdict.kind !== 'OBSOLETE') continue
+
+    const next = transitionRequest(request, 'OBSOLETE', 'monitor', {
+      obsolete: { reason: verdict.reason, evidence: verdict.evidence, observedAt: verdict.observedAt },
+    })
+    const moved = await store.compareAndSet('request', request.id, request.version, next)
+    if (!moved.ok) continue
+    obsoleted.push(request.id)
+    await store.appendHistory({
+      at,
+      actor: 'monitor',
+      kind: 'request_obsolete',
+      ref: request.id,
+      detail: verdict.evidence,
+    })
+  }
+
+  return { checked: pending.length, obsoleted, unreadable }
+}
+
+/** 사람이 읽는 대조 결과. **조용히 끝내지 않는다** — 못 읽은 것이 있으면 그것부터 말한다. */
+function reconcileLines(result: Awaited<ReturnType<typeof reconcileInbox>>): string[] {
+  const lines: string[] = []
+  if (result.obsoleted.length > 0) {
+    lines.push(
+      `원본 대조: ${result.obsoleted.join(', ')} 은 결정 전에 물음이 사라졌다 (원본이 끝나 있다) — 처분이 아니라 관측이다.`,
+    )
+  }
+  if (result.unreadable.length > 0) {
+    lines.push(
+      `원본 대조 실패: ${result.unreadable.join(', ')} — ${result.detail ?? '지금 읽지 못했다'}. 이 항목들은 감지 시점의 상태다.`,
+    )
+  }
+  return lines
 }
 
 /** `owner/repo#19` 에서 저장소만. 짧은 참조를 풀 때 쓴다. */
