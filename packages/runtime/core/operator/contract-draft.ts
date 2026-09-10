@@ -175,8 +175,10 @@ export function planSessionContract(input: ContractPlanInput): SessionContractPl
       field: 'id',
       reason: 'missing_input',
       detail:
-        'No session id. Use the work item key the person named, or the task id the canonical source ties to' +
-        ' this work. Do not spend a real issue key on a setup check.',
+        // 바로 아래 분기가 S-YYYYMMDD-NN 이 아닌 것을 전부 거절한다. 그런데 이 안내는
+        // 작업 항목 키를 쓰라고 말하고 있었다 — 시키는 대로 하면 반드시 거절당한다.
+        'No session id. Session ids look like S-YYYYMMDD-NN and are chosen for this session, not taken from' +
+        ' the work item — the work item key is carried separately. Pick the next free number for today.',
     })
   } else if (!SessionId.safeParse(draft.id).success) {
     invalid.push({ field: 'id', detail: `'${draft.id}' is not a session id — expected S-YYYYMMDD-NN` })

@@ -64,7 +64,11 @@ export type PersistentRuntimeAdapter = {
   supported(): Promise<boolean>
   status(command: ServiceCommand): Promise<ServiceState>
   install(command: ServiceCommand): Promise<void>
-  uninstall(): Promise<void>
+  /**
+   * `command` 는 선택이다. 등록물 말고 **그 등록만을 위해 만든 곳간의 산출물**까지 치우려면
+   * 그것이 어디 있었는지를 알아야 한다 — 모르면 등록만 지우고 나머지는 그대로 둔다.
+   */
+  uninstall(command?: ServiceCommand): Promise<void>
 }
 
 /**

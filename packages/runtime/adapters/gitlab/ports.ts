@@ -193,6 +193,7 @@ export class GitLabInventory extends GitLabBase implements InventoryPort {
           updatedAt: row.updated_at,
           revisionMarker: marker([row.updated_at, row.sha, row.state, row.user_notes_count]),
           title: row.title,
+          ...(row.author?.username ? { author: row.author.username } : {}),
           assignees: (row.assignees ?? []).map((a) => a.username),
           labels: row.labels ?? [],
         })
