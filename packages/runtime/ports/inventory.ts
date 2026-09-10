@@ -30,6 +30,14 @@ export type InventoryItem = {
    */
   revisionMarker: string
   title?: string
+  /**
+   * 이것을 연 사람 (0.8.5). 목록 응답이 이미 들고 있는 값이라 열거가 더 비싸지지 않는다.
+   *
+   * 여기 있는 이유는 **스레드를 다시 조회하지 않기 위해서**다. 관측이 방향을 판정하려면
+   * 누가 열었고 누구에게 배정됐는지가 필요한데, 그것만을 위해 항목마다 단건 조회를 한 번
+   * 더 하고 있었다. 실측에서 그 조회가 한 회차 API 호출의 절반이었다.
+   */
+  author?: string
   assignees?: readonly string[]
   labels?: readonly string[]
 }

@@ -37,11 +37,14 @@ class ScriptedResource implements ResourceContextPort {
   readonly id = 'scripted-resource'
   comments: ContextComment[]
   author: string
+  /** 단건 조회를 몇 번 했는가. 열거가 이미 말해 준 것을 다시 묻지 않는지 여기서 본다. */
+  resourceReads = 0
   constructor(author: string, comments: ContextComment[]) {
     this.author = author
     this.comments = comments
   }
   async getResource(reference: string): Promise<ResourceSnapshot> {
+    this.resourceReads += 1
     return {
       reference,
       state: 'closed',
@@ -59,12 +62,13 @@ class ScriptedResource implements ResourceContextPort {
   }
 }
 
-const item = (reference: string, marker: string): InventoryItem => ({
+const item = (reference: string, marker: string, author = ME): InventoryItem => ({
   reference,
   state: 'closed',
   updatedAt: LATE,
   revisionMarker: marker,
   title: 'license 근거 질문',
+  author,
   assignees: ['someone-else'],
 })
 
@@ -147,7 +151,7 @@ describe('B — 내가 마지막으로 말한 스레드는 후보가 아니고, 
 describe('D — 내가 말한 적 없는 스레드는 조용히 지나간다', () => {
   it('후보가 되지 않는다', async () => {
     const resource = new ScriptedResource('other', [{ id: '1', author: 'other', at: LATE, body: '잡담' }])
-    const { store, engine } = engineWith(resource, new FixtureInventory([item('group/project#900', 'm2')]))
+    const { store, engine } = engineWith(resource, new FixtureInventory([item('group/project#900', 'm2', 'other')]))
     const outcome = await engine.reconcile()
     assert.equal(outcome.packets.length, 0)
     assert.equal((await store.list('request')).length, 0)
@@ -155,7 +159,7 @@ describe('D — 내가 말한 적 없는 스레드는 조용히 지나간다', (
 
   it('방향은 UNKNOWN 으로 남고 내 차례로 바뀌지 않는다', async () => {
     const resource = new ScriptedResource('other', [{ id: '1', author: 'other', at: LATE, body: '잡담' }])
-    const { store, engine } = engineWith(resource, new FixtureInventory([item('group/project#900', 'm2')]))
+    const { store, engine } = engineWith(resource, new FixtureInventory([item('group/project#900', 'm2', 'other')]))
     await engine.reconcile()
     const record = (await new CoverageLedger(store.scope('monitor:silent')).list()).find(
       (row) => row.reference === 'group/project#900',
@@ -243,5 +247,80 @@ describe('예산 — 무제한 조회를 기본값으로 두지 않는다', () =
       history.some((entry) => entry.kind === 'monitor_deferred'),
       '조용히 미루면 그 회차는 완주한 것처럼 보인다',
     )
+  })
+})
+
+// ── 비용 — 열거가 이미 말한 것을 다시 묻지 않는다 (0.8.5) ─────────────────────
+//
+// 실측이 이 절을 쓰게 했다. 예산 200 으로 실제 저장소(항목 685개)의 첫 회차를 재니
+// API 호출이 16 에서 422 로, 71초가 364초가 됐다. 늘어난 것의 절반은 스레드 조회였고
+// 나머지 절반은 **누가 열었는지 알아내려는 단건 조회**였다 — 목록 응답이 그 값을 이미
+// 싣고 오는데도.
+describe('비용 — 목록이 준 사실을 단건 조회로 다시 묻지 않는다', () => {
+  it('회수 경로는 스레드만 읽는다', async () => {
+    // 후보가 되지 않는 항목으로 잰다. 후보가 되면 그 뒤의 조사 경로가 원본을 읽는데,
+    // 그것은 9건에만 드는 비용이고 여기서 재려는 것은 **전 항목에 드는** 비용이다.
+    const resource = new ScriptedResource(ME, [
+      { id: '1', author: 'other', at: EARLY, body: 'a' },
+      { id: '2', author: ME, at: LATE, body: '그럼 이렇게 갑니다' },
+    ])
+    const { engine } = engineWith(resource, new FixtureInventory([item('group/project#146', 'm2')]))
+    await engine.reconcile()
+    assert.equal(resource.resourceReads, 0, '항목마다 단건 조회를 한 번 더 하면 회차 비용이 두 배가 된다')
+  })
+
+  it('그래도 판정은 같다 — 목록이 준 author 로 방향이 선다', async () => {
+    const resource = new ScriptedResource(ME, [
+      { id: '1', author: ME, at: EARLY, body: 'q' },
+      { id: '2', author: 'other', at: LATE, body: 'a' },
+    ])
+    const { store, engine } = engineWith(resource, new FixtureInventory([item('group/project#148', 'm2')]))
+    await engine.reconcile()
+    assert.equal((await store.list('request'))[0]?.source.direction, 'INBOUND')
+  })
+
+  it('내가 열었거나 내게 배정된 것을 먼저 본다', async () => {
+    // 예산이 하나뿐일 때 무엇이 그 하나를 쓰는가. 남의 것이 앞줄에 있어도 내 것이 먼저다.
+    const resource = new ScriptedResource(ME, [
+      { id: '1', author: ME, at: EARLY, body: 'q' },
+      { id: '2', author: 'other', at: LATE, body: 'a' },
+    ])
+    const inventory = new FixtureInventory([
+      item('group/project#900', 'm2', 'someone-else'),
+      item('group/project#901', 'm2', 'someone-else'),
+      item('group/project#148', 'm2', ME),
+    ])
+    const store = new MemoryStateStore()
+    const engine = new MonitorEngine({
+      store,
+      source: new SilentSource(),
+      inventory,
+      config: { identities: [ME] },
+      authorizedApprover: ME,
+      observe: buildEventObservation({ resource, identities: [ME], threadBudget: 1 }),
+      investigation: { resource },
+      now: () => LATE,
+    })
+    await engine.reconcile()
+    assert.equal(
+      (await store.list('request'))[0]?.source.reference,
+      'group/project#148',
+      '남의 것이 예산을 먼저 쓰면 내게 온 답은 다음 회차로 밀린다',
+    )
+  })
+
+  it('거르지는 않는다 — 남의 것도 예산이 남으면 같은 회차에 본다', async () => {
+    const resource = new ScriptedResource(ME, [
+      { id: '1', author: ME, at: EARLY, body: 'q' },
+      { id: '2', author: 'other', at: LATE, body: 'a' },
+    ])
+    const inventory = new FixtureInventory([
+      item('group/project#900', 'm2', 'someone-else'),
+      item('group/project#148', 'm2', ME),
+    ])
+    const { store, engine } = engineWith(resource, inventory)
+    await engine.reconcile()
+    const seen = await new CoverageLedger(store.scope('monitor:silent')).list()
+    assert.equal(seen.length, 2, '내 것만 보는 것은 다른 종류의 누락이다')
   })
 })

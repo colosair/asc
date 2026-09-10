@@ -67,7 +67,7 @@ export type MonitorDeps = {
    * 콜백 하나로 받는 이유: 이벤트마다 외부 조회가 필요할 수 있어 여러 번 왕복하면
    * 회차 비용이 그만큼 늘어난다.
    */
-  observe?: (event: RawEvent) => Promise<EventObservation> | EventObservation
+  observe?: (event: RawEvent, known?: KnownFacts) => Promise<EventObservation> | EventObservation
   /** 같은 reference를 지난번에 어떻게 봤는지 (C-07 §4·§5). 없으면 억제도 Shadow도 없다. */
   observations?: ObservationLedger
   /**
@@ -159,7 +159,7 @@ export class MonitorEngine {
   #scm: ScmPort | undefined
   #approver: string
   #canonicalSources: readonly string[]
-  #observe: ((event: RawEvent) => Promise<EventObservation> | EventObservation) | undefined
+  #observe: ((event: RawEvent, known?: KnownFacts) => Promise<EventObservation> | EventObservation) | undefined
   #observations: ObservationLedger | undefined
   #inventory: InventoryPort | undefined
   #investigation: Pick<InvestigationPorts, 'resource' | 'change' | 'work' | 'history'> | undefined
@@ -259,6 +259,7 @@ export class MonitorEngine {
   async #intake(
     event: RawEvent,
     extra: SignalContext = {},
+    known?: KnownFacts,
   ): Promise<
     | { duplicate: true }
     | {
@@ -271,7 +272,7 @@ export class MonitorEngine {
     // dedupe는 log를 훑는 게 아니라 key 하나로 본다 (OM §10.4)
     if (await this.#store.get('event', event.eventKey)) return { duplicate: true }
     // 밖에서 알아 온 사실을 먼저 모은다 — 없으면 신호만으로 판정한다.
-    const observed = this.#observe ? await this.#observe(event) : {}
+    const observed = this.#observe ? await this.#observe(event, known) : {}
     const verdict = classify(event, this.#config, { ...extra, ...(observed.signal ?? {}) })
 
     // 신호와 관련성은 다른 층이다 (C-07 §2). 신호는 "무슨 일이 있었나"이고
@@ -406,7 +407,7 @@ export class MonitorEngine {
         cursor = page.next
       }
 
-      const diffs = await coverage.diff(items)
+      const diffs = mineFirst(await coverage.diff(items), this.#config.identities ?? [])
       // 상실 판정은 census에서, 그것도 완주한 목록에서만 한다.
       const missing = kind === 'census' ? await coverage.missing(seen, complete && !failure) : []
 
@@ -421,7 +422,11 @@ export class MonitorEngine {
         // 목록에서만 알 수 있는 사실을 신호 판정에 넘긴다. 알림이 오지 않은 배정이
         // 정확히 이 경로로 잡힌다.
         const assignedToMe = (diff.item.assignees ?? []).some((who) => me.includes(who))
-        const taken = await this.#intake(sweepEvent(kind, diff, at), assignedToMe ? { assignedToMe } : {})
+        // 열거가 준 사실을 관측에 넘긴다 — 같은 것을 단건 조회로 다시 묻지 않게.
+        const taken = await this.#intake(sweepEvent(kind, diff, at), assignedToMe ? { assignedToMe } : {}, {
+          ...(diff.item.author ? { author: diff.item.author } : {}),
+          ...(diff.item.assignees ? { assignees: diff.item.assignees } : {}),
+        })
         if (!taken.duplicate && taken.fresh) fresh.push(taken.fresh)
         // 예산을 다 써 아직 보지 않은 것은 **기록하지 않는다.** 마커를 갱신하면 다음
         // 회차가 그것을 "달라진 것 없음" 으로 읽고 영영 지나친다.
@@ -842,6 +847,35 @@ function allowedDecisionsFor(type: string): string[] {
  * **모르면 아무것도 쓰지 않는다.** 방향을 만들 근거가 없을 때 UNKNOWN 을 적으면 그것이
  * 지난 회차의 관측을 덮어 지운다 — 스레드를 읽지 못한 회차가 읽은 회차를 이기게 된다.
  */
+/**
+ * 열거가 이미 들고 있던 사실 (0.8.5). 관측에 넘겨 같은 것을 다시 묻지 않게 한다.
+ *
+ * 스레드 판정에 필요한 것은 발언 목록과 이 둘뿐이다 — 누가 열었고 누구에게 배정됐는가.
+ * 목록 응답이 그 둘을 이미 싣고 오는데도 그것만을 위해 항목마다 단건 조회를 한 번 더
+ * 하고 있었다. 실측에서 그 조회가 한 회차 API 호출의 절반이었다.
+ */
+export type KnownFacts = { author?: string; assignees?: readonly string[] }
+
+/**
+ * 내 것을 먼저 본다 (0.8.5).
+ *
+ * 예산은 유한하고, 예산을 넘긴 것은 다음 회차로 넘어간다. 그러면 **무엇을 먼저 보는가**가
+ * 곧 "답이 온 것을 오늘 보는가 내일 보는가" 가 된다. 내가 열었거나 내게 배정된 것이
+ * 후보가 될 수 있는 전부이므로 그것을 앞에 세운다.
+ *
+ * 거르지는 않는다. 나머지도 같은 회차에 예산이 남으면 보고, 남지 않으면 다음 회차가
+ * 본다 — 내가 댓글로만 참여한 스레드가 그 나머지 안에 있기 때문이다.
+ */
+function mineFirst(diffs: readonly CoverageDiff[], me: readonly string[]): CoverageDiff[] {
+  if (me.length === 0) return [...diffs]
+  const mine = (diff: CoverageDiff): boolean => {
+    if (diff.kind === 'RESOURCE_MISSING') return false
+    const item = diff.item
+    return me.includes(item.author ?? '') || (item.assignees ?? []).some((who) => me.includes(who))
+  }
+  return [...diffs].sort((a, b) => Number(mine(b)) - Number(mine(a)))
+}
+
 function directionRecord(
   participation: Participation | undefined,
   verdict: { signals: readonly string[] },

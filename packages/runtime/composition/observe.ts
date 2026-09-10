@@ -15,7 +15,7 @@
 // 넘기면 **모든 사건이 조용히 숨는다** — 근거 없이 숨기는 것이 가장 나쁜 결과다.
 
 import type { OwnershipMap } from '../core/policy/ownership.ts'
-import type { EventObservation } from '../core/monitor/engine.ts'
+import type { EventObservation, KnownFacts } from '../core/monitor/engine.ts'
 import { readParticipation } from '../core/monitor/participation.ts'
 import type { ChangeContextPort } from '../ports/change-context.ts'
 import type { RawEvent } from '../ports/event-source.ts'
@@ -48,6 +48,10 @@ export type ObservationDeps = {
    * 새 것이라 그대로 두면 열거 한 번이 프로젝트 전체 스레드 조회가 된다. 예산을 넘긴
    * 항목은 "아직 보지 않았다" 로 표시돼 다음 회차가 같은 자리에서 다시 본다 — 본 것으로
    * 적고 넘어가면 그 항목은 영영 다시 걸리지 않는다.
+   *
+   * 기본값은 실측으로 정했다. 200 으로 두고 실제 저장소(항목 685개)의 첫 회차를 재니
+   * API 호출이 16 에서 422 로, 71초가 364초가 됐다. 40 이면 같은 자리에서 회차당 40 회를
+   * 더 쓰고, 나머지는 다음 회차가 이어 본다 — 놓치는 것은 없고 늦게 볼 뿐이다.
    */
   threadBudget?: number
   /** Profile이 선언한 책임 지도 (C-04 §6). */
@@ -70,19 +74,21 @@ function ownedPaths(map: OwnershipMap | undefined, roles: readonly string[] | un
  * 실패는 전부 "모른다"로 접는다 — 관찰이 감지를 막지 않는다. 외부 조회가 흔들려서
  * 판단 대기함이 비면 그건 조회 실패가 아니라 **감지 실패**로 보이기 때문이다.
  */
-export function buildEventObservation(deps: ObservationDeps): (event: RawEvent) => Promise<EventObservation> {
+export function buildEventObservation(
+  deps: ObservationDeps,
+): (event: RawEvent, known?: KnownFacts) => Promise<EventObservation> {
   const owned = ownedPaths(deps.ownership, deps.myRoles)
   const canonicalPaths = deps.canonicalPaths?.length ? deps.canonicalPaths : undefined
   // 이 builder 하나가 한 회차를 담당한다 — 예산도 여기서 센다.
-  let budget = deps.threadBudget ?? 200
+  let budget = deps.threadBudget ?? 40
 
-  return async (event: RawEvent): Promise<EventObservation> => {
+  return async (event: RawEvent, known?: KnownFacts): Promise<EventObservation> => {
     // ── 누가 마지막으로 말했는가 (0.8.5) ──────────────────────────────────
     //
     // change 보다 먼저 본다. 이슈에는 변경이 없고, `getChange` 가 missing 을 돌려주는
     // 순간 예전 코드는 아무것도 만들지 않고 나갔다 — 그래서 "내가 묻고 상대가 답한"
     // 이슈 스레드는 신호가 0 이 되어 수신함에 오르지 못했다. 그 자리가 여기다.
-    const thread = await readThread(deps, event.reference, () => budget-- > 0)
+    const thread = await readThread(deps, event.reference, () => budget-- > 0, known)
 
     if (!deps.change) return thread
 
@@ -141,6 +147,7 @@ async function readThread(
   deps: ObservationDeps,
   reference: string,
   spend: () => boolean,
+  known?: KnownFacts,
 ): Promise<EventObservation> {
   if (!deps.resource || !deps.identities?.length) return {}
   // 예산을 넘겼으면 **읽지 않았다고 말한다.** 읽지 않은 것을 "관측 없음" 으로 접으면
@@ -151,7 +158,9 @@ async function readThread(
     .catch(() => null)
   if (!comments) return {}
 
-  const snapshot = await deps.resource.getResource(reference).catch(() => null)
+  // 열거가 이미 말해 준 것은 다시 묻지 않는다. 이 두 값을 위해 항목마다 단건 조회를
+  // 한 번 더 하던 것이 실측에서 회차 비용의 절반이었다.
+  const snapshot = known ?? (await deps.resource.getResource(reference).catch(() => null))
   const participation = readParticipation(
     {
       ...(snapshot?.author ? { author: snapshot.author } : {}),

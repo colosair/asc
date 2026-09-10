@@ -123,6 +123,7 @@ export class GitHubInventory extends GitHubContextBase implements InventoryPort 
         updatedAt: issue.updated_at,
         revisionMarker: marker([issue.updated_at, issue.comments, issue.state]),
         title: issue.title,
+        ...(issue.user?.login ? { author: issue.user.login } : {}),
         assignees: (issue.assignees ?? []).map((a) => a.login),
         labels: labelNames(issue.labels),
       })
