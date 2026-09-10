@@ -324,3 +324,79 @@ describe('비용 — 목록이 준 사실을 단건 조회로 다시 묻지 않�
     assert.equal(seen.length, 2, '내 것만 보는 것은 다른 종류의 누락이다')
   })
 })
+
+// ── 미룬 것이 실제로 돌아오는가 (0.8.5) ──────────────────────────────────────
+//
+// 실기계에서 이 주장이 거짓이었다. 첫 회차가 98건 중 40건을 보고 58건을 미뤘는데, 두 번째
+// 회차의 목록은 **1건**이었다. 미룬 58건은 돌아오지 않았다.
+//
+// 원인은 미룬 항목을 coverage 에 적지 않는 것만으로는 모자랐다는 데 있다. 다음 회차의
+// 열거는 기준선(watermark) 이후만 훑는데, 그 기준선이 이번 목록의 가장 나중 시각으로
+// 옮겨가 미룬 항목을 지나쳐 버렸다. 적지 않은 것이 아무 소용이 없었다.
+//
+// 위의 예산 시험이 이것을 못 잡은 이유는 fixture 가 매번 같은 목록을 통째로 주기
+// 때문이다 — 여기서는 provider 처럼 기준선을 존중하는 목록을 쓴다.
+describe('예산 — 미룬 것은 다음 회차 목록에 남아 있어야 한다', () => {
+  it('기준선이 못 본 것을 넘어가지 않는다', async () => {
+    const resource = new ScriptedResource(ME, [
+      { id: '1', author: ME, at: EARLY, body: 'q' },
+      { id: '2', author: 'other', at: LATE, body: 'a' },
+    ])
+    // 갱신 시각이 서로 다른 셋. 예산은 하나뿐이다.
+    const inventory = new FixtureInventory([
+      { ...item('group/project#1', 'm1'), updatedAt: '2026-09-09T01:00:00.000Z' },
+      { ...item('group/project#2', 'm1'), updatedAt: '2026-09-09T02:00:00.000Z' },
+      { ...item('group/project#3', 'm1'), updatedAt: '2026-09-09T03:00:00.000Z' },
+    ])
+    const store = new MemoryStateStore()
+    const build = (budget: number) =>
+      new MonitorEngine({
+        store,
+        source: new SilentSource(),
+        inventory,
+        config: { identities: [ME] },
+        authorizedApprover: ME,
+        observe: buildEventObservation({ resource, identities: [ME], threadBudget: budget }),
+        investigation: { resource },
+        now: () => LATE,
+      })
+
+    await build(1).reconcile()
+    const health = await build(1).health()
+    assert.ok(
+      (health.coverageWatermark ?? '') <= '2026-09-09T02:00:00.000Z',
+      `기준선이 못 본 것을 지나쳤다 (${health.coverageWatermark}) — 그 항목은 다음 목록에 나오지 않는다`,
+    )
+
+    // 예산을 풀면 남은 둘이 같은 자리에서 나온다.
+    const second = await build(10).reconcile()
+    assert.ok(second.seen >= 2, `다음 회차 목록이 ${second.seen}건뿐이다 — 미룬 것이 사라졌다`)
+    assert.equal((await new CoverageLedger(store.scope('monitor:silent')).list()).length, 3)
+  })
+
+  it('미룬 것이 없으면 기준선은 그대로 앞으로 간다', async () => {
+    const resource = new ScriptedResource(ME, [{ id: '1', author: ME, at: EARLY, body: 'q' }])
+    const inventory = new FixtureInventory([
+      { ...item('group/project#1', 'm1'), updatedAt: '2026-09-09T01:00:00.000Z' },
+      { ...item('group/project#2', 'm1'), updatedAt: '2026-09-09T03:00:00.000Z' },
+    ])
+    const store = new MemoryStateStore()
+    const engine = new MonitorEngine({
+      store,
+      source: new SilentSource(),
+      inventory,
+      config: { identities: [ME] },
+      authorizedApprover: ME,
+      observe: buildEventObservation({ resource, identities: [ME], threadBudget: 10 }),
+      investigation: { resource },
+      now: () => LATE,
+    })
+    await engine.reconcile()
+    const health = await engine.health()
+    assert.equal(
+      health.coverageWatermark,
+      '2026-09-09T03:00:00.000Z',
+      '다 봤는데도 기준선을 붙들면 같은 목록을 영원히 다시 읽는다',
+    )
+  })
+})

@@ -417,6 +417,8 @@ export class MonitorEngine {
 
       const me = this.#config.identities ?? []
       let deferred = 0
+      /** 예산을 넘겨 못 본 것 중 가장 오래된 갱신 시각. 기준선은 그 앞에서 멈춰야 한다. */
+      let oldestDeferredAt: string | undefined
       for (const diff of diffs) {
         if (diff.kind === 'RESOURCE_MISSING') continue
         // 목록에서만 알 수 있는 사실을 신호 판정에 넘긴다. 알림이 오지 않은 배정이
@@ -432,6 +434,8 @@ export class MonitorEngine {
         // 회차가 그것을 "달라진 것 없음" 으로 읽고 영영 지나친다.
         if (!taken.duplicate && taken.deferred) {
           deferred += 1
+          const seenAt = diff.item.updatedAt
+          if (seenAt && (oldestDeferredAt === undefined || seenAt < oldestDeferredAt)) oldestDeferredAt = seenAt
           continue
         }
         await coverage.record({
@@ -472,10 +476,19 @@ export class MonitorEngine {
 
       // 기준선은 **provider가 말한 시각**으로 옮긴다. 우리 시계로 옮기면 시계 차이만큼의
       // 변경이 영영 회수되지 않는다 — 그 창이 정확히 이 경로가 막으려던 구멍이다.
-      const watermark = items.reduce<string | undefined>(
+      const furthest = items.reduce<string | undefined>(
         (max, item) => (max === undefined || item.updatedAt > max ? item.updatedAt : max),
         undefined,
       )
+      // **못 본 것을 넘어서 기준선을 옮기지 않는다** (0.8.5).
+      //
+      // 예산을 넘긴 항목은 coverage 에 적지 않으므로 "달라진 것" 으로는 남는다. 그런데
+      // 다음 회차의 열거 창이 기준선에서 시작하므로, 기준선이 그 항목을 지나쳐 버리면
+      // 목록에 아예 나오지 않는다 — 적지 않은 것이 아무 소용이 없어진다.
+      //
+      // 실기계에서 그렇게 됐다: 첫 회차가 98건 중 40건을 보고 58건을 미뤘는데, 두 번째
+      // 회차의 목록은 1건이었다. 미룬 58건은 돌아오지 않았다.
+      const watermark = oldestDeferredAt ?? furthest
 
       await coverage.updateHealth({
         ...(kind === 'reconcile' ? { lastReconcileAt: at } : { lastCensusAt: at }),

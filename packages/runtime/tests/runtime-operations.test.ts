@@ -173,3 +173,29 @@ function registrationXml(runLine: string): string {
   </Exec></Actions>
 </Task>`
 }
+
+// 실행기 자체가 등록물의 내용이다 (0.8.5 실기계 acceptance 에서 드러남).
+describe('#76 — 실행기가 달라지면 등록도 낡은 것이다', () => {
+  it('안쪽 명령이 같아도 실행기가 달라지면 지문이 달라진다', () => {
+    const withLog = commandFingerprint(command)
+    const withoutLog = commandFingerprint({ ...command, logPath: undefined })
+    assert.notEqual(
+      withLog,
+      withoutLog,
+      '명령만 세면 실행기에 로그를 더한 판을 설치해도 등록은 "그대로" 로 읽히고 옛 파일이 남는다',
+    )
+  })
+
+  it('회차의 출력이 로그로 간다 — Last Result 는 wscript 의 결과이지 회차의 결과가 아니다', () => {
+    const script = launcherScript(command)
+    assert.match(script, /cmd \/c/)
+    assert.match(script, /service\.log/)
+    assert.match(script, /2>&1/)
+  })
+
+  it('로그 자리가 없으면 리다이렉션도 없다 — 없는 경로로 내보내지 않는다', () => {
+    const script = launcherScript({ ...command, logPath: undefined })
+    assert.doesNotMatch(script, /2>&1/)
+    assert.match(script, /shell\.Run ".*", 0, False/)
+  })
+})
