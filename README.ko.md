@@ -22,7 +22,7 @@ workspace 개념의 정본은 [C-11](docs/contracts/C-11_workspace-local-first.m
 ## 설치
 
 ```bash
-npx --yes @asc-agent/bootstrap@0.8.4 setup apply --json
+npx --yes @asc-agent/bootstrap@0.8.5 setup apply --json
 ```
 
 그 다음부터 평소 쓰는 말은 셋이다:
@@ -54,10 +54,10 @@ ASC는 패키지 둘로 나온다.
 | `@asc-agent/bootstrap` | zero-install 첫 진입. 자체 setup 정책이 없다 |
 
 ```text
-npx --yes @asc-agent/bootstrap@0.8.4 setup apply --json
+npx --yes @asc-agent/bootstrap@0.8.5 setup apply --json
         ↓  bootstrap이 ASC의 평소 setup을 돌린다 (detect → plan → apply → verify)
         ↓  plan에 "이 machine에 runtime을 설치한다"가 변경으로 적힌다
-        ↓  apply: npm install -g @asc-agent/runtime@0.8.4
+        ↓  apply: npm install -g @asc-agent/runtime@0.8.5
         ↓  실행물 링크는 npm의 몫이다 (Windows에서는 npm이 만든 asc.cmd)
         ↓  verify: 설치된 버전 + **새 프로세스에서** 실행되는지까지 본다
 bootstrap 종료
@@ -76,8 +76,8 @@ ASC는 shell 설정도 PATH도 고치지 않는다. 설치는 됐는데 지금 �
 
 | 방식 | 진입 | 언제 |
 |---|---|---|
-| Zero-install | `npx --yes @asc-agent/bootstrap@0.8.4 <command> --json` | 아직 아무것도 설치 전 |
-| Persistent | `asc setup` 이 설치하고 `asc update` 가 옮긴다 | 안정적인 로컬 명령. `npm install -g @asc-agent/runtime@0.8.4` 은 `npx` 자체가 서지 못할 때의 수동 대안이다 |
+| Zero-install | `npx --yes @asc-agent/bootstrap@0.8.5 <command> --json` | 아직 아무것도 설치 전 |
+| Persistent | `asc setup` 이 설치하고 `asc update` 가 옮긴다 | 안정적인 로컬 명령. `npm install -g @asc-agent/runtime@0.8.5` 은 `npx` 자체가 서지 못할 때의 수동 대안이다 |
 | Development | `asc runtime use development <checkout>` | 패키지 대신 빌드된 checkout으로 |
 
 ASC 프로세스가 뜨기도 전에 `npx`/`npm exec` 가 죽으면 — package runner나 PATH의 문제 —
