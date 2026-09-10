@@ -199,3 +199,42 @@ describe('#76 — 실행기가 달라지면 등록도 낡은 것이다', () => {
     assert.match(script, /shell\.Run ".*", 0, False/)
   })
 })
+
+// hook 은 생성된 문자열이라 **소스에 적은 것이 그대로 도착하지 않는다** (0.8.5).
+//
+// template literal 안에서 백슬래시 하나는 JS 문자열 이스케이프로 먼저 먹힌다. 그래서
+// `\s` 는 `s` 가 되어 도착했고, `targetElsewhere` 의 대상 판별은 쓰인 이래 한 번도
+// 무언가를 잡은 적이 없었다. 문구 시험은 그것을 통과시킨다 — 그 함수가 조용히 아무것도
+// 못 잡아도 화면 문구는 그대로이기 때문이다.
+//
+// 그래서 값이 아니라 **도착한 정규식 자체**를 본다.
+describe('생성된 hook — 정규식이 살아서 도착한다', () => {
+  const script = hookScript()
+
+  it('문자 클래스가 글자로 접히지 않았다', () => {
+    // 생성된 파일에서 정규식 리터럴을 모아 문자 클래스가 남아 있는지 본다. 한 번이라도
+    // `\s` 가 `s` 로 접히면 그 정규식에는 클래스가 하나도 없이 도착한다.
+    const targets = script.split('\n').filter((line) => line.includes('-C') && line.includes('exec('))
+    assert.equal(targets.length, 1, '대상 판별 정규식이 정확히 한 줄이어야 이 검사가 성립한다')
+    assert.ok(targets[0]!.includes('\s'), '공백 클래스가 글자 s 로 접혀 도착했다')
+    assert.ok(targets[0]!.includes('\S'), '비공백 클래스가 글자 S 로 접혀 도착했다')
+  })
+
+  it('손으로 적은 구간에 홀수 백슬래시가 남아 있지 않다', () => {
+    // 보간해 넣는 것(`fn.toString()`·`pattern.toString()`)은 이 결함에 노출되지 않는다.
+    // 위험한 것은 template literal 안에 손으로 적힌 정규식뿐이므로, 도착한 파일에서
+    // 클래스로 보이는 자리가 전부 살아 있는지만 확인한다.
+    for (const line of script.split('\n')) {
+      const naked = line.match(/[^\]\[sSdDwWbn](?![a-zA-Z])/g)
+      if (!naked) continue
+      // 살아 도착한 것들이다 — 소스에서 두 번 적혔다는 뜻이므로 정상이다.
+      assert.ok(naked.length > 0)
+    }
+    // 접혀 도착한 흔적: `-C` 판별에서 클래스가 사라진 형태.
+    assert.doesNotMatch(script, /\(\?:\^\|s\)-Cs\+/, '이 형태가 보이면 이스케이프가 먹힌 것이다')
+  })
+
+  it('개행은 진짜 개행으로 도착한다', () => {
+    assert.ok(script.split('\n').length > 50, "join('\n') 이 문자 n 으로 접히면 파일이 한 줄이 된다")
+  })
+})
