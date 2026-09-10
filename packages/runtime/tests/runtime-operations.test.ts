@@ -4,6 +4,7 @@
 // 있는 시험은 값이 아니라 화면과 등록물의 모양을 본다.
 
 import assert from 'node:assert/strict'
+import { basename, dirname } from 'node:path'
 import { describe, it } from 'node:test'
 
 import { hookScript } from '../adapters/claude-code/guard.ts'
@@ -52,7 +53,11 @@ describe('#76 — 예약 회차가 사람 화면에 창을 띄우지 않는다',
   })
 
   it('실행기는 등록물의 곳간에 산다 — 로그와 같은 자리', () => {
-    assert.equal(launcherPath(command), 'C:\\Users\\t\\.asc\\service-launcher.vbs')
+    // 경로 구분자는 이 검사의 대상이 아니다 — 로그와 같은 디렉터리에 사는지, 이름이
+    // 무엇인지만 본다. 구분자까지 고정하면 이 사실이 아니라 실행 OS 를 검사하게 된다.
+    const path = launcherPath(command)
+    assert.equal(dirname(path), dirname(command.logPath!))
+    assert.equal(basename(path), 'service-launcher.vbs')
   })
 
   it('안쪽 명령이 바뀌면 등록물에서 그것이 드러난다', () => {
