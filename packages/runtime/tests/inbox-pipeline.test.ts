@@ -12,6 +12,7 @@ import { MemoryStateStore } from '../adapters/memory/state-store.ts'
 import { buildEventObservation } from '../composition/observe.ts'
 import { MonitorEngine } from '../core/monitor/engine.ts'
 import { CoverageLedger } from '../core/monitor/coverage.ts'
+import type { ChangeContextPort } from '../ports/change-context.ts'
 import type { EventBatch, EventSource } from '../ports/event-source.ts'
 import type { InventoryItem } from '../ports/inventory.ts'
 import type {
@@ -39,6 +40,8 @@ class ScriptedResource implements ResourceContextPort {
   author: string
   /** 단건 조회를 몇 번 했는가. 열거가 이미 말해 준 것을 다시 묻지 않는지 여기서 본다. */
   resourceReads = 0
+  /** 실제로 스레드를 연 항목들. "봤다" 의 유일한 증거다 — coverage 크기는 그 대리가 못 된다. */
+  opened: string[] = []
   constructor(author: string, comments: ContextComment[]) {
     this.author = author
     this.comments = comments
@@ -55,7 +58,8 @@ class ScriptedResource implements ResourceContextPort {
       settled: true,
     }
   }
-  async getComments(_reference: string, _query?: CommentQuery): Promise<ContextComment[]> {
+  async getComments(reference: string, _query?: CommentQuery): Promise<ContextComment[]> {
+    this.opened.push(reference)
     // **최신순으로 준다.** 실제 provider 가 그렇게 준다 — 배열 끝을 마지막 발언으로 읽으면
     // 가장 오래된 것을 집는다. 조립이 그것을 바로잡는지 여기서 확인한다.
     return [...this.comments].reverse()
@@ -187,7 +191,7 @@ describe('스레드를 읽을 통로가 없으면 예전 그대로 돈다', () =
 })
 
 describe('예산 — 무제한 조회를 기본값으로 두지 않는다', () => {
-  it('예산을 넘긴 항목은 "본 것" 으로 기록되지 않고 다음 회차에 다시 온다', async () => {
+  it('예산을 넘긴 항목은 다음 회차가 **실제로 연다**', async () => {
     const resource = new ScriptedResource(ME, [
       { id: '1', author: ME, at: EARLY, body: 'q' },
       { id: '2', author: 'other', at: LATE, body: 'a' },
@@ -198,36 +202,69 @@ describe('예산 — 무제한 조회를 기본값으로 두지 않는다', () =
       item('group/project#3', 'm2'),
     ])
     const store = new MemoryStateStore()
+    const build = (budget: number) =>
+      new MonitorEngine({
+        store,
+        source: new SilentSource(),
+        inventory,
+        config: { identities: [ME] },
+        authorizedApprover: ME,
+        observe: buildEventObservation({ resource, identities: [ME], threadBudget: budget }),
+        investigation: { resource },
+        now: () => LATE,
+      })
+
+    await build(1).reconcile()
+    // 서로 다른 항목 수로 센다 — 후보가 된 건은 조사 경로가 같은 스레드를 한 번 더 연다.
+    assert.deepEqual([...new Set(resource.opened)], ['group/project#1'], '예산이 하나면 한 항목만 연다')
+
+    // **coverage 크기로 재지 않는다.** 미룬 항목의 마커가 결국 기록되는 것과 그 항목을
+    // 실제로 열어 본 것은 다른 사실이고, 예전 시험은 앞엣것을 재면서 뒤엣것을 확인했다고
+    // 여겼다 — 그 사이에 결함이 살아 있었다.
+    await build(10).reconcile()
+    assert.deepEqual(
+      [...new Set(resource.opened)].sort(),
+      ['group/project#1', 'group/project#2', 'group/project#3'],
+      '미룬 것을 다음 회차가 열지 않으면 그 항목은 영영 후보가 되지 않는다',
+    )
+    assert.equal((await new CoverageLedger(store.scope('monitor:silent')).list()).length, 3)
+  })
+
+  it('change 통로가 함께 붙어 있어도 미룬 항목의 마커를 태우지 않는다', async () => {
+    // 실제 GitLab MR 채널이 이 조립이다 — resource 와 change 를 둘 다 준다. 예전에는
+    // 예산을 넘긴 뒤에도 change 조회가 계속돼 revisionMarker 가 돌아왔고, 그 값 하나로
+    // 관측이 그 항목을 '본 것' 으로 기록했다.
+    const resource = new ScriptedResource(ME, [
+      { id: '1', author: ME, at: EARLY, body: 'q' },
+      { id: '2', author: 'other', at: LATE, body: 'a' },
+    ])
+    const change: ChangeContextPort = {
+      id: 'scripted-change',
+      async getChange(reference: string) {
+        return { reference, missing: false, changedPaths: ['src/a.ts'], truncated: false, revisionMarker: 'chg-1' }
+      },
+    }
+    const inventory = new FixtureInventory([item('group/project#1', 'm2'), item('group/project#2', 'm2')])
+    const store = new MemoryStateStore()
     const engine = new MonitorEngine({
       store,
       source: new SilentSource(),
       inventory,
       config: { identities: [ME] },
       authorizedApprover: ME,
-      observe: buildEventObservation({ resource, identities: [ME], threadBudget: 1 }),
+      observe: buildEventObservation({ resource, change, identities: [ME], threadBudget: 1 }),
       investigation: { resource },
       now: () => LATE,
     })
 
-    await engine.reconcile()
-    const seen = await new CoverageLedger(store.scope('monitor:silent')).list()
-    assert.equal(seen.length, 1, '보지 않은 것을 본 것으로 적으면 다음 diff 에서 영영 빠진다')
-
-    // 다음 회차는 같은 자리에서 나머지를 본다.
-    const next = new MonitorEngine({
-      store,
-      source: new SilentSource(),
-      inventory,
-      config: { identities: [ME] },
-      authorizedApprover: ME,
-      observe: buildEventObservation({ resource, identities: [ME], threadBudget: 10 }),
-      investigation: { resource },
-      now: () => LATE,
-    })
-    await next.reconcile()
-    assert.equal((await new CoverageLedger(store.scope('monitor:silent')).list()).length, 3)
+    const outcome = await engine.reconcile()
+    assert.equal(outcome.deferred, 1, '미룬 건수가 회차 결과에 실리지 않으면 화면이 그것을 말할 수 없다')
+    assert.equal(
+      (await new CoverageLedger(store.scope('monitor:silent')).list()).length,
+      1,
+      '열어 보지도 않은 항목의 마커를 change 조회가 대신 태웠다',
+    )
   })
-
   it('미룬 것이 있으면 기록에 남는다 — 전부 본 것처럼 읽히지 않는다', async () => {
     const resource = new ScriptedResource(ME, [{ id: '1', author: ME, at: EARLY, body: 'q' }])
     const store = new MemoryStateStore()

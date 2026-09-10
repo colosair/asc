@@ -6096,6 +6096,11 @@ async function runRuntime(
           if (sweep && !sweep.skipped && !sweep.complete) {
             console.error(`  [${channel.label}] reconcile did not complete${sweep.detail ? ` — ${sweep.detail}` : ''}`)
           }
+          // 완주와 전부 열어 봄은 다른 사실이다. 상시 회차에서도 이 줄이 나가야 사람이
+          // "왜 아직 안 뜨지" 를 묻기 전에 답을 본다.
+          if (sweep && !sweep.skipped && sweep.deferred > 0) {
+            console.log(`  [${channel.label}] ${sweep.deferred} not yet read — the next pass takes them`)
+          }
         }
       },
       census: async () => {
@@ -7084,7 +7089,14 @@ async function runMonitor(
       if (values.json) {
         console.log(JSON.stringify({ channel: channel.label, ...sweep }, null, 2))
       } else {
-        console.log(`[${channel.label}] ${sweep.kind}: ${sweep.seen} listed · ${sweep.changed} changed · ${sweep.packets.length} packets`)
+        const held = sweep.deferred > 0 ? ` · ${sweep.deferred} not yet read` : ''
+        console.log(
+          `[${channel.label}] ${sweep.kind}: ${sweep.seen} listed · ${sweep.changed} changed · ${sweep.packets.length} packets${held}`,
+        )
+        if (sweep.deferred > 0) {
+          // 미룬 것을 말하지 않으면 이 줄은 "다 봤다" 로 읽힌다. 그것이 이 회차의 주장이 아니다.
+          console.log(`  ${sweep.deferred}건은 이번 회차 예산을 넘어 아직 열어 보지 않았다 — 다음 회차가 같은 자리에서 본다`)
+        }
         if (sweep.missing.length > 0) {
           console.log(`  ${sweep.missing.length} known items absent from this listing: ${sweep.missing.join(', ')}`)
           console.log('  (whether that is deletion, permissions, visibility or a query error is not judged here — a person looks)')
@@ -7474,7 +7486,9 @@ async function consumptionFor(
     const ledger = coordinationLedger(store)
     const communications = await ledger.communications()
     const mine = communications.filter((evidence) => evidence.identity.objectId === reference)
-    if (communications.length >= 0) checked.push('조율 원장')
+    // 여기까지 왔으면 원장을 읽은 것이다 — 비어 있어도 확인한 곳이다. 못 읽었으면 아래
+    // catch 로 빠져 이 줄에 닿지 않는다.
+    checked.push('조율 원장')
     if (mine.length > 0) {
       const responses = await ledger.responses()
       for (const response of responses) {

@@ -81,9 +81,12 @@ export function obligationLine(obligation: Obligation, consumption: Consumption)
         ? `답이 온 뒤 ${consumption.by.source} (${consumption.by.at}) — 이미 다른 자리에서 다뤄졌다`
         : '이미 다른 자리에서 다뤄졌다'
     case 'ACTION_REQUIRED_BY_ME':
-      return consumption.kind === 'UNCONSUMED'
-        ? `답이 왔고 그 뒤 기록이 없다 (확인한 곳: ${consumption.checked.join(', ')})`
-        : '답이 왔다'
+      if (consumption.kind === 'UNCONSUMED') {
+        return `답이 왔고 그 뒤 기록이 없다 (확인한 곳: ${consumption.checked.join(', ')})`
+      }
+      // **못 본 것을 안 본 것과 같은 말로 적지 않는다.** '답이 왔다' 만 남기면 그 뒤를
+      // 확인했는데 아무것도 없었다는 뜻으로 읽힌다 — 확인 자체가 안 된 것과 정반대다.
+      return consumption.kind === 'UNKNOWN' ? `답이 왔다 — 그 뒤는 가리지 못했다: ${consumption.detail}` : '답이 왔다'
     default:
       return consumption.kind === 'UNKNOWN' ? consumption.detail : '누구 차례인지 가를 근거가 없다'
   }

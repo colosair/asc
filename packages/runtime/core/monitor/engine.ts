@@ -33,6 +33,14 @@ export type SweepOutcome = {
   packets: string[]
   /** 알던 것 중 이번 목록에 없던 것. 원인은 판정하지 않는다 (C-07 §1.5). */
   missing: string[]
+  /**
+   * 예산을 넘겨 **이번 회차에 보지 않은** 항목 수 (0.8.5).
+   *
+   * `complete` 와 다른 사실이다. `complete` 는 목록을 끝까지 훑었는가이고, 이것은 훑은
+   * 것 중 몇 개를 열어 보지 못했는가다. 둘을 한 값으로 뭉치면 "다 봤다" 와 "목록은 다
+   * 받았다" 가 구분되지 않는다 — 그리고 사람은 앞의 뜻으로 읽는다.
+   */
+  deferred: number
   /** 목록을 빠짐없이 훑었는가. 아니면 상실 판정을 하지 않았다는 뜻이다. */
   complete: boolean
   /** 조회 자체가 실패했다면 그 이유. */
@@ -67,7 +75,7 @@ export type MonitorDeps = {
    * 콜백 하나로 받는 이유: 이벤트마다 외부 조회가 필요할 수 있어 여러 번 왕복하면
    * 회차 비용이 그만큼 늘어난다.
    */
-  observe?: (event: RawEvent, known?: KnownFacts) => Promise<EventObservation> | EventObservation
+  observe?: ObserveFn
   /** 같은 reference를 지난번에 어떻게 봤는지 (C-07 §4·§5). 없으면 억제도 Shadow도 없다. */
   observations?: ObservationLedger
   /**
@@ -159,7 +167,7 @@ export class MonitorEngine {
   #scm: ScmPort | undefined
   #approver: string
   #canonicalSources: readonly string[]
-  #observe: ((event: RawEvent, known?: KnownFacts) => Promise<EventObservation> | EventObservation) | undefined
+  #observe: ObserveFn | undefined
   #observations: ObservationLedger | undefined
   #inventory: InventoryPort | undefined
   #investigation: Pick<InvestigationPorts, 'resource' | 'change' | 'work' | 'history'> | undefined
@@ -275,6 +283,17 @@ export class MonitorEngine {
     const observed = this.#observe ? await this.#observe(event, known) : {}
     const verdict = classify(event, this.#config, { ...extra, ...(observed.signal ?? {}) })
 
+    // **아직 보지 않은 것은 여기서 끝낸다** (0.8.5).
+    //
+    // 예산을 넘긴 항목에 대해 coverage 를 적지 않는 것만으로는 모자랐다. 그 아래 두 줄이
+    // 각각 마커와 eventKey 를 태우고, 둘 중 어느 쪽이든 다음 회차가 이 항목을 "이미 본
+    // 것"으로 읽는다 — eventKey 가 남으면 다음 회차는 duplicate 로 접혀 스레드를 아예
+    // 읽지 않고, 그러면 deferred 로도 잡히지 않아 coverage 까지 기록된다.
+    //
+    // 실측으로 확인했다: 첫 회차가 98건 중 40건을 보고 58건을 미뤘는데 두 번째 회차의
+    // 목록은 1건이었고, 미룬 58건은 다시 오지 않았다.
+    if (observed.deferred) return { duplicate: false, deferred: true }
+
     // 신호와 관련성은 다른 층이다 (C-07 §2). 신호는 "무슨 일이 있었나"이고
     // 관련성은 "그래서 내 일인가"다.
     const relevance = observed.relevance ? evaluateRelevance(verdict.signals, observed.relevance) : undefined
@@ -369,13 +388,14 @@ export class MonitorEngine {
   }
 
   async #sweep(kind: SweepKind): Promise<SweepOutcome> {
+    this.#observe?.startPass?.()
     const scope = this.#store.scope(`monitor:${this.#source.id}`)
     if (!this.#inventory) {
-      return { kind, seen: 0, changed: 0, packets: [], missing: [], complete: false, detail: '목록을 셀 통로가 없다' }
+      return { kind, seen: 0, changed: 0, deferred: 0, packets: [], missing: [], complete: false, detail: '목록을 셀 통로가 없다' }
     }
     // scan과 같은 lease를 쓴다. 회수와 빠른 경로가 겹쳐 돌면 같은 변화로 요청이 둘 생긴다.
     if (!(await this.#acquire(scope))) {
-      return { skipped: true, kind, seen: 0, changed: 0, packets: [], missing: [], complete: false }
+      return { skipped: true, kind, seen: 0, changed: 0, deferred: 0, packets: [], missing: [], complete: false }
     }
 
     try {
@@ -503,6 +523,7 @@ export class MonitorEngine {
         kind,
         seen: items.length,
         changed: diffs.filter((d) => d.kind !== 'RESOURCE_MISSING').length,
+        deferred,
         packets,
         missing: missing.flatMap((m) => (m.kind === 'RESOURCE_MISSING' ? [m.reference] : [])),
         complete: complete && !failure,
@@ -519,6 +540,7 @@ export class MonitorEngine {
   }
 
   async #scan(scope: ScopedStore): Promise<ScanOutcome> {
+    this.#observe?.startPass?.()
     // 지난 회차에 조사하다 실패한 것부터. 새 이벤트에 밀려 영영 안 보는 일이 없게 한다.
     const pending = await this.#store.list('event', { where: { processing: 'PENDING_RETRY' } })
     // 처음 도는 회차라면 어디서부터 볼지 정해 둔다. 과거를 전부 긁으면 사람이 읽을 수 없다.
@@ -868,6 +890,21 @@ function allowedDecisionsFor(type: string): string[] {
  * 하고 있었다. 실측에서 그 조회가 한 회차 API 호출의 절반이었다.
  */
 export type KnownFacts = { author?: string; assignees?: readonly string[] }
+
+/**
+ * 사건 하나에 대해 밖에서 알아 올 사실을 만드는 물건.
+ *
+ * `startPass` 는 **새 회차가 시작됐다**는 통지다. 관측기가 회차 단위 예산을 들고 있으면
+ * 여기서 되돌린다 — 한 프로세스가 빠른 경로·회수·전수를 연달아 도는데 예산이 프로세스
+ * 수명이면, 앞의 회차가 다 쓰고 전수는 언제나 0 에서 시작한다. 전수는 상실을 판정하는
+ * 유일한 경로라 그 자리가 조용히 비면 안 된다.
+ *
+ * Core 는 관측기가 무엇을 아끼는지 모른다 — 회차가 시작됐다는 사실만 말한다.
+ */
+export type ObserveFn = {
+  (event: RawEvent, known?: KnownFacts): Promise<EventObservation> | EventObservation
+  startPass?: () => void
+}
 
 /**
  * 내 것을 먼저 본다 (0.8.5).

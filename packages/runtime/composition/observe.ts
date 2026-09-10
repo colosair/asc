@@ -15,7 +15,7 @@
 // 넘기면 **모든 사건이 조용히 숨는다** — 근거 없이 숨기는 것이 가장 나쁜 결과다.
 
 import type { OwnershipMap } from '../core/policy/ownership.ts'
-import type { EventObservation, KnownFacts } from '../core/monitor/engine.ts'
+import type { EventObservation, KnownFacts, ObserveFn } from '../core/monitor/engine.ts'
 import { readParticipation } from '../core/monitor/participation.ts'
 import type { ChangeContextPort } from '../ports/change-context.ts'
 import type { RawEvent } from '../ports/event-source.ts'
@@ -74,15 +74,16 @@ function ownedPaths(map: OwnershipMap | undefined, roles: readonly string[] | un
  * 실패는 전부 "모른다"로 접는다 — 관찰이 감지를 막지 않는다. 외부 조회가 흔들려서
  * 판단 대기함이 비면 그건 조회 실패가 아니라 **감지 실패**로 보이기 때문이다.
  */
-export function buildEventObservation(
-  deps: ObservationDeps,
-): (event: RawEvent, known?: KnownFacts) => Promise<EventObservation> {
+export function buildEventObservation(deps: ObservationDeps): ObserveFn {
   const owned = ownedPaths(deps.ownership, deps.myRoles)
   const canonicalPaths = deps.canonicalPaths?.length ? deps.canonicalPaths : undefined
-  // 이 builder 하나가 한 회차를 담당한다 — 예산도 여기서 센다.
-  let budget = deps.threadBudget ?? 40
+  // 예산은 **회차마다** 새로 선다. 한 builder 가 여러 회차를 담당하기 때문이다 — 한
+  // 프로세스가 빠른 경로·회수·전수를 연달아 돌고, 예산이 그 셋에 걸쳐 하나면 앞의 회차가
+  // 다 쓰고 전수는 언제나 0 에서 시작한다.
+  const allowance = deps.threadBudget ?? 40
+  let budget = allowance
 
-  return async (event: RawEvent, known?: KnownFacts): Promise<EventObservation> => {
+  const observe = async (event: RawEvent, known?: KnownFacts): Promise<EventObservation> => {
     // ── 누가 마지막으로 말했는가 (0.8.5) ──────────────────────────────────
     //
     // change 보다 먼저 본다. 이슈에는 변경이 없고, `getChange` 가 missing 을 돌려주는
@@ -135,6 +136,11 @@ export function buildEventObservation(
         : {}),
     }
   }
+
+  observe.startPass = () => {
+    budget = allowance
+  }
+  return observe
 }
 
 /**
