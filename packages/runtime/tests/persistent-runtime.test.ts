@@ -21,7 +21,14 @@ import {
   type ServiceState,
 } from '../core/distribution/persistent-runtime.ts'
 import { launchAgentPlist, launchdAdapter, plistPath } from '../adapters/service/launchd.ts'
-import { TASK_NAME, durationMinutes, schtasksAdapter, taskMinutes, taskRunLine } from '../adapters/service/schtasks.ts'
+import {
+  TASK_NAME,
+  durationMinutes,
+  schtasksAdapter,
+  taskLauncherLine,
+  taskMinutes,
+  taskRunLine,
+} from '../adapters/service/schtasks.ts'
 import {
   SERVICE_UNIT,
   TIMER_UNIT,
@@ -142,7 +149,14 @@ describe('macOS LaunchAgent', () => {
 const registrationXml = (
   overrides: { program?: string; runLine?: string; minutes?: number; interval?: string; logonType?: string } = {},
 ): string => {
-  const line = overrides.runLine ?? taskRunLine({ ...command, ...(overrides.program ? { program: overrides.program } : {}) })
+  // 등록되는 것은 명령이 아니라 **실행기 호출**이다 (#76) — 콘솔 창을 없애려고 GUI
+  // 서브시스템 호스트를 한 겹 둔다. 안쪽 명령은 지문으로 실려 drift 판정에 그대로 쓰인다.
+  const line =
+    overrides.runLine ??
+    taskLauncherLine('C:\\launcher.vbs', {
+      ...command,
+      ...(overrides.program ? { program: overrides.program } : {}),
+    })
   const [program = '', ...rest] = line.match(/"[^"]*"/g) ?? []
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2">
@@ -199,6 +213,10 @@ describe('Windows Scheduled Task', () => {
   it('조회에 우리 명령이 없으면 낡은 등록이다', async () => {
     const stale = schtasksAdapter({ exec: async () => registrationXml({ program: 'C:\\other\\node.exe' }) })
     assert.equal((await stale.status(command)).kind, 'STALE')
+
+    // 실행기를 거치지 않던 옛 등록도 낡은 것이다 — 그 등록이 회차마다 창을 띄운다.
+    const legacy = schtasksAdapter({ exec: async () => registrationXml({ runLine: taskRunLine(command) }) })
+    assert.equal((await legacy.status(command)).kind, 'STALE')
 
     // 조회 출력은 등록한 그 줄이다 — 비교 전에 형태를 바꿔야 한다면 등록이 틀린 것이다
     const current = schtasksAdapter({ exec: async () => registrationXml() })

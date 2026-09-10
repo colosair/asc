@@ -445,6 +445,28 @@ function findManaged(ascRoot, sessionId) {
   return null
 }
 
+/**
+ * 명령이 **다른 곳**을 가리킨다고 말할 수 있는가 (#74).
+ *
+ * guard 는 셸을 해석하지 않는다. 보는 것은 하나뿐이다: 명령이 대상 경로를 직접 말하는
+ * 자리가 있고 그 경로가 이 workspace 로 풀리지 않는 경우. 그때만 사실을 말하고 나머지는
+ * 모른다고 둔다 — 모르는 것을 아는 척하는 쪽이 더 나쁘다.
+ */
+function targetElsewhere(command, ascRoot) {
+  // 이 함수는 template literal 안에 있다 — 정규식의 백슬래시는 두 번 적어야 hook 에
+  // 살아서 도착한다. 한 번만 적으면 공백 문자 클래스가 글자 s 로 접혀 아무것도 못 잡는다.
+  const match = /(?:^|\\s)-C\\s+("[^"]+"|'[^']+'|\\S+)/.exec(command)
+  if (!match) return null
+  const path = match[1].replace(/^["']|["']$/g, '')
+  try {
+    const found = lookupWorkspace(path)
+    if (found && found !== 'MISSING' && normalizePath(found.root) === normalizePath(ascRoot)) return null
+    return path
+  } catch {
+    return null
+  }
+}
+
 let input
 try {
   input = JSON.parse(readFileSync(0, 'utf8'))
@@ -591,9 +613,24 @@ if (state.mode === 'AUTO') {
     // 계약 안에서 도는 세션이다. 밖으로 나가는 것은 승인된 실행 경로로만 나간다.
     const forbidden = forbiddenIn(command, FORBIDDEN)
     if (forbidden) {
+      // **어느 workspace 기준으로 막았는지 말한다** (#74).
+      //
+      // 이 판정은 세션의 작업 디렉터리로 workspace 를 정한다 — 명령이 실제로 건드리는
+      // 저장소가 아니다. 그래서 다른 저장소로 나가는 쓰기도 여기서 막히고, 예전에는 그
+      // 자리에서 이 workspace 의 관리 경로를 해결책으로 내밀었다. 그 경로는 남의 저장소로
+      // 아무것도 실어 나르지 못한다.
+      const elsewhere = targetElsewhere(command, ascRoot)
       console.error(
-        \`[ASC guard] '\${forbidden}' 는 AUTO 로 관리되는 세션에서 금지다. \` +
-        \`외부 반영은 \\\`asc work publish\\\` 로 나간다 (승인된 Execution Grant).\`,
+        [
+          \`[ASC guard] '\${forbidden}' 는 AUTO 로 관리되는 이 세션에서 막힌다.\`,
+          \`  판정 기준 workspace: \${ascRoot}\`,
+          '  (workspace 는 세션의 작업 디렉터리로 정한다 — 명령이 가리키는 대상이 아니다)',
+          elsewhere
+            ? \`  이 명령은 \${elsewhere} 를 가리킨다 — 이 workspace 의 관리 경로는 그것을 실어 나르지 못한다.\`
+            : '  이 쓰기가 이 workspace 의 것이라면: asc work publish (승인된 Execution Grant)',
+          '  다른 저장소로 나가는 것이라면 그 저장소의 세션에서 하거나, 이 Run 만 내린다:',
+          '    asc mode manual --this-run   (workspace 의 다른 Run 은 그대로다)',
+        ].join('\\n'),
       )
       process.exit(2) // exit 2 = 도구 실행 차단
     }

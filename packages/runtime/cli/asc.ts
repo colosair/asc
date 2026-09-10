@@ -58,6 +58,7 @@ import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claud
 import { readHeartbeat } from '../adapters/claude-code/observer.ts'
 import { judgePhysicalId, observedRunId } from '../adapters/claude-code/identity.ts'
 import type { ApprovalRequest } from '../core/model/entities.ts'
+import { staleSessions } from '../core/runtime/stale-session.ts'
 import { judgeReconcile, readOrigin, type OriginObservation } from '../core/approval/reconcile.ts'
 import {
   judgeConsumption,
@@ -2419,9 +2420,6 @@ const installRoot = () => join(dirname(fileURLToPath(import.meta.url)), '..')
  */
 const externalProfileRoot = () => join(ascHome(), 'profiles')
 
-/** 한 프로세스에서 한 번만 말한다. 사실은 매번 같고, 반복은 읽히지 않는다. */
-let staleLockReported = false
-
 async function checkBootstrap(root: string): Promise<{ code: number; runtime?: ResolvedRuntime }> {
   const outcome = await bootstrapGuard({
     ascRoot: root,
@@ -2432,17 +2430,12 @@ async function checkBootstrap(root: string): Promise<{ code: number; runtime?: R
     ascVersion: ASC_VERSION,
   })
   if (outcome.ok) {
-    // 판번호만 낡은 lock 은 멈출 이유가 아니다. 다만 조용히 지나가지도 않는다 —
-    // 다음 재고정 때 따라온다는 것을 여기서 한 번 말한다.
-    // 한 명령 안에서 이 문이 두 번 지나간다. 같은 말을 두 번 하면 그때부터 사람은
-    // 이 줄을 읽지 않는다 — 회차 기록에도 매번 두 줄씩 쌓였다.
-    if (outcome.staleLock && !staleLockReported) {
-      const moved = outcome.staleLock.find((drift) => drift.field === 'ascCore.version')
-      if (moved) {
-        staleLockReported = true
-        console.error(`(profile.lock was written by ASC ${moved.locked}; this is ${moved.current}. \`asc profile resolve --write\` records it.)`)
-      }
-    }
+    // **판번호만 낡은 lock 은 여기서 말하지 않는다** (0.8.5).
+    //
+    // 그 사실은 참이고 멈출 이유는 아니다. 문제는 자리였다: 이 문은 거의 모든 명령이
+    // 지나므로 같은 한 줄이 화면마다 붙었고, 매번 보이는 줄은 곧 읽히지 않는 줄이 된다.
+    // 실제 drift(정책·능력·adapter)는 여전히 아래에서 명령을 멈춘다 — 달라진 것은
+    // **아무것도 막지 않는 사실**을 상태 화면 한 곳에서만 말한다는 것뿐이다.
     return { code: 0, runtime: outcome.runtime }
   }
 
@@ -4856,6 +4849,23 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     for (const axis of readiness.blocking) degraded.push(`AUTO ${axis.axis} ${axis.state}`)
   }
   if (service?.action === 'install') degraded.push('this machine has no persistent registration')
+  // 판번호만 움직인 lock 은 여기서만 말한다 — 막는 것이 아니라 상태이기 때문이다.
+  if (root) {
+    const guard = await bootstrapGuard({
+      ascRoot: root,
+      installRoot: installRoot(),
+      externalProfileRoot: externalProfileRoot(),
+      capabilities: CAPABILITIES,
+      adapters: ADAPTER_VERSIONS,
+      ascVersion: ASC_VERSION,
+    }).catch(() => null)
+    const moved = guard?.ok ? guard.staleLock?.find((drift) => drift.field === 'ascCore.version') : undefined
+    if (moved) {
+      degraded.push(
+        `profile.lock records ASC ${moved.locked}, this build is ${moved.current} — re-lock with \`asc profile resolve --write\` (nothing is blocked by this)`,
+      )
+    }
+  }
 
   // 끝난 세션이 Run 을 아직 쥐고 있는가.
   //
@@ -4989,6 +4999,28 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     for (const session of sessions) console.log(`  ${session.id} ${session.status} — ${session.goal ?? ''}`)
   } else if (root) {
     console.log('Work in progress: none')
+  }
+  // 멈춘 채 아무도 붙들지 않은 세션 (0.8.5). **닫지 않는다** — 이름과 근거와 다음 명령만 준다.
+  if (store && sessions.length > 0) {
+    const held = new Set((await claudeBindings(store).current()).map((binding) => binding.logicalSessionId))
+    const progress = progressService(store)
+    const rows = await Promise.all(
+      sessions.map(async (session) => ({
+        session,
+        held: held.has(session.id),
+        ...(await progress
+          .get(session.id)
+          .then((report) => (report?.lastUpdatedAt ? { lastProgressAt: report.lastUpdatedAt } : {}))
+          .catch(() => ({}))),
+      })),
+    )
+    const stale = staleSessions(rows, new Date().toISOString(), { quietMs: 24 * 60 * 60_000 })
+    for (const row of stale) {
+      console.log('')
+      console.log(`멈춘 채 잊힌 것으로 보이는 세션: ${row.id}`)
+      for (const line of row.evidence) console.log(`  ${line}`)
+      for (const line of row.next) console.log(`  ${line}`)
+    }
   }
   if (waiting.length > 0) console.log(`Waiting for a person: ${waiting.length} (asc inbox)`)
   // **결정권이 선언되지 않았다는 사실을 말한다** (0.8.4 · C-11).

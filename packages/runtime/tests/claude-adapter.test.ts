@@ -254,7 +254,13 @@ describe('guard hook(3층) — 실행 직전 차단', () => {
       cwd: project,
     })
     assert.equal(blocked.code, 2, '계약 안에서는 승인 경로로만 나간다')
-    assert.match(blocked.stderr, /AUTO 로 관리되는 세션/)
+    assert.match(blocked.stderr, /AUTO 로 관리되는 이 세션에서 막힌다/)
+    // #74 — 어느 workspace 기준으로 막았는지 말한다. 그 기준은 세션의 작업 디렉터리이지
+    // 명령이 가리키는 대상이 아니고, 화면이 그 차이를 숨기면 남의 저장소로 나가는 쓰기에
+    // 이 workspace 의 관리 경로가 정답인 것처럼 제시된다.
+    assert.match(blocked.stderr, /판정 기준 workspace/)
+    assert.match(blocked.stderr, /명령이 가리키는 대상이 아니다/)
+    assert.match(blocked.stderr, /asc mode manual --this-run/, '이 Run 만 내리는 출구를 준다')
 
     assert.equal(await bindings.release('S-20260823-01', 'claude-abc'), true)
 

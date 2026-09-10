@@ -212,3 +212,137 @@ describe('B-46 Gate — 저장소 안 .asc 도 계속 동작한다', () => {
     }
   })
 })
+
+// ── K — 한 세션에서 다른 저장소로 나가는 쓰기 (#74, 0.8.5) ────────────────────────
+//
+// guard 는 세션의 작업 디렉터리로 workspace 를 정한다. 명령이 건드리는 저장소로 정하지
+// 않는다 — 셸 한 줄에서 그것을 알아낼 방법이 없기 때문이다.
+//
+// 그 자체는 안전한 선택이다. 틀렸던 것은 그 다음이었다: A 에서 B 로 나가는 쓰기를 막고는
+// **A 의 관리 경로**를 해결책으로 내밀었다. `asc work publish` 는 A 의 Grant 를 만들 뿐
+// B 로는 아무것도 실어 나르지 못한다. 사람은 그것을 두 번 쳐 보고서야 안다.
+//
+// 여기서 고정하는 것은 둘이다 — 말할 수 있을 때만 대상을 말하고, 모를 때도 통과시키지
+// 않는다.
+
+/** 서로 다른 두 workspace. A 만 관리 대상이고, B 는 그저 등록돼 있다. */
+async function twoWorkspaces(home: string, a: string, b: string): Promise<void> {
+  const idA = newWorkspaceId()
+  const idB = newWorkspaceId()
+  await managedRuntime(join(home, 'workspaces', idA), 'phys-1')
+  let index = register(emptyIndex(), {
+    workspaceId: idA,
+    root: join(home, 'workspaces', idA),
+    locator: { path: a, platform: process.platform, observedAt: NOW },
+    now: NOW,
+  })
+  index = register(index, {
+    workspaceId: idB,
+    root: join(home, 'workspaces', idB),
+    locator: { path: b, platform: process.platform, observedAt: NOW },
+    now: NOW,
+  })
+  await writeIndex(home, index)
+}
+
+const inA = (cwd: string, command: string) => ({
+  tool_name: 'Bash',
+  session_id: 'phys-1',
+  cwd,
+  tool_input: { command },
+})
+
+describe('K — cwd 는 A 인데 쓰기는 B 로 나간다 (#74)', () => {
+  it('대상을 말할 수 있으면 말하고, A 의 관리 경로를 내밀지 않는다', async () => {
+    const { home, project: a, hook, cleanup } = await scratch()
+    const b = join(a, '..', 'other-repo')
+    try {
+      await mkdir(b, { recursive: true })
+      await twoWorkspaces(home, a, b)
+
+      const result = runGuard(hook, home, inA(a, `git -C "${b}" push origin main`))
+      assert.equal(result.code, 2, 'fail-open 금지 — 대상을 알아냈다고 문이 열리지는 않는다')
+      assert.match(result.stderr, /를 가리킨다/, '어디로 나가는 쓰기인지 말한다')
+      assert.doesNotMatch(
+        result.stderr,
+        /asc work publish/,
+        'A 의 Grant 는 B 로 아무것도 실어 나르지 못한다 — 그것을 해결책이라 부르면 거짓말이다',
+      )
+      assert.match(result.stderr, /판정 기준 workspace/, '무엇을 근거로 막았는지 함께 말한다')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('등록조차 안 된 경로로 나가도 A 의 것으로 읽지 않는다', async () => {
+    const { home, project: a, hook, cleanup } = await scratch()
+    const stranger = join(a, '..', 'not-registered')
+    try {
+      await mkdir(stranger, { recursive: true })
+      await twoWorkspaces(home, a, join(a, '..', 'other-repo'))
+
+      const result = runGuard(hook, home, inA(a, `git -C ${stranger} push origin main`))
+      assert.equal(result.code, 2)
+      assert.match(result.stderr, /를 가리킨다/)
+      assert.doesNotMatch(result.stderr, /asc work publish/)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('대상을 모를 때도 막는다 — 그리고 관리 경로를 단정하지 않는다', async () => {
+    const { home, project: a, hook, cleanup } = await scratch()
+    const b = join(a, '..', 'other-repo')
+    try {
+      await mkdir(b, { recursive: true })
+      await twoWorkspaces(home, a, b)
+
+      // `cd` 한 뒤의 push 다. 셸을 해석하지 않는 이상 이 명령의 대상은 알 수 없다.
+      const result = runGuard(hook, home, inA(a, `cd "${b}" && git push origin main`))
+      assert.equal(result.code, 2, '모르면 통과시킨다는 것은 guard 를 끄는 것과 같다')
+      assert.doesNotMatch(result.stderr, /를 가리킨다/, '모르는 것을 아는 척하지 않는다')
+      assert.match(
+        result.stderr,
+        /이 쓰기가 이 workspace 의 것이라면: asc work publish/,
+        '관리 경로는 조건을 달아 제시한다 — 단정하면 그 절반은 틀린 말이 된다',
+      )
+      assert.match(result.stderr, /다른 저장소로 나가는 것이라면/, '나머지 절반의 출구도 함께 준다')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('이 workspace 안을 가리키는 쓰기에는 그대로 관리 경로를 준다', async () => {
+    const { home, project: a, hook, cleanup } = await scratch()
+    try {
+      await twoWorkspaces(home, a, join(a, '..', 'other-repo'))
+
+      const result = runGuard(hook, home, inA(a, `git -C "${a}" push origin main`))
+      assert.equal(result.code, 2)
+      assert.doesNotMatch(result.stderr, /를 가리킨다/, '자기 자리를 남의 자리로 말하지 않는다')
+      assert.match(result.stderr, /asc work publish/)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('어느 쪽이든 이 Run 만 내리는 출구를 준다', async () => {
+    const { home, project: a, hook, cleanup } = await scratch()
+    const b = join(a, '..', 'other-repo')
+    try {
+      await mkdir(b, { recursive: true })
+      await twoWorkspaces(home, a, b)
+
+      for (const command of [`git -C "${b}" push origin main`, `cd "${b}" && git push origin main`]) {
+        const result = runGuard(hook, home, inA(a, command))
+        assert.match(
+          result.stderr,
+          /asc mode manual --this-run/,
+          'workspace 전체를 내리라고 하면 같은 workspace 의 다른 Run 까지 함께 풀린다',
+        )
+      }
+    } finally {
+      await cleanup()
+    }
+  })
+})
