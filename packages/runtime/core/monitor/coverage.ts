@@ -21,6 +21,16 @@ export const CoverageRecord = z.object({
   updatedAt: z.string(),
   /** 마지막으로 목록에서 본 시각. missing 판정의 기준이 된다. */
   seenAt: z.string().min(1),
+  /**
+   * 이 스레드에서 누가 마지막으로 말했는가 (0.8.5).
+   *
+   * **계약이 아니라 관측이다.** 수신함 후보가 되지 못한 것에도 남는다 — 내가 밖에 물어
+   * 놓고 답을 기다리는 스레드가 정확히 그런 자리다. 신호가 없어 요청이 만들어지지
+   * 않으므로, 여기 남기지 않으면 그 기다림은 어느 화면에도 나오지 않는다.
+   */
+  direction: z.enum(['INBOUND', 'OUTBOUND', 'UNKNOWN']).optional(),
+  /** 내가 마지막으로 말한 시각. 얼마나 기다렸는지를 사람이 재는 값이다. */
+  lastMineAt: z.string().optional(),
 })
 export type CoverageRecord = z.infer<typeof CoverageRecord>
 
@@ -90,8 +100,13 @@ export class CoverageLedger {
     state?: string
     revisionMarker: string
     updatedAt?: string
+    direction?: 'INBOUND' | 'OUTBOUND' | 'UNKNOWN'
+    lastMineAt?: string
   }): Promise<void> {
     const at = this.#now()
+    // 방향은 볼 때마다 알 수 있는 것이 아니다 — 스레드를 읽은 회차에만 온다. 그래서
+    // 이번에 모르면 **지우지 않고 지난 관측을 그대로 둔다.** 지우면 매 회차 사라진다.
+    const previous = item.direction === undefined ? await this.get(item.reference) : undefined
     await this.#scope.set(
       recordKey(item.reference),
       JSON.stringify(
@@ -101,6 +116,8 @@ export class CoverageLedger {
           revisionMarker: item.revisionMarker,
           updatedAt: item.updatedAt ?? at,
           seenAt: at,
+          ...(item.direction ?? previous?.direction ? { direction: item.direction ?? previous?.direction } : {}),
+          ...(item.lastMineAt ?? previous?.lastMineAt ? { lastMineAt: item.lastMineAt ?? previous?.lastMineAt } : {}),
         }),
       ),
     )

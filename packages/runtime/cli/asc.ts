@@ -57,7 +57,15 @@ import {
 import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claude-code/binding.ts'
 import { readHeartbeat } from '../adapters/claude-code/observer.ts'
 import { judgePhysicalId, observedRunId } from '../adapters/claude-code/identity.ts'
+import type { ApprovalRequest } from '../core/model/entities.ts'
 import { judgeReconcile, readOrigin, type OriginObservation } from '../core/approval/reconcile.ts'
+import {
+  judgeConsumption,
+  obligationLine,
+  obligationOf,
+  type ConsumptionSignal,
+  type Obligation,
+} from '../core/approval/consumption.ts'
 import type { ResourceContextPort } from '../ports/resource-context.ts'
 import { FORBIDDEN_COMMAND_PATTERNS, workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
 import { applyHostReport, assessReadiness, probe, type CapabilityName } from '../adapters/claude-code/probe.ts'
@@ -1056,6 +1064,12 @@ async function runParsedCommand(
       }
       console.log(renderer.renderList(items).text)
       for (const line of reconcileLines(reconciled)) console.log(line)
+      // 목록이 "무엇이 있는가" 라면 이 블록은 "누구 차례인가" 다 (0.8.5). 둘은 다른 물음이라
+      // 한 줄에 섞지 않는다 — 섞으면 상태가 판정처럼 읽힌다.
+      const pending = (await store.list('request')).filter((request) =>
+        items.some((item) => item.requestId === request.id),
+      )
+      for (const line of await obligationLines(store, pending)) console.log(line)
       return 0
     }
 
@@ -2857,6 +2871,21 @@ async function runHost(
         return 0
       }
 
+      // **없는 세션에 결합을 만들지 않는다** (#77).
+      //
+      // 0.8.4 는 physical 쪽 신원을 맞췄다 — guard 가 찾는 값과 같은 것만 받는다. 이것은
+      // 그 반대편이다: 논리 세션이 실재하는지 아무도 보지 않아서, 발급이 실패한 id 로도
+      // 결합·실행 증거·소유 주장이 만들어졌다. 그 결합은 Run 을 점유해 다음 bind 를
+      // RUNTIME_CONFLICT 로 막고, 존재하지 않는 세션을 release 하라고 안내했다.
+      //
+      // release 는 그대로 둔다 — 이미 잘못 생긴 결합을 푸는 것이 그 명령의 일이다.
+      if (command === 'bind' && !(await store.get('session', target))) {
+        console.error(`${target} was not found.`)
+        console.error('  결합은 실재하는 논리 세션에만 만든다 — 없는 세션의 결합은 Run 만 점유한다.')
+        console.error('  지금 있는 것: asc session list')
+        return 1
+      }
+
       // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
       // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
       // 여기이고, 사람이 따로 기억해야 하는 정리 절차는 결국 안 돌아간다.
@@ -4412,10 +4441,15 @@ async function buildMonitorEngines(
       ...(channel.inventory ? { inventory: channel.inventory } : {}),
       // 밖에서 알아 온 사실을 실제로 공급한다 (C-07 §2~§4). 이것이 없으면 Relevance·
       // Shadow·Material Change가 코드에만 있고 실행 경로에는 없다.
-      ...(changeContext
+      // **변경 통로가 없어도 관측을 만든다** (0.8.5). 예전에는 이 조건 하나 때문에
+      // 이슈만 있는 채널이 관측 없이 돌았고, 그러면 "내가 묻고 상대가 답한" 스레드는
+      // 신호가 0 이라 후보조차 되지 못했다. 실기계에서 그렇게 세 건이 사라졌다.
+      ...(changeContext || channel.resourceContext
         ? {
             observe: buildEventObservation({
-              change: changeContext,
+              ...(changeContext ? { change: changeContext } : {}),
+              ...(channel.resourceContext ? { resource: channel.resourceContext } : {}),
+              ...(resolved.monitor.identities?.length ? { identities: resolved.monitor.identities } : {}),
               ...(resolved.ownership ? { ownership: resolved.ownership } : {}),
               ...(myRoles.length ? { myRoles } : {}),
               ...(canonicalPaths.length ? { canonicalPaths } : {}),
@@ -4896,7 +4930,11 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   console.log(renderSetup(setup))
   console.log('')
   console.log(
-    `Execution Mode: ${mode ? `${mode.mode}${mode.chosen ? '' : ' (never chosen — nothing is being enforced)'}` : '(not attached)'}`,
+    // **같은 사실을 두 곳이 다르게 그리지 않는다** (#78). 이 줄은 `asc mode` 와 같은
+    // 렌더러를 지난다 — 예전에는 여기만 scope 를 빼고 그려서, run 이 자기 답을 가진
+    // 자리에서도 status 는 그냥 "AUTO" 라고만 말했다. run scope 를 더한 릴리스에서
+    // 정작 그 구분이 안 보이는 화면이 여기였다.
+    mode ? modeLine(mode) : 'Execution Mode: (not attached)',
   )
   // AUTO 는 HITL 의 반대가 아니다 — 실행을 누가 하느냐일 뿐이라는 것을 화면이 말한다.
   console.log('  Mode decides who executes. It never decides what a person must approve.')
@@ -6609,6 +6647,42 @@ async function runCoordinationAttach(
   return attached > 0 ? 0 : 1
 }
 
+/**
+ * 등록되지 않은 외부 대기 (0.8.5 · D).
+ *
+ * 실기계에서 실제 외부 대기 6건 중 손으로 등록한 2건만 이 화면에 있었다. 나머지는 존재를
+ * 아는 사람이 있어야만 보이는 상태였고, 그 사람이 잊으면 사라졌다.
+ *
+ * **자동으로 기대를 만들지 않는다.** 원격 댓글 하나를 Query·Expectation 으로 승격하는
+ * 순간 계약이 관측에서 자라나고, 그러면 아무도 약속한 적 없는 것을 ASC 가 약속으로
+ * 들고 있게 된다. 여기서 하는 일은 후보를 이름 대는 것과 잇는 명령을 주는 것뿐이다.
+ *
+ * 근거는 이미 있는 것에서만 온다 — 관측 원장의 방향(OUTBOUND: 내가 마지막으로 말했다)과
+ * 조율 원장의 게시 증거. 새 조회도, 새 저장소도 없다.
+ */
+async function untrackedWaits(
+  store: MarkdownStateStore,
+): Promise<{ reference: string; since?: string }[]> {
+  const attached = new Set<string>()
+  try {
+    for (const evidence of await coordinationLedger(store).communications()) {
+      attached.add(evidence.identity.objectId)
+    }
+  } catch {
+    return []
+  }
+
+  const out: { reference: string; since?: string }[] = []
+  for (const scope of await activeMonitorScopes(store)) {
+    for (const record of await new CoverageLedger(store.scope(scope)).list()) {
+      if (record.direction !== 'OUTBOUND') continue
+      if (attached.has(record.reference)) continue
+      out.push({ reference: record.reference, ...(record.lastMineAt ? { since: record.lastMineAt } : {}) })
+    }
+  }
+  return out.sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''))
+}
+
 async function runCoordinationPublish(
   values: Record<string, unknown>,
   store: MarkdownStateStore,
@@ -6833,6 +6907,20 @@ async function runCoordination(
     return 0
   }
   for (const line of coordinationLines(views)) console.log(line)
+
+  // 등록된 것 옆에 **등록되지 않은 것**을 둔다. 후보이지 기대가 아니다 (0.8.5 · D).
+  const untracked = await untrackedWaits(store)
+  if (untracked.length > 0) {
+    console.log('')
+    console.log(`등록되지 않은 외부 대기 후보 ${untracked.length}건 — 관측이지 기대가 아니다:`)
+    for (const wait of untracked.slice(0, 10)) {
+      console.log(`  ${wait.reference}${wait.since ? `  (내가 마지막으로 말한 시각 ${wait.since})` : ''}`)
+    }
+    if (untracked.length > 10) console.log(`  … 그리고 ${untracked.length - 10}건 더`)
+    console.log('  기대로 세우려면: asc query open --domain <결정 영역> --question "<물음>"')
+    console.log('  그 뒤 잇는다:    asc coordination attach --query <X-ID> --known <reference>')
+  }
+
   // **빈 화면이 아무 말도 하지 않으면 그것은 '없다' 가 아니라 '적을 길을 못 찾았다' 가 된다.**
   if (views.length === 0) {
     console.log('')
@@ -7332,6 +7420,105 @@ async function inboxReaders(resolved?: ResolvedRuntime): Promise<ResourceContext
     .catch(() => undefined)
   if (single && !readers.some((reader) => reader.id === single.id)) readers.push(single)
   return readers
+}
+
+/**
+ * 이 자원을 두고 ASC 가 이미 무엇을 했는가 (0.8.5 · C).
+ *
+ * **사람의 머릿속을 보지 않는다.** ASC 가 자기 원장에 남긴 것만 본다 — 조율 응답, 같은
+ * 자원에 대한 처분, 그 대상으로 나간 실행. 그래서 "기록이 없다" 는 "처리 안 됐다" 가
+ * 아니라 "우리는 모른다" 이고, 화면은 무엇을 확인했는지까지 말한다.
+ */
+async function consumptionFor(
+  store: MarkdownStateStore,
+  reference: string,
+  self: string,
+): Promise<{ signals: ConsumptionSignal[]; checked: string[] }> {
+  const signals: ConsumptionSignal[] = []
+  const checked: string[] = []
+
+  // ① 조율 원장 — 이 자원에 붙은 기대에 답이 기록됐는가.
+  try {
+    const ledger = coordinationLedger(store)
+    const communications = await ledger.communications()
+    const mine = communications.filter((evidence) => evidence.identity.objectId === reference)
+    if (communications.length >= 0) checked.push('조율 원장')
+    if (mine.length > 0) {
+      const responses = await ledger.responses()
+      for (const response of responses) {
+        if (!mine.some((evidence) => evidence.evidenceId === response.communicationId)) continue
+        signals.push({ source: `조율 응답 ${response.evidenceId}`, at: response.observedAt })
+      }
+    }
+  } catch {
+    // 원장을 못 읽었으면 확인한 곳으로 세지 않는다.
+  }
+
+  // ② 같은 자원에 대해 사람이 이미 내린 처분.
+  try {
+    const requests = await store.list('request')
+    checked.push('요청 처분')
+    for (const request of requests) {
+      if (request.source.reference !== reference || request.id === self) continue
+      if (request.decision) signals.push({ source: `${request.id} ${request.decision.kind}`, at: request.decision.decidedAt })
+      if (request.obsolete) signals.push({ source: `${request.id} OBSOLETE`, at: request.obsolete.observedAt })
+    }
+  } catch {
+    // 못 읽었으면 확인한 곳이 아니다.
+  }
+
+  // ③ 그 대상으로 실제로 나간 실행.
+  try {
+    const grants = await store.list('grant')
+    checked.push('실행 계약')
+    for (const grant of grants) {
+      if (!grant.target.includes(reference) || !grant.consumedAt) continue
+      signals.push({ source: `${grant.id} ${grant.action}`, at: grant.consumedAt })
+    }
+  } catch {
+    // 위와 같다.
+  }
+
+  return { signals, checked }
+}
+
+/**
+ * 지금 누구 차례인가 — 요청 목록 아래에 붙는 블록 (0.8.5).
+ *
+ * 목록의 상태를 바꾸지 않는다. 상태는 사람이 정하는 것이고, 여기 있는 것은 **관측에서
+ * 파생한 읽기 전용 판정**이다. 그래서 저장하지 않고 볼 때마다 다시 센다.
+ */
+async function obligationLines(
+  store: MarkdownStateStore,
+  requests: readonly ApprovalRequest[],
+): Promise<string[]> {
+  const rows: { id: string; obligation: Obligation; why: string }[] = []
+  for (const request of requests) {
+    const { signals, checked } = await consumptionFor(store, request.source.reference, request.id)
+    const consumption = judgeConsumption(request.source.lastOtherAt, signals, checked)
+    rows.push({
+      id: request.id,
+      obligation: obligationOf(request.source.direction, consumption),
+      why: obligationLine(obligationOf(request.source.direction, consumption), consumption),
+    })
+  }
+  if (rows.length === 0) return []
+
+  const order: Obligation[] = ['ACTION_REQUIRED_BY_ME', 'UNKNOWN', 'WAITING_ON_OTHER', 'CONSUMED_ELSEWHERE']
+  const label: Record<Obligation, string> = {
+    ACTION_REQUIRED_BY_ME: '내 차례',
+    UNKNOWN: '가를 근거 없음',
+    WAITING_ON_OTHER: '상대 차례',
+    CONSUMED_ELSEWHERE: '이미 다른 자리에서 다뤄진 것으로 보임',
+  }
+  const lines = ['', '지금 누구 차례인가 (관측에서 파생 — 상태를 바꾸지 않는다):']
+  for (const obligation of order) {
+    const group = rows.filter((row) => row.obligation === obligation)
+    if (group.length === 0) continue
+    lines.push(`  ${label[obligation]}`)
+    for (const row of group) lines.push(`    ${row.id}  ${row.why}`)
+  }
+  return lines
 }
 
 /** 사람이 읽는 대조 결과. **조용히 끝내지 않는다** — 못 읽은 것이 있으면 그것부터 말한다. */

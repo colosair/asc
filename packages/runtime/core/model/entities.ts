@@ -174,6 +174,16 @@ export const ApprovalRequest = z.object({
      * 신호가 다르면(호명 ↔ 리뷰 요청) 다른 물음이고, 같으면 같은 물음의 최신판이다.
      */
     subject: z.string().min(1).optional(),
+    /**
+     * 이 스레드에서 누가 마지막으로 말했는가 — 감지 시점의 **관측** 이다 (0.8.5).
+     *
+     * 소유권도 결정권도 아니다. "다음에 말할 차례로 보이는 쪽" 하나이며, UNKNOWN 은
+     * UNKNOWN 으로 남는다. 지금 무엇을 해야 하는지는 이 값 하나로 정해지지 않고,
+     * 조회 시점의 소비 기록과 함께 파생된다.
+     */
+    direction: z.enum(['INBOUND', 'OUTBOUND', 'UNKNOWN']).optional(),
+    /** 남이 마지막으로 말한 시각. 그 뒤에 무언가 있었는지를 재는 기준선이다. */
+    lastOtherAt: z.string().min(1).optional(),
   }),
   situation: z.string(),
   context: z.string().default(''),

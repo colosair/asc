@@ -19,6 +19,7 @@ import { classify, type Classification, type MonitorConfig, type SignalContext }
 import { evaluateRelevance, type Relevance, type RelevanceContext } from './relevance.ts'
 import { fingerprintOf, type ObservationLedger } from './observation.ts'
 import { CoverageLedger, type CoverageDiff, type SweepKind } from './coverage.ts'
+import { directionOf, type Participation } from './participation.ts'
 import { investigate, type InvestigationPorts, type StepResult } from './investigation.ts'
 
 /** 회수 경로 한 회차. scan과 나누는 이유는 답하는 질문이 다르기 때문이다. */
@@ -102,6 +103,18 @@ export type MonitorDeps = {
 export type EventObservation = {
   signal?: SignalContext
   relevance?: RelevanceContext
+  /**
+   * 이 스레드에서 누가 마지막으로 말했는가 (0.8.5). 신호가 아니라 **관측된 사실**이고,
+   * 방향 판정의 근거로 요청에 그대로 실린다 — 나중에 다시 읽지 않아도 되게.
+   */
+  participation?: Participation
+  /**
+   * 이번 회차의 예산을 다 썼다 — 이 사건은 **아직 보지 않았다** (0.8.5).
+   *
+   * 보지 않은 것을 본 것으로 적으면 안 된다. 그래서 이 표시가 있으면 회수 경로는 그 항목의
+   * 실질 변화 마커를 갱신하지 않는다 — 갱신하면 다음 회차의 diff 에서 빠져 영영 안 보인다.
+   */
+  deferred?: boolean
   /**
    * 실질 변화 마커 (C-07 §4.2). adapter가 만든다. 없으면 억제 판정이 서지 않으므로
    * 같은 스레드의 반복 호출이 매번 새 패킷이 된다.
@@ -246,7 +259,15 @@ export class MonitorEngine {
   async #intake(
     event: RawEvent,
     extra: SignalContext = {},
-  ): Promise<{ duplicate: true } | { duplicate: false; fresh?: { event: RawEvent; verdict: Classification } }> {
+  ): Promise<
+    | { duplicate: true }
+    | {
+        duplicate: false
+        deferred?: boolean
+        participation?: Participation
+        fresh?: { event: RawEvent; verdict: Classification; participation?: Participation }
+      }
+  > {
     // dedupe는 log를 훑는 게 아니라 key 하나로 본다 (OM §10.4)
     if (await this.#store.get('event', event.eventKey)) return { duplicate: true }
     // 밖에서 알아 온 사실을 먼저 모은다 — 없으면 신호만으로 판정한다.
@@ -262,7 +283,11 @@ export class MonitorEngine {
     // 빠른 경로가 본 것을 회수 경로도 알아야 한다. 안 그러면 다음 대조가 같은 변화를
     // "처음 본다"로 판단해 패킷이 둘이 된다 (C-07 §1.7).
     if (observed.revisionMarker) {
-      await this.#coverage().record({ reference: event.reference, revisionMarker: observed.revisionMarker })
+      await this.#coverage().record({
+        reference: event.reference,
+        revisionMarker: observed.revisionMarker,
+        ...directionRecord(observed.participation, verdict),
+      })
     }
 
     await this.#store.create('event', {
@@ -308,7 +333,15 @@ export class MonitorEngine {
         // 올리지 않은 것도 log에는 남는다. 숨김은 폐기가 아니다 (OM §10.7 허용 write).
         (verdict.inboxCandidate && !inboxCandidate ? ' · 억제' : ''),
     })
-    return { duplicate: false, ...(inboxCandidate ? { fresh: { event, verdict } } : {}) }
+    return {
+      duplicate: false,
+      // 후보가 되지 못한 것에도 관측은 남는다 — 내가 물어 놓고 기다리는 스레드가 그렇다.
+      ...(observed.participation ? { participation: observed.participation } : {}),
+      ...(observed.deferred ? { deferred: true } : {}),
+      ...(inboxCandidate
+        ? { fresh: { event, verdict, ...(observed.participation ? { participation: observed.participation } : {}) } }
+        : {}),
+    }
   }
 
   /** Coverage 기록은 scan lease와 같은 scope에 둔다 — 회수 경로도 같은 문을 지난다. */
@@ -379,9 +412,10 @@ export class MonitorEngine {
 
       const at = this.#now()
       const packets: string[] = []
-      const fresh: { event: RawEvent; verdict: Classification }[] = []
+      const fresh: { event: RawEvent; verdict: Classification; participation?: Participation }[] = []
 
       const me = this.#config.identities ?? []
+      let deferred = 0
       for (const diff of diffs) {
         if (diff.kind === 'RESOURCE_MISSING') continue
         // 목록에서만 알 수 있는 사실을 신호 판정에 넘긴다. 알림이 오지 않은 배정이
@@ -389,12 +423,35 @@ export class MonitorEngine {
         const assignedToMe = (diff.item.assignees ?? []).some((who) => me.includes(who))
         const taken = await this.#intake(sweepEvent(kind, diff, at), assignedToMe ? { assignedToMe } : {})
         if (!taken.duplicate && taken.fresh) fresh.push(taken.fresh)
-        await coverage.record(diff.item)
+        // 예산을 다 써 아직 보지 않은 것은 **기록하지 않는다.** 마커를 갱신하면 다음
+        // 회차가 그것을 "달라진 것 없음" 으로 읽고 영영 지나친다.
+        if (!taken.duplicate && taken.deferred) {
+          deferred += 1
+          continue
+        }
+        await coverage.record({
+          ...diff.item,
+          ...(taken.duplicate
+            ? {}
+            : directionRecord(taken.participation, { signals: assignedToMe ? ['assigned_to_me'] : [] })),
+        })
       }
 
-      for (const { event, verdict } of fresh) {
-        const made = await this.#buildPacket(event, verdict)
+      for (const { event, verdict, participation } of fresh) {
+        const made = await this.#buildPacket(event, verdict, [], participation)
         if (made) packets.push(made)
+      }
+
+      // 예산을 다 써서 못 본 것이 있으면 **조용히 두지 않는다.** 다음 회차가 다시 보되,
+      // 이번 회차가 전부를 본 것처럼 읽히면 안 된다.
+      if (deferred > 0) {
+        await this.#store.appendHistory({
+          at,
+          actor: this.#source.id,
+          kind: 'monitor_deferred',
+          ref: kind,
+          detail: `${deferred}건은 이번 회차 예산을 넘어 아직 보지 않았다 — 다음 회차가 같은 자리에서 다시 본다`,
+        })
       }
 
       for (const gone of missing) {
@@ -460,7 +517,7 @@ export class MonitorEngine {
     const retries: string[] = []
 
     // ── Phase A — 전부, 싸게 ──────────────────────────────────────────────
-    const fresh: { event: RawEvent; verdict: Classification }[] = []
+    const fresh: { event: RawEvent; verdict: Classification; participation?: Participation }[] = []
     for (const event of batch.events) {
       const taken = await this.#intake(event)
       if (taken.duplicate) {
@@ -484,8 +541,8 @@ export class MonitorEngine {
       else retries.push(stale.eventKey)
     }
 
-    for (const { event, verdict } of fresh) {
-      const made = await this.#buildPacket(event, verdict)
+    for (const { event, verdict, participation } of fresh) {
+      const made = await this.#buildPacket(event, verdict, [], participation)
       if (made) packets.push(made)
       else retries.push(event.eventKey)
     }
@@ -514,6 +571,7 @@ export class MonitorEngine {
     event: RawEvent,
     verdict: Classification,
     resume: readonly StepResult[] = [],
+    participation?: Participation,
   ): Promise<string | null> {
     // 끝난 단계는 실패해도 남긴다. 재시도가 처음부터 다시 하면 비싼 단계에서 걸린 사건은
     // 영영 넘지 못한다 (C-07 §6.3).
@@ -578,6 +636,15 @@ export class MonitorEngine {
           ...(thread && !thread.missing ? { threadLastEventId: thread.lastEventId } : {}),
           // 같은 사람 결정을 가리키는 키 (0.8.4 · C-5). eventKey 는 전송 중복만 막는다.
           subject: decisionSubject({ reference: event.reference, type: verdict.type, signals: verdict.signals }),
+          // 누가 마지막으로 말했는가 (0.8.5). 감지 시점의 관측이며, 소유권이 아니다.
+          ...(participation
+            ? {
+                direction: directionOf(participation, {
+                  assignedToMe: verdict.signals.includes('assigned_to_me'),
+                }),
+                ...(participation.lastOtherAt ? { lastOtherAt: participation.lastOtherAt } : {}),
+              }
+            : {}),
         },
         situation: situationOf(event, verdict, raw),
         // 깊이는 유형이 정한다. 참고용 알림에 전체 보고서를 붙이면 정작 급한 것이 묻힌다.
@@ -767,4 +834,21 @@ function recommendationOf(type: string): string {
 /** 작업형은 작업 큐로, 대응형은 답변으로 간다 (OM §11.10). */
 function allowedDecisionsFor(type: string): string[] {
   return type === 'work' ? ['queue', 'defer', 'dismiss'] : ['approve', 'revise', 'defer', 'dismiss']
+}
+
+/**
+ * 관측을 coverage 에 남길 모양으로 옮긴다 (0.8.5).
+ *
+ * **모르면 아무것도 쓰지 않는다.** 방향을 만들 근거가 없을 때 UNKNOWN 을 적으면 그것이
+ * 지난 회차의 관측을 덮어 지운다 — 스레드를 읽지 못한 회차가 읽은 회차를 이기게 된다.
+ */
+function directionRecord(
+  participation: Participation | undefined,
+  verdict: { signals: readonly string[] },
+): { direction?: 'INBOUND' | 'OUTBOUND' | 'UNKNOWN'; lastMineAt?: string } {
+  if (!participation) return {}
+  return {
+    direction: directionOf(participation, { assignedToMe: verdict.signals.includes('assigned_to_me') }),
+    ...(participation.lastMineAt ? { lastMineAt: participation.lastMineAt } : {}),
+  }
 }
