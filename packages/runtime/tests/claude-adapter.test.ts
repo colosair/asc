@@ -276,11 +276,11 @@ describe('0.9.0 upgrade — the 0.8.x guard is retired', () => {
   const OLD_GUARD = '// 0.8.5 external-write guard\n'
   const OLD_FRONT = '// 0.8.5 front hook\n'
 
-  type Shape = { marked?: boolean; unmarked?: boolean; guardText?: string; userPreToolUse?: boolean }
+  type Shape = { marked?: boolean; unmarked?: boolean; guardText?: string; userPreToolUse?: boolean; claudeHome?: string }
 
   /** 0.8.5 가 설치했다면 남았을 HOME. 파일·manifest digest·settings 등록을 그대로 재현한다. */
   async function home085(shape: Shape = {}): Promise<{ paths: InstallPaths; guard: string; settingsPath: string }> {
-    const claudeHome = await tempDir('asc-085-home-')
+    const claudeHome = shape.claudeHome ?? (await tempDir('asc-085-home-'))
     const paths: InstallPaths = { claudeHome, entry: ENTRY }
     const guard = join(claudeHome, 'asc', 'guard-hook.mjs')
     const front = join(claudeHome, 'asc', 'front-hook.mjs')
@@ -419,6 +419,25 @@ describe('0.9.0 upgrade — the 0.8.x guard is retired', () => {
     assert.deepEqual(settings.hooks.PreToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] }])
     assert.deepEqual(settings.hooks.SessionStart, [{ hooks: [{ type: 'command', command: 'caveman-hook' }] }])
     assert.deepEqual(settings.permissions.allow, ['Bash(ls:*)'])
+  })
+
+  it('CLI 로 부르면 걷어낸 것이 stdout 에 `removed:` 로 나온다 — update 가 이 줄을 화면에 넘긴다 (#85)', async () => {
+    // 0.9.0 published acceptance: migration 은 맞게 돌았는데 `asc update` 화면에 아무 말이 없었다.
+    // update 는 새 빌드의 `asc refresh` stdout 을 줄 필터로 넘기고, refresh 는 이 명령의 출력을
+    // 그대로 낸다 — producer 쪽을 CLI 경로로 고정한다 (filter 는 update.test 가 본다).
+    const home = await tempDir('asc-085-cli-home-')
+    const claudeHome = join(home, '.claude')
+    await mkdir(claudeHome, { recursive: true })
+    const { guard } = await home085({ marked: true, claudeHome })
+    const cli = new URL('../cli/asc.ts', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+    const out = execFileSync(process.execPath, ['--experimental-strip-types', cli, 'host', 'claude', 'install'], {
+      env: { ...process.env, HOME: home, USERPROFILE: home, ASC_HOME: join(home, '.asc'), ASC_SERVICE: 'off' },
+      encoding: 'utf8',
+      timeout: 60_000,
+    })
+    assert.match(out, /^removed: .*guard-hook\.mjs$/m)
+    assert.match(out, /^removed: .*settings\.json \(PreToolUse hook entry retired\)$/m)
+    assert.equal(await exists(guard), false)
   })
 })
 describe('skill', () => {

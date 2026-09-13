@@ -56,6 +56,7 @@ import {
 } from '../core/attach/setup-plan.ts'
 import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claude-code/binding.ts'
 import { judgePhysicalId, observedRunId } from '../adapters/claude-code/identity.ts'
+import { ambiguousBindingLines, bindingIdentity as judgeBindingIdentity, type BindingIdentity } from './binding-identity.ts'
 import type { ApprovalRequest } from '../core/model/entities.ts'
 import { staleSessions } from '../core/runtime/stale-session.ts'
 import { judgeReconcile, readOrigin, type OriginObservation } from '../core/approval/reconcile.ts'
@@ -314,8 +315,10 @@ They stay because recovery, diagnosis and scripting need them.
   asc session plan  [--id <S-ID>] [--role <role>] [--goal <text>] [--boundary <glob>...]
                     [--criteria <text>...] [--owner <role>] [--provenance <f>=<STATUS>[:<src>]...]
                     [--json]        # is this draft issuable? changes nothing
-  asc session issue <ID> --role <role> --goal <text> [--block <id>]
-                         [--parent <S-ID>] [--issued-by <principal>]
+  asc session issue <ID> --role <role> --goal <text> [--criteria <text>...] [--boundary <glob>...]
+                         [--owner <role>] [--exception <action>...] [--domain <d>...] [--authority <d>=<role>...]
+                         [--dependency <text>...] [--block <id>] [--parent <S-ID>] [--issued-by <principal>]
+                         # done criteria go on --criteria; --done is the pause/done checkpoint flag
   asc session validate <target S-ID> --validator <validator S-ID> --result PASS|FAIL [--finding <t>]
   asc session audit  <S-ID>
   asc session report <S-ID> [--json]
@@ -3619,6 +3622,14 @@ async function runSession(
         console.error(authority.detail)
         return 2
       }
+      // 옵션표가 명령마다 나뉘어 있지 않아 `--done` 이 여기서도 파싱된다. 그 값은 pause/done 의
+      // "마친 task" 이고 발급 계약의 done criteria 가 아니다 — 조용히 버리면 사람의 결정이 사라진다
+      // (0.9.0 acceptance 실측). 쓰기 전에 거절하고 맞는 flag 를 말한다.
+      if (values.done) {
+        console.error('--done is the pause/done checkpoint flag (tasks already finished).')
+        console.error('  done criteria for a new session go on --criteria <text> (repeatable).')
+        return 2
+      }
       const issued = await runtime.issue({
         id: target,
         role: role.data,
@@ -5536,7 +5547,13 @@ async function runWork(
       const action = { action: values.action as string, target: values.target as string, payload }
 
       // ① 읽기만 하는 검수. MANUAL 이든 AUTO 든 같은 판정이고, 화면만 다르다 (§E).
-      const bound = bindingIdentity(runtime, outward.id)
+      const identity = bindingIdentity(runtime, outward.id)
+      if (identity.kind === 'AMBIGUOUS') {
+        // 기준점 없는 검수는 READY 처럼 보이는 거짓이다 — 검수조차 하지 않는다 (0.9.1 fail closed)
+        for (const line of ambiguousBindingLines(identity)) console.error(line)
+        return 2
+      }
+      const bound = identity.kind === 'PINNED' ? identity.resource : undefined
       const facts = outward.review
         ? await outward.review(action)
         : {
@@ -7161,9 +7178,15 @@ async function runGrant(
       // **범위를 계약에 못 박는다** (0.8.0 보정 P1-3). 이 결합이 가리키는 원격이 곧 이
       // 승인의 실행 범위다 — 행위 하나를 승인했다는 사실이 다른 저장소까지 열어 주지
       // 않는다. 호출자가 이미 근거를 준 경우에는 그것을 그대로 둔다.
+      const identity = bindingIdentity(runtime, outward.id)
+      if (identity.kind === 'AMBIGUOUS' && !(values.basis as ExecutionGrant['basis'] | undefined)?.resource) {
+        // 근거 없는 발급은 다른 저장소까지 여는 승인이 된다 — 발급하지 않는다 (0.9.1 fail closed)
+        for (const line of ambiguousBindingLines(identity)) console.error(line)
+        return 2
+      }
       const scoped = ((): ExecutionGrant['basis'] | undefined => {
         const given = values.basis as ExecutionGrant['basis'] | undefined
-        const bound = bindingIdentity(runtime, outward.id)
+        const bound = identity.kind === 'PINNED' ? identity.resource : undefined
         if (given?.resource || !bound) return given
         return { ...(given ?? {}), resource: bound }
       })()
@@ -7300,16 +7323,9 @@ async function runGrant(
   }
 }
 
-/**
- * 이 작업이 가리키는 원격의 신원 (0.8.0 §K).
- *
- * **deny-list 가 아니다.** 검수가 "이 대상이 우리가 맡은 그 원격인가" 를 묻기 위한
- * 기준점이고, 어긋나면 Agent 가 스스로 범위를 넓히는 대신 사람에게 올라간다.
- * 결합이 여럿이면 고르지 않는다 — 고르는 순간 그것이 곧 조용한 범위 확장이다.
- */
-function bindingIdentity(runtime: ResolvedRuntime | undefined, adapterId: string): string | undefined {
-  const declared = (runtime?.layers.profile.bindings ?? []).filter((binding) => binding.adapter === adapterId)
-  return declared.length === 1 ? declared[0]!.resource : undefined
+/** 이 작업이 가리키는 원격의 신원 — 판정은 cli/binding-identity.ts 에 있다. */
+function bindingIdentity(runtime: ResolvedRuntime | undefined, adapterId: string): BindingIdentity {
+  return judgeBindingIdentity(runtime?.layers.profile.bindings ?? [], adapterId)
 }
 
 /**
