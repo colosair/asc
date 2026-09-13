@@ -228,7 +228,7 @@ Execution
   asc mode manual           step back to advisory. Recorded, with who said so
 
 Work
-  asc work start [WORK]     start or resume the work, inside a contract
+  asc work start [WORK]     start or resume the work, inside a contract — binds this Run to it
   asc work status [S-ID]    where it is right now
   asc work publish          send the approved result outside
   asc work publish --review read the target, the SHA and the binding — change nothing
@@ -353,7 +353,7 @@ They stay because recovery, diagnosis and scripting need them.
   asc coordination observe [--json]    # did anything come back on what we published
 
   asc progress show   [<S-ID>]
-  asc progress report <S-ID> --physical <id> --phase <text>
+  asc progress report <S-ID> [--physical <id>] --phase <text>   # --physical defaults to this Run
                       [--milestone <text>...] [--next <text>] [--unresolved <text>...]
                       [--decision none|later|now] [--decision-ref <text>]
                       [--verifier none|running|pass|fail] [--verifier-detail <text>] [--terminal]
@@ -2705,6 +2705,113 @@ async function releaseRuntimeBinding(
 }
 
 /**
+ * 이 Run 이 세션을 잡는다 — `work start` 의 healthy path 와 `host claude bind`(복구 표면)가
+ * 같은 것을 해야 해서 여기 있다 (0.9.0).
+ *
+ * 원자성·충돌·묘비 계약은 ScopedRuntimeBindings 그대로다. 여기는 그 결과를 세 갈래로
+ * 말하고, 새로 잡았을 때만 실행 증거를 남긴다. **뺏지 않는다** — CONFLICT 는 사실이고,
+ * 갈아끼우는 것은 사람이 `--force` 로 하는 일이다.
+ */
+type BindingOutcome =
+  | { state: 'CLAIMED' | 'ALREADY'; physical: string }
+  | {
+      state: 'CONFLICT'
+      physical: string
+      holder: { logicalSessionId: string; physicalSessionId: string }
+      detail: string
+    }
+
+async function claimRuntimeBinding(
+  store: MarkdownStateStore,
+  target: string,
+  physical: string,
+  at: string,
+  opts: { evidenceSource: string; principal?: string; workerId?: string; runtimeKind?: string },
+  say: (line: string) => void = () => {},
+): Promise<BindingOutcome> {
+  const bindings = claudeBindings(store)
+  const audit = auditLedger(store)
+
+  // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
+  // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
+  // 여기이고, 사람이 따로 기억해야 하는 정리 절차는 결국 안 돌아간다.
+  for (const dead of await bindings.stale()) {
+    if (await bindings.forget(dead.logicalSessionId)) {
+      say(`(stale binding cleared: ${dead.logicalSessionId} ← ${dead.physicalSessionId})`)
+    }
+  }
+
+  // 같은 Run 이 같은 세션을 이미 쥐고 있으면 할 일이 없다 — 증거도 두 번 남기지 않는다.
+  const held = await bindings.get(target)
+  if (held && held.physicalSessionId === physical) return { state: 'ALREADY', physical }
+
+  const spec = {
+    logicalSessionId: target,
+    provider: CLAUDE_PROVIDER,
+    physicalSessionId: physical,
+    ...(opts.workerId ? { workerId: opts.workerId } : {}),
+    ...(opts.runtimeKind ? { runtimeKind: opts.runtimeKind } : {}),
+  }
+  const claimed = await bindings.claim(spec, at)
+  if (!claimed.ok) {
+    // 부딪힌 상대가 **어느 세션인지** 말한다. 같은 Run 이 다른 세션을 잡고 있는 경우와
+    // 이 세션을 다른 Run 이 잡고 있는 경우는 사람이 할 일이 다르다.
+    const other = claimed.current.logicalSessionId
+    let detail: string
+    if (other === target) {
+      detail =
+        `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
+        '죽은 세션이 확실하면 --force 로 rebind하라.'
+    } else {
+      // 같은 Run 이 다른 세션을 잡고 있는 경우에도 사람이 할 일은 둘로 갈린다.
+      // **끝난 세션이 아직 붙들고 있는 것**은 놓아야 할 잔재이고, 살아 있는 세션을
+      // 잡고 있는 것은 설계대로다 — 그때는 Run 을 나누는 것이 답이다. 둘을 같은
+      // 문장으로 말하던 동안 앞의 경우가 세 번이나 사람 실수로 읽혔다 (#63).
+      const holder = await store.get('session', other)
+      const finished = holder?.status === 'DONE'
+      detail = finished
+        ? `RUNTIME_CONFLICT: 이 Run(${physical}) 은 끝난 세션 ${other} 을 아직 잡고 있다. ` +
+          `놓아라: asc host claude release ${other} --physical ${physical}`
+        : `RUNTIME_CONFLICT: 이 Run(${physical}) 은 지금 ${other} 을 잡고 있다. ` +
+          '한 Run 은 한 세션만 잡는다 — 그 세션을 계속 쓸 것이면 이 작업은 다른 Run 으로 하고, ' +
+          `아니면 먼저 놓아라: asc host claude release ${other} --physical ${physical}`
+    }
+    return {
+      state: 'CONFLICT',
+      physical,
+      holder: { logicalSessionId: other, physicalSessionId: claimed.current.physicalSessionId },
+      detail,
+    }
+  }
+
+  // principal은 physical 참조와 다르다 (C-10 §3). 선언이 없으면 유추한 것이고,
+  // 유추한 principal 위에서는 어떤 독립성 주장도 UNVERIFIED를 넘지 못한다.
+  const principal = opts.principal ?? physical
+  const principalSource = opts.principal ? 'declared' : 'derived'
+  const recorded = await audit.execute({
+    logicalSessionId: target,
+    hostAdapter: CLAUDE_PROVIDER,
+    principal,
+    principalSource,
+    physicalReference: physical,
+    startedAt: at,
+    evidenceSource: opts.evidenceSource,
+  })
+  say(`execution evidence ${recorded.evidence.executionId} · principal ${principal} (${principalSource})`)
+  return { state: 'CLAIMED', physical }
+}
+
+/**
+ * Host 가 보고하는 Run id 로 `--physical` 을 채운다 — **소유권을 소비하는 lifecycle 명령에서만**
+ * 부른다 (work finish · session pause/done · progress report · host claude release). 명시된
+ * 값이 항상 우선이고, Claude Run 밖이면 undefined 그대로다. 일반 명령의 인자에 Host 신원을
+ * 심지 않는다 — 그것은 Host/lifecycle seam 의 일이다.
+ */
+function effectivePhysical(values: { physical?: unknown }): string | undefined {
+  return typeof values.physical === 'string' && values.physical.length > 0 ? values.physical : observedRunId()
+}
+
+/**
  * Claude Host Adapter 표면 (C-03 §5). install/uninstall/probe는 프로젝트 밖(user-scope)
  * 이라 .asc 없이 돌고, bind/contract는 attach된 프로젝트에서 돈다.
  */
@@ -2775,26 +2882,18 @@ async function runHost(
         return 1
       }
 
-      // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
-      // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
-      // 여기이고, 사람이 따로 기억해야 하는 정리 절차는 결국 안 돌아간다.
-      for (const dead of await bindings.stale()) {
-        if (await bindings.forget(dead.logicalSessionId)) {
-          console.error(`(stale binding cleared: ${dead.logicalSessionId} ← ${dead.physicalSessionId})`)
-        }
-      }
-
       // **결합이 가리키는 값과 Host 가 보고하는 Run id 를 같게 한다** (0.8.4).
       //
-      // release 는 그대로 둔다 — 이미 잘못 묶인 결합을 푸는 것이 이 명령의 일이고,
+      // release 는 모양을 요구하지 않는다 — 이미 잘못 묶인 결합을 푸는 것이 이 명령의 일이고,
       // 거기에까지 모양을 요구하면 고칠 방법이 없어진다.
       let physical: string
       if (command === 'release') {
-        if (!values.physical) {
-          console.error('--physical <Claude session id> is required.')
+        const resolved = effectivePhysical(values)
+        if (!resolved) {
+          console.error('--physical <Claude session id> is required outside a Claude Code Run.')
           return 2
         }
-        physical = values.physical as string
+        physical = resolved
       } else {
         const verdict = judgePhysicalId({
           ...(typeof values.physical === 'string' ? { provided: values.physical } : {}),
@@ -2817,8 +2916,6 @@ async function runHost(
         }
       }
 
-      const audit = auditLedger(store)
-
       if (command === 'release') {
         const outcome = await releaseRuntimeBinding(store, target, physical, at)
         if (!outcome.ok) {
@@ -2829,18 +2926,21 @@ async function runHost(
         return 0
       }
 
-      const spec = {
-        logicalSessionId: target,
-        provider: CLAUDE_PROVIDER,
-        physicalSessionId: physical,
-        ...(values.worker ? { workerId: values.worker as string } : {}),
-        ...(values.kind ? { runtimeKind: values.kind as string } : {}),
-      }
-      // principal은 physical 참조와 다르다 (C-10 §3). 선언이 없으면 유추한 것이고,
-      // 유추한 principal 위에서는 어떤 독립성 주장도 UNVERIFIED를 넘지 못한다.
-      const principal = (values.principal as string) ?? physical
-      const principalSource = values.principal ? 'declared' : 'derived'
-      const recordExecution = async (evidenceSource: string) => {
+      if (values.force) {
+        // 죽은 owner를 사람이 확인하고 갈아끼우는 명시적 복구다 — 자동 탈취가 아니다
+        const audit = auditLedger(store)
+        const spec = {
+          logicalSessionId: target,
+          provider: CLAUDE_PROVIDER,
+          physicalSessionId: physical,
+          ...(values.worker ? { workerId: values.worker as string } : {}),
+          ...(values.kind ? { runtimeKind: values.kind as string } : {}),
+        }
+        const principal = (values.principal as string) ?? physical
+        const principalSource = values.principal ? 'declared' : 'derived'
+        const superseded = (await audit.executionsOf(target)).filter((e) => e.status === 'RUNNING')
+        const rebound = await bindings.rebind(spec, at)
+        for (const evidence of superseded) await audit.endExecution(evidence.executionId, 'SUPERSEDED', at)
         const recorded = await audit.execute({
           logicalSessionId: target,
           hostAdapter: CLAUDE_PROVIDER,
@@ -2848,50 +2948,35 @@ async function runHost(
           principalSource,
           physicalReference: physical,
           startedAt: at,
-          evidenceSource,
+          evidenceSource: 'host bind --force',
         })
         console.log(`execution evidence ${recorded.evidence.executionId} · principal ${principal} (${principalSource})`)
-      }
-
-      if (values.force) {
-        // 죽은 owner를 사람이 확인하고 갈아끼우는 명시적 복구다 — 자동 탈취가 아니다
-        const superseded = (await audit.executionsOf(target)).filter((e) => e.status === 'RUNNING')
-        const rebound = await bindings.rebind(spec, at)
-        for (const evidence of superseded) await audit.endExecution(evidence.executionId, 'SUPERSEDED', at)
-        await recordExecution('host bind --force')
         console.log(`${target} ← ${rebound.physicalSessionId} (explicit rebind)`)
         return 0
       }
-      const claimed = await bindings.claim(spec, at)
-      if (!claimed.ok) {
-        // 부딪힌 상대가 **어느 세션인지** 말한다. 같은 Run 이 다른 세션을 잡고 있는 경우와
-        // 이 세션을 다른 Run 이 잡고 있는 경우는 사람이 할 일이 다르다.
-        const other = claimed.current.logicalSessionId
-        if (other === target) {
-          console.error(
-            `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
-              '죽은 세션이 확실하면 --force 로 rebind하라.',
-          )
-          return 1
-        }
-        // 같은 Run 이 다른 세션을 잡고 있는 경우에도 사람이 할 일은 둘로 갈린다.
-        // **끝난 세션이 아직 붙들고 있는 것**은 놓아야 할 잔재이고, 살아 있는 세션을
-        // 잡고 있는 것은 설계대로다 — 그때는 Run 을 나누는 것이 답이다. 둘을 같은
-        // 문장으로 말하던 동안 앞의 경우가 세 번이나 사람 실수로 읽혔다 (#63).
-        const holder = await store.get('session', other)
-        const finished = holder?.status === 'DONE'
-        console.error(
-          finished
-            ? `RUNTIME_CONFLICT: 이 Run(${physical}) 은 끝난 세션 ${other} 을 아직 잡고 있다. ` +
-              `놓아라: asc host claude release ${other} --physical ${physical}`
-            : `RUNTIME_CONFLICT: 이 Run(${physical}) 은 지금 ${other} 을 잡고 있다. ` +
-              '한 Run 은 한 세션만 잡는다 — 그 세션을 계속 쓸 것이면 이 작업은 다른 Run 으로 하고, ' +
-              `아니면 먼저 놓아라: asc host claude release ${other} --physical ${physical}`,
-        )
+
+      const outcome = await claimRuntimeBinding(
+        store,
+        target,
+        physical,
+        at,
+        {
+          evidenceSource: 'host bind',
+          ...(values.principal ? { principal: values.principal as string } : {}),
+          ...(values.worker ? { workerId: values.worker as string } : {}),
+          ...(values.kind ? { runtimeKind: values.kind as string } : {}),
+        },
+        (line) => console.log(line),
+      )
+      if (outcome.state === 'CONFLICT') {
+        console.error(outcome.detail)
         return 1
       }
-      await recordExecution('host bind')
-      console.log(`${target} ← ${claimed.binding.physicalSessionId} (owner claim)`)
+      if (outcome.state === 'ALREADY') {
+        console.log(`${target} ← ${outcome.physical} (already held by this Run)`)
+        return 0
+      }
+      console.log(`${target} ← ${outcome.physical} (owner claim)`)
       console.log(`This Run now holds ${target}. Approved acts for it go out through ASC's executor.`)
       return 0
     }
@@ -2949,9 +3034,41 @@ async function runProceed(
   // 도구 자식(JAM MCP 서버 등)을 여기서 닫는다 — 안 닫으면 출력까지 끝내고도 종료하지 못한다.
   await closeToolClients()
 
+  // **이 Run 이 세션을 잡는다** (0.9.0). 논리 세션의 전이는 Operator 가 끝냈고, 그것과
+  // "지금 도는 Run 이 그 세션의 소유자인가" 는 다른 사실이다. Host 가 Run id 를 보고하면
+  // 여기서 결합까지 이어 준다 — 사람이 `host claude bind` 를 알아야 하는 자리를 없앤다.
+  // Core/Operator 는 Host 를 모른다. 이 seam 은 Surface 의 것이다.
+  const heldNotes: string[] = []
+  const binding: (BindingOutcome | { state: 'NO_RUN' }) | undefined =
+    outcome.kind === 'STARTED' || outcome.kind === 'RESUMED' || outcome.kind === 'CONTINUE_ACTIVE'
+      ? observedRunId()
+        ? await claimRuntimeBinding(
+            store,
+            outcome.contract.id,
+            observedRunId()!,
+            new Date().toISOString(),
+            { evidenceSource: 'work start' },
+            (line) => heldNotes.push(line),
+          )
+        : { state: 'NO_RUN' }
+      : undefined
+  // 세션은 시작됐지만 이 Run 은 소유권을 얻지 못했다 — 성공이 아니다. 전이를 되돌리지도,
+  // 기존 소유자를 뺏지도 않는다. 사실을 두 줄로 나눠 말하고 non-zero 로 끝낸다.
+  const conflicted = binding?.state === 'CONFLICT'
+  if (binding?.state === 'CONFLICT' && 'contract' in outcome) {
+    // JSON 이든 아니든 stderr 로 말한다 — stdout 은 한 문서, 진단은 진단 자리에.
+    console.error(
+      `${outcome.contract.id} is ${outcome.kind === 'STARTED' ? 'STARTED' : 'running'}, but this Run did not obtain ownership — ` +
+        `${binding.holder.physicalSessionId} holds ${binding.holder.logicalSessionId}. ASC does not take it over.`,
+    )
+    console.error(binding.detail)
+    console.error('only the owner can record progress, pause or finish it; see `asc host claude bind --force` for recovery.')
+  }
+
   if (values.json) {
-    console.log(JSON.stringify(outcome, null, 2))
-    return outcome.kind.startsWith('BLOCKED') || outcome.kind === 'FAILED' ? 1 : 0
+    console.log(JSON.stringify({ ...outcome, ...(binding ? { binding } : {}) }, null, 2))
+    if (outcome.kind.startsWith('BLOCKED') || outcome.kind === 'FAILED') return 1
+    return conflicted ? 1 : 0
   }
 
   switch (outcome.kind) {
@@ -2960,6 +3077,12 @@ async function runProceed(
     case 'CONTINUE_ACTIVE': {
       const verb = outcome.kind === 'STARTED' ? '시작' : outcome.kind === 'RESUMED' ? '재개' : '계속'
       console.log(`${outcome.contract.id} ${verb} — ${outcome.contract.goal}`)
+      for (const line of heldNotes) console.log(line)
+      if (binding?.state === 'CLAIMED') console.log(`this Run now holds ${outcome.contract.id} (${binding.physical})`)
+      if (binding?.state === 'ALREADY') console.log(`this Run already holds ${outcome.contract.id}`)
+      if (binding?.state === 'NO_RUN') {
+        console.log('run binding: skipped — not inside a Claude Code Run (CLAUDE_CODE_SESSION_ID unset)')
+      }
 
       // 이어가는 경우에는 계약 복창보다 "지금 어떻게 되고 있는가"가 먼저다.
       // 재개(RESUMED)는 아래 checkpoint가 그 역할을 하므로 중복해서 말하지 않는다.
@@ -2994,7 +3117,7 @@ async function runProceed(
       if (outcome.contract.writeBoundary.length > 0) {
         console.log(`Write boundary: ${outcome.contract.writeBoundary.join(', ')}`)
       }
-      return 0
+      return conflicted ? 1 : 0
     }
     case 'NEEDS_SELECTION':
       console.log(`There are ${outcome.candidates.length} runnable sessions. Name the one you mean (--session):`)
@@ -3698,11 +3821,12 @@ async function runSession(
         ...(values.blocker ? { blockers: values.blocker as string[] } : {}),
         ...(values.risk ? { risks: values.risk as string[] } : {}),
         ...(values.evidence ? { evidenceRefs: values.evidence as string[] } : {}),
-        ...(values.physical ? { writtenBy: values.physical as string } : {}),
+        ...(effectivePhysical(values) ? { writtenBy: effectivePhysical(values)! } : {}),
         recordedAt: at,
       })
+      // 소유권을 소비하는 자리 — Host 가 보고하는 Run id 로 채운다 (명시값 우선)
       return report(
-        await runtime.pause(target, checkpoint, values.physical as string | undefined),
+        await runtime.pause(target, checkpoint, effectivePhysical(values)),
         `${target} PAUSED — 다음: ${checkpoint.nextAction}`,
       )
     }
@@ -3732,7 +3856,8 @@ async function runSession(
         next: values.next,
         recordedAt: at,
       })
-      const outcome = await runtime.complete(target, handoff, values.physical as string | undefined)
+      // 소유권을 소비하는 자리 — Host 가 보고하는 Run id 로 채운다 (명시값 우선)
+      const outcome = await runtime.complete(target, handoff, effectivePhysical(values))
       if (!outcome.ok) return report(outcome, '')
       console.log(`${target} DONE — handoff written`)
       console.log('Updating state and blocks is the Controller\'s: `asc controller collect`')
@@ -4196,15 +4321,18 @@ async function runProgress(
   }
 
   if (command === 'report') {
-    if (!target || !values.physical || !values.phase) {
-      console.error('Usage: asc progress report <S-ID> --physical <id> --phase "what is happening now"')
+    // 소유권을 소비하는 자리 — Host 가 보고하는 Run id 로 채운다 (명시값 우선). Run 밖이면 요구한다.
+    const physical = effectivePhysical(values)
+    if (!target || !physical || !values.phase) {
+      console.error('Usage: asc progress report <S-ID> [--physical <id>] --phase "what is happening now"')
+      console.error('  --physical defaults to this Run inside Claude Code; outside one it is required.')
       return 2
     }
     const decision = parseEnumArg(values.decision, ['none', 'later', 'now'] as const, 'decision')
     const verifier = parseEnumArg(values.verifier, ['none', 'running', 'pass', 'fail'] as const, 'verifier')
     if (decision === null || verifier === null) return 2
 
-    const outcome = await service.report(target, values.physical as string, {
+    const outcome = await service.report(target, physical, {
       phase: values.phase as string,
       ...(values.milestone ? { milestones: values.milestone as string[] } : {}),
       ...(values.next ? { nextStep: values.next as string } : {}),
@@ -4698,6 +4826,11 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   // 결합에는 볼 이력이 없다. 그래서 finish 가 놓지 않던 동안 생긴 것들은 자동 정리도
   // 비껴갔고, 실기계에서 여섯 개가 일주일을 그렇게 살았다. 다음 bind 가 실패하거나
   // `uninstall plan` 을 읽을 때에야 한꺼번에 드러났다 (#63).
+  // 어느 Run 이 어느 세션을 쥐고 있는가 — 한 번 읽어 JSON 과 화면이 같은 것을 말한다 (0.9.0).
+  const heldBy = new Map<string, string>(
+    store ? (await claudeBindings(store).current()).map((b) => [b.logicalSessionId, b.physicalSessionId]) : [],
+  )
+  const thisRun = observedRunId()
   const heldByFinished = store
     ? await (async () => {
         const held = await claudeBindings(store).current()
@@ -4744,7 +4877,12 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
           ...(survey
             ? { bindings: { declared: survey.declared, undeclared: survey.undeclared, workItem: survey.workItem } }
             : {}),
-          work: sessions.map((session) => ({ id: session.id, status: session.status, role: session.role })),
+          work: sessions.map((session) => ({
+            id: session.id,
+            status: session.status,
+            role: session.role,
+            ...(heldBy.has(session.id) ? { heldBy: heldBy.get(session.id) } : {}),
+          })),
           awaitingHuman: waiting.length,
           ...(service ? { service } : {}),
           ...(background ? { background } : {}),
@@ -4817,13 +4955,17 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   console.log('')
   if (sessions.length > 0) {
     console.log('Work in progress:')
-    for (const session of sessions) console.log(`  ${session.id} ${session.status} — ${session.goal ?? ''}`)
+    for (const session of sessions) {
+      const owner = heldBy.get(session.id)
+      const holding = owner ? (owner === thisRun ? ' · held by this Run' : ` · held by ${owner}`) : ''
+      console.log(`  ${session.id} ${session.status} — ${session.goal ?? ''}${holding}`)
+    }
   } else if (root) {
     console.log('Work in progress: none')
   }
   // 멈춘 채 아무도 붙들지 않은 세션 (0.8.5). **닫지 않는다** — 이름과 근거와 다음 명령만 준다.
   if (store && sessions.length > 0) {
-    const held = new Set((await claudeBindings(store).current()).map((binding) => binding.logicalSessionId))
+    const held = new Set(heldBy.keys())
     const progress = progressService(store)
     const rows = await Promise.all(
       sessions.map(async (session) => ({
@@ -5331,9 +5473,10 @@ async function runWork(
       // **DONE 을 되돌리지는 않는다.** handoff 는 이미 쓰였고, 반쯤 되돌린 상태가
       // 이 결함이 만든 것보다 낫지 않다. 놓지 못했으면 그 사실을 말하고 종료 코드로
       // 드러낸다 — 조용히 성공이라 적지 않는다.
-      // `--physical` 이 없는 경로는 여기 오지 못한다 — 결합이 있으면 `done` 이 먼저
-      // owner 를 요구하고, 결합이 없으면 놓을 것이 없다. 그래서 분기를 두지 않는다.
-      const physical = values.physical as string | undefined
+      // `--physical` 은 이 Run 의 id 로 채워진다(0.9.0, 명시값 우선). 그 값이 없는 경로는
+      // 여기 오지 못한다 — 결합이 있으면 `done` 이 먼저 owner 를 요구하고, 결합이 없으면
+      // 놓을 것이 없다. 그래서 분기를 두지 않는다.
+      const physical = effectivePhysical(values)
       if (physical && (await claudeBindings(store).get(session))) {
         const released = await releaseRuntimeBinding(store, session, physical, new Date().toISOString())
         if (released.ok) console.log(`${session} ownership released`)
