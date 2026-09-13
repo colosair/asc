@@ -5776,6 +5776,8 @@ async function refreshWithNewRuntime(): Promise<number> {
   for (const line of output.split('\n')) {
     if (
       line.startsWith('installed:') ||
+      // 0.9.0: 옛 설치물을 걷어낸 것도 쓴 것만큼 말한다 — 조용한 업그레이드는 없다
+      line.startsWith('removed:') ||
       line.startsWith('skipped:') ||
       line.startsWith('service:') ||
       line.startsWith('Install state:')
