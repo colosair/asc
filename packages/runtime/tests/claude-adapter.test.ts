@@ -528,19 +528,25 @@ describe('B-26 Gate — Skill Bundle (C-05)', () => {
 })
 
 describe('Auto mode ≠ ASC Policy (C-03 §5.4)', () => {
-  it('permissive한 provider 판정이 와도 ASC evaluate가 SSOT다', async () => {
-    const { mergePolicyLayers, evaluate } = await import('../core/policy/policy.ts')
+  it('permissive한 provider 판정이 와도 발급 시점의 HARD DENY 검사가 SSOT다', async () => {
+    // provider(Auto mode)가 "user intent로 allow"라고 판단한 상황을 흉내 내도, ASC 의 발급
+    // 검사에는 그 입력 자체가 없다 — 우회 경로가 아니라 무관한 층이다. 0.9.1 부터 이 불변식은
+    // 실행 시점 판정기(evaluate) 가 아니라 SessionRuntime.issue 가 든다.
+    const { mergePolicyLayers } = await import('../core/policy/policy.ts')
+    const { SessionRuntime } = await import('../core/runtime/session.ts')
     const { policy } = mergePolicyLayers([
       { id: 'vanilla', hardDeny: ['external.write'], softDeny: ['dependency.add'], roleScopes: { implementer: ['src/**'] } },
     ])
-    // provider(Auto mode)가 "user intent로 allow"라고 판단한 상황을 흉내 내도,
-    // ASC 판정에는 그 입력 자체가 없다 — 우회 경로가 아니라 무관한 층이다
-    assert.equal(evaluate(policy, { action: 'external.write', policyExceptions: ['external.write'] }).verdict, 'HARD_DENY')
-    assert.equal(evaluate(policy, { action: 'dependency.add' }).verdict, 'SOFT_DENY')
-    assert.equal(
-      evaluate(policy, { action: 'code.edit', path: 'outside/file.ts', writeBoundary: ['src/**'] }).verdict,
-      'HARD_DENY',
-    )
+    const runtime = new SessionRuntime(new MemoryStateStore(), policy)
+    const forced = await runtime.issue({
+      id: 'S-20260913-09',
+      role: 'implementer',
+      goal: 'x',
+      policyExceptions: ['external.write'],
+    })
+    assert.ok(!forced.ok && forced.failures[0]!.kind === 'HARD_DENY_ESCAPE')
+    const outside = await runtime.issue({ id: 'S-20260913-10', role: 'implementer', goal: 'x', writeBoundary: ['outside/**'] })
+    assert.ok(!outside.ok && outside.failures[0]!.kind === 'SCOPE_ESCALATION')
   })
 })
 

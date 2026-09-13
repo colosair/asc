@@ -4,12 +4,13 @@
 // 핵심 불변식 둘:
 //  - 하위 계층은 상위보다 넓은 권한을 가질 수 없다. 권한 범위는 lower-wins가 아니라 교집합이다.
 //  - HARD DENY는 하위가 해제할 수 없다. Policy Exception으로도, Session Prompt로도 안 된다.
+//
+// 이 파일은 계층을 **합치는** 규칙만 든다. 행위 시점의 판정은 여기 없다 — 발급 시점의 검사는
+// `core/runtime/session.ts`(SCOPE_ESCALATION · HARD_DENY_ESCAPE), 외부 행위의 검사는 Grant 의
+// allowedWrites 와 Remote Review 가 맡는다. 0.9.1 에서 호출자 없던 `evaluate()` 를 걷어냈다.
 
 import type { ActorRole } from '../model/entities.ts'
-import { isWithinScopes, parseScope, pathInScope } from './scope.ts'
-
-/** OM §5.1. Green/Yellow/Red를 정책 계층으로 승격한 것. */
-export type Verdict = 'ALLOW' | 'SOFT_DENY' | 'HARD_DENY'
+import { isWithinScopes, parseScope } from './scope.ts'
 
 export type RoleName = Exclude<ActorRole, 'controller'> | 'planner' | 'researcher' | 'implementer' | 'verifier'
 
@@ -187,59 +188,4 @@ export function mergePolicyLayers(layers: readonly PolicyLayer[]): {
   }
 
   return { policy, violations }
-}
-
-// ── 판정 ────────────────────────────────────────────────────────────────────
-
-export type PolicyQuery = {
-  /** 'external.write' · 'dependency.add' 같은 행위 키. */
-  action: string
-  /** 파일을 쓰는 행위면 대상 경로. */
-  path?: string
-  role?: RoleName
-  /** Session Contract가 실제로 허용받은 쓰기 범위 (Profile 범위보다 좁아야 한다). */
-  writeBoundary?: readonly string[]
-  /**
-   * Controller가 이 Session에 한해 허용한 SOFT DENY 항목 (OM §5.1).
-   * Execution Grant와는 다른 것이다 — 이건 기존 Session 안의 제한적 허용일 뿐이다.
-   */
-  policyExceptions?: readonly string[]
-}
-
-export type PolicyDecision = { verdict: Verdict; reason: string }
-
-export function evaluate(policy: ResolvedPolicy, query: PolicyQuery): PolicyDecision {
-  if (policy.hardDeny.includes(query.action)) {
-    // Policy Exception이 있어도 뚫리지 않는다. 외부 write 같은 항목은 별도 Execution
-    // Grant라는 다른 계약으로만 수행된다 (OM §5.2).
-    return { verdict: 'HARD_DENY', reason: `'${query.action}' is HARD DENY` }
-  }
-
-  if (query.path !== undefined) {
-    const boundary = query.writeBoundary ?? policy.roleScopes[query.role ?? 'implementer'] ?? []
-    if (!pathInScope(query.path, boundary)) {
-      return { verdict: 'HARD_DENY', reason: `'${query.path}' is outside the write boundary` }
-    }
-  }
-
-  if (policy.softDeny.includes(query.action)) {
-    if (query.policyExceptions?.includes(query.action)) {
-      return { verdict: 'ALLOW', reason: `'${query.action}' allowed by policy exception` }
-    }
-    return { verdict: 'SOFT_DENY', reason: `'${query.action}' requires a policy exception` }
-  }
-
-  return { verdict: 'ALLOW', reason: 'within contract' }
-}
-
-/**
- * DENY에 닿았을 때 세션이 무엇을 해야 하는지 (OM §5.3).
- * 세션 전체를 즉시 중단하는 것이 기본이 아니다 — Goal 달성 가능 여부로 갈린다.
- */
-export type DenyResponse = 'CONTINUE' | 'DEFER_AND_CONTINUE' | 'RECORD_UNRESOLVED_AND_CONTINUE' | 'CHECKPOINT_AND_RETURN'
-
-export function denyResponse(verdict: Verdict, blocksGoal: boolean): DenyResponse {
-  if (verdict === 'ALLOW') return 'CONTINUE'
-  if (verdict === 'HARD_DENY') return blocksGoal ? 'CHECKPOINT_AND_RETURN' : 'RECORD_UNRESOLVED_AND_CONTINUE'
-  return blocksGoal ? 'CHECKPOINT_AND_RETURN' : 'DEFER_AND_CONTINUE'
 }

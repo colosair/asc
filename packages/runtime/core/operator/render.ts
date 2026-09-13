@@ -12,8 +12,8 @@
 //   3. ACTIVE 세션의 checkpoint를 현재 진행으로 읽지 않는다 — checkpoint는 중단 시점의
 //      승계 정보이고, 재개 후에도 남아 있어 지금 상황과 다를 수 있다.
 //
-// heartbeat(관찰된 활동)만으로 "순조롭게 진행 중" 같은 의미론적 진척을 만들지 않는다.
-// 활동 흔적은 진척이 아니다 — 보고가 없으면 없다고 말한다.
+// 관찰된 활동 흔적만으로 "순조롭게 진행 중" 같은 의미론적 진척을 만들지 않는다 —
+// 보고가 없으면 없다고 말한다. (0.8.x 의 hook heartbeat 입력은 0.9.1 에서 걷어냈다.)
 
 import type { Session } from '../model/entities.ts'
 import type { ProgressReport } from './progress.ts'
@@ -46,12 +46,6 @@ export type RenderInput = {
   session: Session | null
   progress: ProgressReport | null
   /**
-   * 관찰된 활동 신호. **진척이 아니다** — 도구가 한 번 돌았다는 사실까지다.
-   * 없거나 오래됐다고 "멈췄다"고 말하지 않는다: 파일만 고치는 구간, 생각하는 구간,
-   * 하위 작업을 기다리는 구간에는 애초에 신호가 없다 (B-18).
-   */
-  liveness?: { lastActivityAt: string; lastTool?: string }
-  /**
    * 지금 사람의 결정을 기다리는 것들 (상신·요청 참조).
    *
    * `progress.needsUserDecision` 은 **일하는 쪽의 신고**다. 신고가 없거나 NONE이어도
@@ -66,24 +60,20 @@ export type RenderInput = {
 export type RenderedProgress = { body: string[]; detail: string }
 
 export function renderProgress(input: RenderInput): RenderedProgress {
-  const { session, progress, liveness } = input
+  const { session, progress } = input
   const awaiting = input.awaiting ?? []
   const now = input.now ?? new Date()
   const work = session ? shortGoal(session.goal) : '이'
 
   if (!progress) {
     const state = session ? STATUS_WORDS[session.status] : '확인 불가'
-    // 활동 신호가 있으면 "언제 뭔가 돌긴 했다"까지만 더한다 — 그 이상은 지어내는 것이다
-    const noReport = liveness
-      ? `${minutesSince(liveness.lastActivityAt, now)}분 전에 활동이 관찰됐지만, 진행 내용 보고는 아직 없습니다.`
-      : '아직 진행 내용 보고가 없어 어디까지 됐는지는 알 수 없습니다.'
     return {
       body: [
         `${work} 작업이 ${state === '작업 중' ? '진행 중입니다' : `${state} 상태입니다`}.`,
-        noReport,
+        '아직 진행 내용 보고가 없어 어디까지 됐는지는 알 수 없습니다.',
         awaiting.length > 0 ? awaitingLine(awaiting) : decisionLine('NONE'),
       ],
-      detail: detailLine(session, null, now, liveness),
+      detail: detailLine(session, null, now),
     }
   }
 
@@ -113,7 +103,7 @@ export function renderProgress(input: RenderInput): RenderedProgress {
     body.push(`(마지막 보고가 ${minutesAgo(progress, now)}분 전입니다 — 그 사이 상황이 달라졌을 수 있습니다.)`)
   }
 
-  return { body, detail: detailLine(session, progress, now, liveness) }
+  return { body, detail: detailLine(session, progress, now) }
 }
 
 function headline(work: string, p: ProgressReport): string {
@@ -164,12 +154,7 @@ function decisionLine(need: ProgressReport['needsUserDecision'], ref?: string, t
 }
 
 /** 2단계 정보. 여기서는 내부 용어를 그대로 써도 된다 — 본문 이해에 필수가 아니어야 한다. */
-function detailLine(
-  session: Session | null,
-  progress: ProgressReport | null,
-  now: Date,
-  liveness?: RenderInput['liveness'],
-): string {
+function detailLine(session: Session | null, progress: ProgressReport | null, now: Date): string {
   const parts = session
     ? [session.id, ROLE_WORDS[session.role], STATUS_WORDS[session.status]]
     : [progress?.logicalSessionId ?? '(세션 미상)', '거둔 세션']
@@ -179,11 +164,6 @@ function detailLine(
     parts.push(`${minutesAgo(progress, now)}분 전 기준`)
   } else {
     parts.push('진행 보고 없음')
-  }
-  // 있을 때만 덧붙인다 — 없다고 "활동 없음"을 적으면 그것도 판정이다
-  if (liveness) {
-    const tool = liveness.lastTool ? `(${liveness.lastTool})` : ''
-    parts.push(`최근 활동 ${minutesSince(liveness.lastActivityAt, now)}분 전${tool}`)
   }
   return parts.join(' · ')
 }

@@ -70,7 +70,8 @@ describe('B-27 Gate — 감지 (C-06 §1)', () => {
     assert.deepEqual(plan.profile, { kind: 'ALREADY_ATTACHED', id: 'pilot-local' })
     assert.deepEqual(plan.undecided, [])
     assert.ok(!plan.steps.some((s) => s.startsWith('asc init')))
-    assert.ok(plan.steps.includes('asc proceed'))
+    assert.ok(plan.steps.includes('asc work start'))
+    assert.ok(!plan.steps.includes('asc proceed'), '옛 이름을 다음 걸음으로 가르치지 않는다')
   })
 
   it('붙어 있는데 lock을 읽지 못하면 통과시키지 않는다', async () => {
