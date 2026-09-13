@@ -1,9 +1,14 @@
 # Security Policy
 
-ASC sits on a boundary that matters: it controls what a coding agent is allowed to do,
-holds the approval and execution gates, installs a guard hook into your Claude Code
-configuration, and reads SCM credentials from your environment. A defect here can let an
-agent write somewhere it should not, or can leak a token into a log.
+ASC sits on a boundary that matters: it holds the approval and execution gates for the
+external mutations it manages, installs a skill bundle and a SessionStart hook into your
+Claude Code configuration, and reads SCM credentials from your environment. A defect here
+can let a managed act go out without its grant, or can leak a token into a log.
+
+What ASC does **not** claim: it does not sandbox the same-OS-user shell. A raw command
+typed at that shell is outside ASC's enforcement boundary — that boundary belongs to the
+Host and the operating system. (0.8.x shipped a PreToolUse hook that pattern-matched shell
+commands; 0.9.0 retired it because it was not a security boundary and read as one.)
 
 Reports are welcome, including ones that turn out to be nothing.
 
@@ -51,8 +56,10 @@ to reproduce it without one.
 
 ## What we consider a vulnerability
 
-- An external write that reaches a real system without an approved execution grant
-- The external-write guard failing to block a command in an ASC-managed session
+- An ASC-managed external mutation (`asc grant run`, `asc work publish`) executing
+  without a READY grant, executing more than once per grant, or executing after the
+  pre-execution review found drift
+- A remote freeze that the managed executor does not honour
 - A credential appearing in a file ASC writes, in its output, or in a log
 - ASC writing outside the boundaries it declares: a repository under local scope, a file
   outside a session's write boundary, or a user file the host installer does not own
@@ -65,6 +72,8 @@ to reproduce it without one.
   ASC reports these as blocked, and that is the intended behaviour.
 - An agent making a poor decision inside a boundary it was correctly granted. ASC bounds
   authority; it does not judge taste.
+- A raw shell command (`git push`, `glab api`, `curl`) bypassing ASC. ASC never held that
+  boundary; the Host's permission layer and the OS do.
 - Requiring a human decision. Stopping at a boundary is the product working.
 
 ## Scope

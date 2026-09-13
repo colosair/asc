@@ -65,8 +65,9 @@ From the published packages, never a local build:
 1. `npx --yes @asc-agent/bootstrap@<version> setup plan --json` answers from a
    zero state with machine-readable JSON.
 2. The persistent path installs and `asc --version` prints the release version.
-3. `asc host claude probe` finds the host and judges `external_write_guard`
-   honestly on a machine that has one.
+3. On a host that ran the previous release, `asc update` (or `asc refresh`) reports
+   what it retired and `asc status` shows the host integration as
+   `INSTALLED_CURRENT` — no leftover hook registration, user hooks untouched.
 4. Whatever the release changed, exercised through the published artefact.
 
 Record the run in the version's checklist. A measurement not taken is recorded
