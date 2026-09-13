@@ -1,21 +1,23 @@
-// Claude Host 설치물 관리 — skill · guard hook · manifest (C-03 §5.1).
+// Claude Host 설치물 관리 — skill bundle · SessionStart hook · manifest (C-03 §5.1).
 //
 // spike 결론(B-15): user-scope Skill + user-scope settings hook. Plugin을 버린 이유는
-// marketplace 관리가 더 무겁고, enforcement 안정성은 설치 위치가 아니라 hook의 판별
-// 로직이 결정하기 때문이다. 프로젝트 tracked 파일은 만들지 않는다 —
+// marketplace 관리가 더 무겁기 때문이다. 프로젝트 tracked 파일은 만들지 않는다 —
 // `.claude/settings.local.json`은 gitignore 보장이 없어 배제했다(spike 실측).
 //
-// 설치는 계약이 셋이다 (C-03 §5.1):
+// 설치는 계약이 넷이다 (C-03 §5.1, 0.9.0 에서 하나 늘었다):
 //   반복 install → idempotent
 //   같은 경로의 사용자 파일 → 무단 overwrite 금지 (digest 검증)
 //   uninstall → ASC가 설치했다고 manifest로 증명되는 것만 제거
+//   더 이상 싣지 않는 설치물 → ASC 소유가 증명되면 걷고, 사람이 고친 것은 남기고 말한다
+//
+// 0.9.0 은 0.8.x 의 PreToolUse guard hook(`guard-hook.mjs`) 을 싣지 않는다. 그 파일과
+// settings 등록은 이제 "은퇴한 설치물" 이고, install/refresh/update 가 같은 자리에서 걷는다.
 
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { hookScript } from './guard.ts'
 import { sessionStartScript } from './session-start.ts'
 import { skillBundle } from './skill.ts'
 
@@ -35,8 +37,32 @@ export type InstallPaths = {
 
 export const defaultPaths = (): InstallPaths => ({ claudeHome: join(homedir(), '.claude') })
 
-const HOOK_MARKER = 'asc-external-write-guard'
 const FRONT_MARKER = 'asc-front-binding'
+
+/**
+ * 더 이상 싣지 않는 hook 의 표식. 0.8.x 가 settings.json 에 남긴 PreToolUse guard 항목은
+ * 이 표식(또는 표식 없이 우리 옛 스크립트를 가리키는 명령)으로만 알아본다 — 그 밖의
+ * 항목은 사람의 것이다.
+ */
+const RETIRED_HOOK_MARKERS: ReadonlySet<string> = new Set(['asc-external-write-guard'])
+
+/** 더 이상 싣지 않는 파일. manifest 에 이 경로가 남아 있으면 옛 설치본이다. */
+function retiredFiles(paths: InstallPaths): string[] {
+  return [join(paths.claudeHome, 'asc', 'guard-hook.mjs')]
+}
+
+/** 옛 설치본이 settings 에 적어 둔 명령 — 표식이 없어도 이 명령이면 우리 것이다. */
+function retiredCommands(paths: InstallPaths): ReadonlySet<string> {
+  return new Set(retiredFiles(paths).map(hookCommand))
+}
+
+type HookEntry = { matcher?: string; hooks?: { type?: string; command?: string; _asc?: string }[] }
+
+/** 은퇴한 hook 항목인가 — 표식이 은퇴 목록에 있거나, 표식 없이 은퇴한 스크립트를 가리킨다. */
+function isRetiredHook(paths: InstallPaths, hook: { command?: string; _asc?: string }): boolean {
+  if (hook._asc !== undefined) return RETIRED_HOOK_MARKERS.has(hook._asc)
+  return hook.command !== undefined && retiredCommands(paths).has(hook.command)
+}
 
 /**
  * ASC가 등록하는 hook들. 이벤트마다 **하나**씩이며 중복 등록은 그 자체가 결함이다.
@@ -52,7 +78,6 @@ type HookSpec = {
 }
 
 export function locate(paths: InstallPaths) {
-  const guard = join(paths.claudeHome, 'asc', 'guard-hook.mjs')
   const front = join(paths.claudeHome, 'asc', 'front-hook.mjs')
   return {
     /** Bundle 전체. 파일이 늘어도 아래 계약(manifest·digest·멱등)은 그대로다 (C-05 §5). */
@@ -61,22 +86,50 @@ export function locate(paths: InstallPaths) {
       path: join(paths.claudeHome, 'skills', skill.name, 'SKILL.md'),
       text: skill.text,
     })),
-    /** hook은 **하나**로 둔다. guard는 안전 층이고 중복 등록은 그 자체가 위험이다. */
-    hook: guard,
     front,
     settings: join(paths.claudeHome, 'settings.json'),
     manifest: join(paths.claudeHome, 'asc', 'install-manifest.json'),
-    hooks: ((): HookSpec[] => {
-      const specs: HookSpec[] = [
-        { event: 'PreToolUse', marker: HOOK_MARKER, matcher: 'Bash', script: guard },
-        // 파일을 바꾸는 도구도 같은 문을 지난다 — 일이 시작되는 신호이기 때문이다 (F6).
-        { event: 'PreToolUse', marker: HOOK_MARKER, matcher: 'Edit|Write|MultiEdit|NotebookEdit', script: guard },
-      ]
-      // 부를 곳을 모르면 심지 않는다 (§InstallPaths.entry)
-      if (paths.entry) specs.push({ event: 'SessionStart', marker: FRONT_MARKER, script: front })
-      return specs
-    })(),
+    /** hook 은 SessionStart 하나다. 부를 곳(entry)을 모르면 심지 않는다 (§InstallPaths.entry). */
+    hooks: ((): HookSpec[] =>
+      paths.entry ? [{ event: 'SessionStart', marker: FRONT_MARKER, script: front }] : [])(),
   }
+}
+
+/** 이번 빌드가 싣는 파일 전부 — install 과 verify 가 같은 목록을 본다. */
+function shippedFiles(paths: InstallPaths): (readonly [string, string])[] {
+  const where = locate(paths)
+  return [
+    ...where.skills.map((skill) => [skill.path, skill.text] as const),
+    // 부를 CLI를 모르면 SessionStart hook 자체를 만들지 않는다
+    ...(paths.entry ? ([[where.front, sessionStartScript(paths.entry)]] as const) : []),
+  ]
+}
+
+/**
+ * settings.json 에서 술어에 맞는 hook 항목만 걷는다. 술어가 소유권의 전부다 — 여기서
+ * 걷히는 것은 표식이 붙었거나 우리 옛 스크립트를 가리키는 것뿐이고, 사람이 넣은 항목은
+ * 한 글자도 건드리지 않는다.
+ */
+function purgeHooks(
+  settings: Record<string, unknown>,
+  isOurs: (hook: { command?: string; _asc?: string }) => boolean,
+): { settings: Record<string, unknown>; dropped: string[] } {
+  if (!settings.hooks) return { settings, dropped: [] }
+  const hooks = { ...(settings.hooks as Record<string, unknown[]>) }
+  const dropped: string[] = []
+  for (const [event, value] of Object.entries(hooks)) {
+    const entries = (value ?? []) as HookEntry[]
+    const kept = entries.filter((entry) => !entry.hooks?.some((h) => isOurs(h)))
+    if (kept.length === entries.length) continue
+    if (kept.length > 0) hooks[event] = kept
+    else delete hooks[event]
+    dropped.push(event)
+  }
+  if (dropped.length === 0) return { settings, dropped }
+  const next: Record<string, unknown> = { ...settings, hooks }
+  // 우리가 만든 hooks 컨테이너가 비면 키째 걷는다 — 빈 {}도 원래 없던 흔적이다
+  if (Object.keys(hooks).length === 0) delete next.hooks
+  return { settings: next, dropped }
 }
 
 /**
@@ -153,13 +206,14 @@ function reconcileHooks(
 }
 
 /**
- * ASC control-plane 을 Host 권한 계층에서 통과시키는 규칙 (E-02, 2층).
+ * ASC control-plane 을 Host 권한 계층에서 통과시키는 규칙 (E-02).
  *
- * 0.7.1 실측에서 raw 외부 write 는 ASC Guard 가 막고, 그 자리의 안전한 출구인
- * `asc grant issue` 는 Host 의 권한 판정이 막았다. 막는 길과 나가는 길이 동시에 닫히면
- * 사람이 갇힌다. Host 안에서 우리가 손댈 수 있는 자리는 이 한 줄뿐이다 — 우리 명령을
- * 명시적으로 허용 목록에 올린다. **허용하는 것은 ASC CLI 뿐이고**, 실행 권한이 있는지는
- * 그 다음에 Core 가 판정한다 (Guard allows, then Core decides).
+ * 무인으로 도는 Run 은 Host 의 권한 프롬프트에 스스로 답하지 못한다. AUTO 에서 Agent 가
+ * `asc work publish` · `asc grant run` · `asc progress report` 를 부르다 프롬프트에 서면
+ * 관리 경로가 거기서 멈춘다. Host 안에서 우리가 손댈 수 있는 자리는 이 한 줄뿐이다 —
+ * 우리 명령을 명시적으로 허용 목록에 올린다. **허용하는 것은 ASC CLI 뿐이고**, 그 명령이
+ * 무엇을 해도 되는지는 그 다음에 Core(Authority · Grant)가 판정한다. Host integration 의
+ * 관심사이지 Core 정책이 아니다.
  */
 export const CONTROL_PLANE_ALLOW_RULES: readonly string[] = ['Bash(asc:*)']
 
@@ -217,6 +271,8 @@ async function readJson(path: string): Promise<Record<string, unknown> | null> {
 export type InstallOutcome = {
   written: string[]
   skipped: { path: string; reason: string }[]
+  /** 이번 빌드가 더 이상 싣지 않아 걷어낸 것 (0.9.0: 0.8.x guard hook). */
+  removed: string[]
   hookRegistered: boolean
 }
 
@@ -234,17 +290,14 @@ export async function install(
   }
   const written: string[] = []
   const skipped: { path: string; reason: string }[] = []
+  const removed: string[] = []
+  const shipped = shippedFiles(paths)
 
   // 파일 배치. **세 경우를 가른다** (아래 `fileState` 와 같은 판정이다):
   //   지금 source와 같다        → 그대로 둔다 (idempotent)
   //   설치 당시와 같다(stale)    → 지금 source로 수렴시킨다 — 이것이 업그레이드다
   //   둘 다 아니다(user-modified)→ 남긴다. uninstall이 보존하는 것을 install이 지우면 안 된다
-  for (const [path, content] of [
-    ...where.skills.map((skill) => [skill.path, skill.text] as const),
-    [where.hook, hookScript()],
-    // 부를 CLI를 모르면 SessionStart hook 자체를 만들지 않는다
-    ...(paths.entry ? ([[where.front, sessionStartScript(paths.entry)]] as const) : []),
-  ] as const) {
+  for (const [path, content] of shipped) {
     const existing = await readFile(path, 'utf8').catch(() => null)
     const state = fileState(existing, content, manifest.files[path])
     if (state === 'current') {
@@ -267,7 +320,39 @@ export async function install(
     written.push(path)
   }
 
-  // settings.json 의 hook 등록 — **ASC 항목만** 다루고 나머지는 한 글자도 건드리지 않는다
+  // 은퇴한 설치물 — manifest 에는 있는데 이번 빌드가 싣지 않는 것. 이것이 업그레이드의
+  // 나머지 절반이다: 새 파일을 쓰는 것만으로는 옛 hook 이 계속 돈다.
+  //   파일이 이미 없다          → manifest 만 정리한다
+  //   설치 당시 그대로다        → ASC 것이 증명됐다. 걷는다
+  //   사람이 고쳤다             → 지우지 않는다. 말하고 남긴다 (uninstall 과 같은 원칙)
+  const shippedPaths = new Set(shipped.map(([path]) => path))
+  for (const [path, digest] of Object.entries(manifest.files)) {
+    if (shippedPaths.has(path)) continue
+    const existing = await readFile(path, 'utf8').catch(() => null)
+    if (existing === null) {
+      delete manifest.files[path]
+      continue
+    }
+    if (sha(existing) !== digest && !force) {
+      skipped.push({
+        path,
+        reason: 'no longer shipped, but you edited it after install — left in place; remove it yourself or pass --force',
+      })
+      continue
+    }
+    await rm(path)
+    delete manifest.files[path]
+    removed.push(path)
+  }
+
+  // settings.json 의 hook 등록 — **ASC 항목만** 다루고 나머지는 한 글자도 건드리지 않는다.
+  // 은퇴한 항목을 먼저 걷고, 지금 싣는 것을 맞춘다.
+  const purged = purgeHooks((await readJson(where.settings)) ?? {}, (hook) => isRetiredHook(paths, hook))
+  if (purged.dropped.length > 0) {
+    await mkdir(dirname(where.settings), { recursive: true })
+    await writeFile(where.settings, JSON.stringify(purged.settings, null, 2) + '\n', 'utf8')
+    removed.push(`${where.settings} (${purged.dropped.join(', ')} hook entry retired)`)
+  }
   const reconciled = reconcileHooks((await readJson(where.settings)) ?? {}, where.hooks)
   if (reconciled.changed.length > 0) {
     await mkdir(dirname(where.settings), { recursive: true })
@@ -277,7 +362,7 @@ export async function install(
   manifest.settingsHook = true
 
   // control-plane 허용 규칙 (E-02). hook 등록과 같은 파일이지만 다른 계약이다 —
-  // hook 은 우리가 막는 자리이고, 이것은 우리가 **막히지 않는** 자리다.
+  // hook 은 우리가 상태를 보여 주는 자리이고, 이것은 우리 명령이 **막히지 않는** 자리다.
   const allowed = reconcileAllow((await readJson(where.settings)) ?? {})
   if (allowed.added.length > 0) {
     await mkdir(dirname(where.settings), { recursive: true })
@@ -288,7 +373,7 @@ export async function install(
 
   await mkdir(dirname(where.manifest), { recursive: true })
   await writeFile(where.manifest, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
-  return { written, skipped, hookRegistered: true }
+  return { written, skipped, removed, hookRegistered: true }
 }
 
 /**
@@ -301,7 +386,7 @@ export async function install(
  * 그래서 세 값을 견준다:
  *
  * ```text
- * S = 지금 source가 만들어 낼 내용   (skillBundle() · hookScript())
+ * S = 지금 source가 만들어 낼 내용   (skillBundle() · sessionStartScript())
  * M = manifest에 적힌 설치 당시 내용
  * I = 지금 설치돼 있는 내용
  *
@@ -326,7 +411,7 @@ export type FileState = 'current' | 'stale' | 'modified' | 'missing'
 export type InstallReport = {
   status: InstallStatus
   files: { path: string; state: FileState }[]
-  /** settings.json 의 PreToolUse에 우리 hook이 지금 경로로 등록돼 있는가. */
+  /** settings.json 에 우리 hook(SessionStart)이 등록돼 있는가. spec 이 없으면 참이다. */
   hookRegistered: boolean
 }
 
@@ -346,12 +431,7 @@ function hookCommand(hookPath: string): string {
 export async function verifyInstall(paths: InstallPaths): Promise<InstallReport> {
   const where = locate(paths)
   const manifest = (await readJson(where.manifest)) as Manifest | null
-
-  const expected = [
-    ...where.skills.map((skill) => [skill.path, skill.text] as const),
-    [where.hook, hookScript()] as const,
-    ...(paths.entry ? [[where.front, sessionStartScript(paths.entry)] as const] : []),
-  ]
+  const expected = shippedFiles(paths)
 
   const files: { path: string; state: FileState }[] = []
   for (const [path, content] of expected) {
@@ -363,21 +443,33 @@ export async function verifyInstall(paths: InstallPaths): Promise<InstallReport>
   // 이벤트마다 우리 항목이 있는가. 하나라도 없으면 등록이 성립하지 않은 것으로 본다 —
   // 반쯤 등록된 상태를 "설치됨"이라 부르면 없는 hook을 있다고 믿게 된다.
   const registrations = where.hooks.map((spec) => {
-    const entries = ((settings?.hooks as Record<string, unknown[]>)?.[spec.event] ?? []) as {
-      hooks?: { _asc?: string; command?: string }[]
-    }[]
+    const entries = ((settings?.hooks as Record<string, unknown[]>)?.[spec.event] ?? []) as HookEntry[]
     const mine = entries.flatMap((entry) => (entry.hooks ?? []).filter((h) => h._asc === spec.marker))
     return { present: mine.length > 0, pointsHere: mine.some((h) => h.command === hookCommand(spec.script)) }
   })
   const hookRegistered = registrations.every((r) => r.present)
+  const anyRegistered = registrations.some((r) => r.present)
   // 등록은 있는데 다른 곳을 가리키면 설치본이 뒤처진 것이다 — 없는 것으로 치지 않고 stale로 본다
   const hookMisdirected = registrations.some((r) => r.present && !r.pointsHere)
 
+  // 옛 설치본의 흔적 — 은퇴한 hook 항목이 settings 에 남았거나, 이번 빌드가 싣지 않는
+  // 파일이 설치 당시 그대로 남아 있다. 어느 쪽이든 `install` 이 수렴시킨다 (stale).
+  const legacyHook = Object.values((settings?.hooks as Record<string, unknown[]> | undefined) ?? {}).some((value) =>
+    ((value ?? []) as HookEntry[]).some((entry) => entry.hooks?.some((h) => isRetiredHook(paths, h))),
+  )
+  const shippedPaths = new Set(expected.map(([path]) => path))
+  let legacyFile = false
+  for (const [path, digest] of Object.entries(manifest?.files ?? {})) {
+    if (shippedPaths.has(path)) continue
+    const existing = await readFile(path, 'utf8').catch(() => null)
+    if (existing !== null && sha(existing) === digest) legacyFile = true
+  }
+
   const status = ((): InstallStatus => {
-    if (!manifest && files.every((f) => f.state === 'missing') && !hookRegistered) return 'NOT_INSTALLED'
+    if (!manifest && files.every((f) => f.state === 'missing') && !anyRegistered && !legacyHook) return 'NOT_INSTALLED'
     if (!manifest || files.some((f) => f.state === 'missing') || !hookRegistered) return 'BROKEN'
     if (files.some((f) => f.state === 'modified')) return 'INSTALLED_MODIFIED'
-    if (files.some((f) => f.state === 'stale') || hookMisdirected) return 'INSTALLED_STALE'
+    if (files.some((f) => f.state === 'stale') || hookMisdirected || legacyHook || legacyFile) return 'INSTALLED_STALE'
     return 'INSTALLED_CURRENT'
   })()
 
@@ -418,7 +510,18 @@ export async function uninstall(paths: InstallPaths): Promise<UninstallOutcome> 
   const manifest = (await readJson(where.manifest)) as Manifest | null
   const removed: string[] = []
   const kept: { path: string; reason: string }[] = []
-  if (!manifest) return { removed, kept: [{ path: where.manifest, reason: 'no manifest — nothing is recorded as installed' }] }
+  if (!manifest) {
+    // 기록이 없어도 표식이 붙은 hook 항목은 우리 것이다 — 그것만은 걷는다
+    const settings = await readJson(where.settings)
+    if (settings) {
+      const purged = purgeHooks(settings, (hook) => hook._asc === FRONT_MARKER || isRetiredHook(paths, hook))
+      if (purged.dropped.length > 0) {
+        await writeFile(where.settings, JSON.stringify(purged.settings, null, 2) + '\n', 'utf8')
+        removed.push(`${where.settings} (${purged.dropped.join(', ')} hook entry)`)
+      }
+    }
+    return { removed, kept: [{ path: where.manifest, reason: 'no manifest — nothing is recorded as installed' }] }
+  }
 
   for (const [path, digest] of Object.entries(manifest.files)) {
     const existing = await readFile(path, 'utf8').catch(() => null)
@@ -433,26 +536,17 @@ export async function uninstall(paths: InstallPaths): Promise<UninstallOutcome> 
 
   // settings에서 ASC hook 항목만 걷어낸다 — 무관한 설정은 그대로.
   // 표식(`_asc`)이 소유권의 근거다: 사람이 넣은 SessionStart hook은 그 자리에 남는다.
+  // 지금 설치가 SessionStart를 안 심었더라도, 그리고 0.8.x 가 남긴 guard 항목이라도,
+  // 우리 것으로 증명되는 것은 전부 걷는다.
   const settings = await readJson(where.settings)
-  if (settings?.hooks) {
-    const hooks = settings.hooks as Record<string, unknown[]>
-    // 지금 설치가 SessionStart를 안 심었더라도 옛 설치가 남긴 것은 걷는다 —
-    // 우리 표식이 붙은 것은 전부 우리 것이다.
-    const markers = new Set([HOOK_MARKER, FRONT_MARKER])
-    const dropped: string[] = []
-    for (const [event, value] of Object.entries(hooks)) {
-      const entries = (value ?? []) as { hooks?: { _asc?: string }[] }[]
-      const kept = entries.filter((entry) => !entry.hooks?.some((h) => h._asc && markers.has(h._asc)))
-      if (kept.length === entries.length) continue
-      if (kept.length > 0) hooks[event] = kept
-      else delete hooks[event]
-      dropped.push(event)
-    }
-    if (dropped.length > 0) {
-      // 우리가 만든 hooks 컨테이너가 비면 키째 걷는다 — 빈 {}도 원래 없던 흔적이다
-      if (Object.keys(hooks).length === 0) delete settings.hooks
-      await writeFile(where.settings, JSON.stringify(settings, null, 2) + '\n', 'utf8')
-      removed.push(`${where.settings} (${dropped.join(', ')} hook entry)`)
+  if (settings) {
+    const purged = purgeHooks(
+      settings,
+      (hook) => hook._asc === FRONT_MARKER || isRetiredHook(paths, hook),
+    )
+    if (purged.dropped.length > 0) {
+      await writeFile(where.settings, JSON.stringify(purged.settings, null, 2) + '\n', 'utf8')
+      removed.push(`${where.settings} (${purged.dropped.join(', ')} hook entry)`)
     }
   }
 
@@ -475,7 +569,9 @@ export async function uninstall(paths: InstallPaths): Promise<UninstallOutcome> 
   }
 
   await rm(where.manifest, { force: true })
-  await rm(dirname(where.manifest), { recursive: true, force: true }).catch(() => {})
+  // `asc/` 디렉터리도 비어 있을 때만 걷는다 — 안에 남긴 것(사람이 고친 파일)이 있으면 그대로 둔다.
+  // recursive 로 밀면 바로 위에서 "남긴다" 고 말한 파일을 지워 버린다.
+  await rmdir(dirname(where.manifest)).catch(() => {})
 
   // 파일만 지우면 빈 skills/<name>/ 이 남는다 (P1 관찰 ⑥). 우리가 만든 디렉터리이므로
   // 우리가 걷되 **비어 있을 때만** 걷는다 — rmdir은 안에 무언가 남아 있으면 실패하고,

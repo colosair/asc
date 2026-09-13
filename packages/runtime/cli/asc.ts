@@ -2731,11 +2731,14 @@ async function runHost(
       if (before.status === 'INSTALLED_STALE') console.log('The installation is behind the current source — converging it.')
       const outcome = await install(paths, undefined, { force: Boolean(values.force) })
       for (const path of outcome.written) console.log(`installed: ${path}`)
+      for (const path of outcome.removed) console.log(`removed: ${path}`)
       for (const skip of outcome.skipped) console.log(`skipped: ${skip.path} — ${skip.reason}`)
-      if (outcome.written.length === 0 && outcome.skipped.length === 0) console.log('Already installed (no change)')
+      if (outcome.written.length === 0 && outcome.removed.length === 0 && outcome.skipped.length === 0) {
+        console.log('Already installed (no change)')
+      }
       // 무엇이 남았는지 install 직후에 말한다 — 사람이 따로 물어보게 하지 않는다
       for (const line of installReportLines(await verifyInstall(paths))) console.log(line)
-      console.log('\nThe guard hook is registered. External writes from ASC-managed sessions are blocked at execution time.')
+      console.log('\nHost integration is current. A Claude session opened in an ASC workspace restores its state at SessionStart.')
       return outcome.skipped.length > 0 ? 1 : 0
     }
 
