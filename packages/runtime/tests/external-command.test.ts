@@ -1,7 +1,7 @@
 // ASC-7 — Windows에서 npm `.cmd` shim CLI를 실제로 찾는다 (실 프로젝트 실측).
 //
 // claude.cmd·jam.cmd가 PATH에 실재하는데 bare 이름 execFile이 실패해
-// "Claude Code: not found" → external_write_guard STOP까지 이어진 사고의 회귀 고정.
+// "Claude Code: not found" 로 host 판정이 통째로 틀어진 사고의 회귀 고정.
 // 파일시스템은 전부 주입한다 — 이 테스트는 어느 OS에서 돌아도 같은 답을 내야 한다.
 
 import assert from 'node:assert/strict'

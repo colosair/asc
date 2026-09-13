@@ -227,13 +227,13 @@ describe('B-41 Gate — 소유권 묘비 (Runtime Binding)', () => {
     assert.deepEqual(endings(await bindings.history(IMPLEMENTER)), [])
   })
 
-  it('묘비 키가 guard의 관리 대상 판별에 걸리지 않는다', async () => {
+  it('묘비 키가 현재 소유권 조회(`current()`)에 걸리지 않는다', async () => {
     const store = new MemoryStateStore()
     const bindings = bindingsOn(store)
     await bindings.claim(spec('phys-1'), NOW)
     await bindings.release(IMPLEMENTER, 'phys-1')
 
-    // Host guard는 이 scope에서 `runtime-binding` 으로 시작하는 항목만 관리 대상으로 읽는다.
+    // `current()` 는 이 scope에서 `runtime-binding` 으로 시작하는 항목만 살아 있는 소유권으로 읽는다.
     // 묘비가 거기 걸리면 이미 내려놓은 세션이 계속 관리 대상으로 판정된다.
     const live = (await store.scope('test-host').keys('runtime-binding')).length
     assert.equal(live, 0, '내려놓은 뒤에는 관리 대상으로 읽힐 항목이 없어야 한다')

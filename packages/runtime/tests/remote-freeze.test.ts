@@ -7,7 +7,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
-import { hookScript } from '../adapters/claude-code/guard.ts'
 import { MemoryStateStore } from '../adapters/memory/state-store.ts'
 import { FreezeLedger, freezeLines, judgeAction, type FreezePolicy } from '../core/policy/remote-freeze.ts'
 
@@ -106,106 +105,5 @@ describe('B-58 Gate — 미룬 것은 녹여도 자동으로 나가지 않는다
     const rendered = freezeLines(await ledger.policy(), await ledger.deferred()).join('\n')
     assert.match(rendered, /자동으로 나가지 않는다/)
     assert.match(rendered, /아직 유효한지 보라/)
-  })
-})
-
-describe('B-58 Gate — guard는 완전 오프라인일 때만 읽기를 막는다', () => {
-  async function scratch(freeze: FreezePolicy | null) {
-    const base = await mkdtemp(join(tmpdir(), 'asc-freeze-'))
-    const ascRoot = join(base, 'project', '.asc')
-    const bindingDir = join(ascRoot, 'adapters', 'claude-code')
-    await mkdir(bindingDir, { recursive: true })
-    await writeFile(
-      join(bindingDir, 'runtime-binding-S-1.json'),
-      JSON.stringify({
-        key: 'runtime-binding:S-1',
-        value: JSON.stringify({
-          logicalSessionId: 'S-1',
-          provider: 'claude-code',
-          physicalSessionId: 'phys-1',
-          updatedAt: NOW,
-        }),
-      }),
-      'utf8',
-    )
-    const policyDir = join(ascRoot, 'adapters', 'policy')
-    await mkdir(policyDir, { recursive: true })
-    // 이 파일들이 검사하는 것은 freeze 이지 Execution Mode 가 아니다. 0.8.0 보정에서
-    // 기록 없는 workspace 는 강제하지 않게 됐으므로(§B), 강제가 켜진 상태를 명시한다.
-    await writeFile(
-      join(policyDir, 'execution-mode.json'),
-      JSON.stringify({ key: 'execution-mode', value: JSON.stringify({ mode: 'AUTO', since: NOW, by: 'controller-a' }) }),
-      'utf8',
-    )
-    if (freeze) {
-      await writeFile(
-        join(policyDir, 'freeze-policy.json'),
-        JSON.stringify({ key: 'freeze-policy', value: JSON.stringify(freeze) }),
-        'utf8',
-      )
-    }
-    const hook = join(base, 'guard.mjs')
-    await writeFile(hook, hookScript(), 'utf8')
-    return { base, cwd: join(base, 'project'), hook, cleanup: () => rm(base, { recursive: true, force: true }) }
-  }
-
-  const run = (hook: string, cwd: string, command: string) => {
-    const result = spawnSync(process.execPath, [hook], {
-      input: JSON.stringify({ tool_name: 'Bash', session_id: 'phys-1', cwd, tool_input: { command } }),
-      encoding: 'utf8',
-      env: { ...process.env, ASC_HOME: join(cwd, '..', 'no-home') },
-    })
-    return { code: result.status ?? 1, stderr: result.stderr ?? '' }
-  }
-
-  it('평소에는 원격 읽기를 막지 않는다', async () => {
-    const { cwd, hook, cleanup } = await scratch(null)
-    try {
-      assert.equal(run(hook, cwd, 'git fetch origin').code, 0)
-    } finally {
-      await cleanup()
-    }
-  })
-
-  it('쓰기만 얼린 상태에서도 읽기는 통과한다', async () => {
-    const { cwd, hook, cleanup } = await scratch(policy())
-    try {
-      assert.equal(run(hook, cwd, 'git fetch origin').code, 0, '조사까지 멈추면 아무도 freeze를 안 쓴다')
-    } finally {
-      await cleanup()
-    }
-  })
-
-  it('완전 오프라인이면 원격 읽기를 막고 이유를 말한다', async () => {
-    const { cwd, hook, cleanup } = await scratch(policy({ denyRemoteRead: true, reason: '망 분리' }))
-    try {
-      const blocked = run(hook, cwd, 'git fetch origin')
-      assert.equal(blocked.code, 2)
-      assert.match(blocked.stderr, /완전 오프라인/)
-      assert.match(blocked.stderr, /망 분리/)
-      assert.match(blocked.stderr, /asc thaw/)
-    } finally {
-      await cleanup()
-    }
-  })
-
-  it('완전 오프라인이어도 로컬 명령은 그대로 된다', async () => {
-    const { cwd, hook, cleanup } = await scratch(policy({ denyRemoteRead: true }))
-    try {
-      assert.equal(run(hook, cwd, 'npm test').code, 0)
-      assert.equal(run(hook, cwd, 'git status').code, 0)
-      assert.equal(run(hook, cwd, 'git commit -m "wip"').code, 0)
-    } finally {
-      await cleanup()
-    }
-  })
-
-  it('얼지 않아도 원격 쓰기는 여전히 막힌다 — 기존 차단이 약해지지 않는다', async () => {
-    const { cwd, hook, cleanup } = await scratch(null)
-    try {
-      assert.equal(run(hook, cwd, 'git push origin main').code, 2)
-    } finally {
-      await cleanup()
-    }
   })
 })

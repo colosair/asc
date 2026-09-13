@@ -8,7 +8,7 @@
 //   S-04  claimed 09:15:00  ended 09:15:26   ← S-03 이 아직 살아 있는 동안
 //   S-05  claimed 09:18:59  ended 09:19:09   ← S-04 가 아직 살아 있는 동안
 //
-// 그 상태에서 guard 가 "이 physical 은 관리 대상" 이라고 답할 때 어느 계약을 말하는지가
+// 그 상태에서 "이 Run 이 어느 계약을 위해 도는가" 가
 // 정해지지 않는다. 여기 있는 검사들이 그 자리를 닫는다.
 
 import assert from 'node:assert/strict'
@@ -66,7 +66,7 @@ describe('한 Physical Run 은 한 Logical Session 만 잡는다', () => {
   })
 })
 
-describe('놓으면 실제로 사라진다 — guard 가 그 파일 하나로 판정한다', () => {
+describe('놓으면 실제로 사라진다 — 소유권은 그 파일 하나로 판정한다', () => {
   it('release 뒤 현재 결합이 없고 이력은 남는다', async () => {
     const bindings = bindingsOn()
     await bindings.claim(spec('S-20260906-01'), NOW)

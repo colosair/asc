@@ -3,9 +3,9 @@
 // 로직은 ScopedRuntimeBindings 그대로다. 소유권의 원자성 보장을 provider마다 다시 쓰면
 // 언젠가 서로 다른 것을 보장하게 된다 — 여기는 scope와 provider 이름만 고정한다.
 //
-// 이 scope의 파일(.asc/adapters/claude-code/runtime-binding-*.json)은 guard hook의
-// 판별 목록이기도 하다: binding에 등록된 physical session만 ASC 규칙(외부 write 차단)을
-// 받는다. 관리를 주장한 세션만 관리 규칙을 받는 것이다.
+// 이 scope의 파일(.asc/adapters/claude-code/runtime-binding-*.json)이 "어느 Run 이 어느
+// 논리 세션을 쥐고 있는가" 의 정본이다: 진척 보고·pause·finish 의 소유권 검사가 이것을
+// 읽고, `asc work start` 가 현재 Run 을 여기에 묶는다 (0.9.0).
 
 import { ScopedRuntimeBindings } from '../memory/runtime-binding.ts'
 import type { StateStore } from '../../ports/state-store.ts'

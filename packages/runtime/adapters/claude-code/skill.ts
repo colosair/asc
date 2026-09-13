@@ -1,7 +1,8 @@
 // user-scope Skill 본문 3종 — asc · asc-inbox · asc-review (C-05).
 //
-// skill은 지침이지 enforcement가 아니다. 안전은 hook과 permission이 지고, 여기는
-// 호출 UX와 행동 규칙을 진다. 자연어 활성화는 실측 대상이고, 명시 호출(/asc)이
+// skill은 지침이지 enforcement가 아니다. 관리 실행의 안전은 Grant·Executor·read-back 이
+// 지고, 여기는 호출 UX와 행동 규칙을 진다. 셸을 가로막는 장치는 0.9.0 부터 없다 — skill 이
+// 그 자리를 글로 대신하지도 않는다. 자연어 활성화는 실측 대상이고, 명시 호출(/asc)이
 // deterministic 경로다 — Gate 근거는 후자다 (C-03 §5.8).
 //
 // 왜 셋인가: 세션 운영·외부 조사·독립 검증은 읽는 양도, 읽는 대상도, 판단 권한도 다르다.
@@ -110,23 +111,24 @@ mode never changes a session's owner, scope, progress or handoff.
 \`\`\`
 
 Stepping down out of AUTO is one command and it is recorded — who said so, and when.
-**Do not use it to get past a block.** If the guard stopped a write, the answer is
-\`asc work publish\`, not a mode change; flipping to MANUAL to push raw is the exact drift
-ASC exists to make visible, and the record makes it visible to the person you work with.
+**Do not use it to route around the managed path.** When an act belongs to a session ASC is
+executing, the answer is \`asc work publish\`, not a mode change; flipping to MANUAL to push
+raw is the exact drift ASC exists to make visible, and the record makes it visible to the
+person you work with.
 
 **A workspace nobody has chosen a mode for is not in AUTO.** AUTO exists only where a
 person turned it on and the checks below passed, so a fresh or upgraded
 workspace enforces nothing until someone says so. \`asc status\` says which of the two it is.
 
-\`asc mode auto\` refuses unless three things hold here: a managed write path assembles, the
-guard is installed, and ASC's own commands still run in this host. Whether a *particular*
-action can go out is answered when that action is attempted, not now. If ASC's own
-enforcement is in the way, the exit is \`asc mode manual\`.
+\`asc mode auto\` refuses unless two things hold here: a managed write path assembles, and
+ASC's own commands run in this host without a permission prompt (an unattended Run cannot
+answer one). Whether a *particular* action can go out is answered when that action is
+attempted, not now. If the managed executor is in the way, the exit is \`asc mode manual\`.
 
 **A workspace whose mode cannot be read is not MANUAL.** If the record is there but broken,
-raw external writes stay blocked and \`asc status\` names the reason
-(\`MODE_STATE_UNREADABLE\` / \`MODE_STATE_INVALID\`). ASC's own commands still run, and that
-is how it gets fixed.
+the managed executor treats the Run as AUTO — it refuses anything it cannot read back — and
+\`asc status\` names the reason (\`MODE_STATE_UNREADABLE\` / \`MODE_STATE_INVALID\`). ASC's
+own commands still run, and that is how it gets fixed.
 
 ## Whose decision is which
 
@@ -179,8 +181,11 @@ report as one.
 
 ## Procedure
 
-1. Run \`asc proceed --json\` (add \`--session <S-ID>\` to name a session).
-   **When the person named work to do — an issue key, a ticket — pass it: \`asc proceed --work <KEY> --json\`.**
+1. Run \`asc work start --json\` (add \`--session <S-ID>\` to name a session).
+   **When the person named work to do — an issue key, a ticket — pass it: \`asc work start --work <KEY> --json\`.**
+   Inside Claude Code the command also binds this Run to the session it started; the JSON
+   carries \`binding\` (\`CLAIMED\` / \`ALREADY\` / \`NO_RUN\` / \`CONFLICT\`). \`CONFLICT\` exits 1:
+   the session is started but this Run did not obtain ownership — show the holder and stop.
    ASC then investigates before proposing anything: it reads the work item, observes this
    repository (branch, refs, whether the work is already on the canonical branch), and judges
    what state the work is actually in. A tracker saying "in progress" is not that judgement.
@@ -198,11 +203,10 @@ report as one.
 
 3. Keep the contract while working:
    - **Do not modify files outside the write boundary.** A worktree does not widen it.
-   - **Publish through the managed path, not by hand.** If something needs to reach an
-     external system, that happens through \`asc work publish\` — a person approves it and
-     \`asc grant run\` carries it out. This is the session contract's rule and it holds in
-     either mode; what changes with the mode is whether a raw write is *stopped*, not
-     whether it is the right way to publish.
+   - **An ASC-managed external mutation goes through the managed path.** If something the
+     session owns needs to reach an external system, that happens through \`asc work publish\`
+     — a person approves it and \`asc grant run\` carries it out. What changes with the
+     mode is who performs an approved act, not whether the session contract holds.
    - If doneCriteria exist, they are the completion conditions. Where /goal is available
      you may set \`/goal <the doneCriteria restated as a condition>\`.
      But **/goal achieved is a self-assessment** — it is not an independent verifier PASS.
@@ -282,16 +286,18 @@ Publishing a coordination question is the same shape — \`asc coordination publ
 <G-ID> --query <X-ID> …\`. Reading (\`coordination status\`, \`coordination observe\`) needs
 no grant.
 
-**Never** reach for \`git push\`, \`glab\`, or \`gh\` directly while the mode is AUTO. The
-guard stops those, and being stopped is not a puzzle to solve — it means the act belongs in
-\`asc work publish\`. ASC's own commands are never blocked by that guard, so the way out is
-always an asc command, never uninstalling the hook.
+**In AUTO**, an ASC-managed external mutation goes through the managed path — \`asc work
+publish\`, approved by a person, executed once by \`asc grant run\`. Do not bypass that
+path with a raw \`git push\`, \`glab\`, or \`gh\` write for a session ASC is executing; when
+the act belongs to the session, route it to \`asc work publish\`.
 
-In MANUAL the guard blocks none of it. It leaves one line saying the write is leaving the
-managed path and pointing at \`asc work publish --review\`; what to do about that is the
-person's call, and the project's rules are what answer it. **Do not add a refusal of your
-own there** — a rule that stands in MANUAL as well is the same contradiction the guard was
-built to avoid, and it leaves the person with no working path in either mode.
+**In MANUAL**, ASC does not intercept or sandbox the shell. Within the stated intent and the
+project's permissions you may perform an external mutation directly. Do not invent a
+refusal of your own to stand in for a guard; use the managed path when it fits, but MANUAL
+is not AUTO.
+
+Reads are never ASC's to gate in either mode — \`glab api\` GET, \`gh … view\`, \`git fetch\`
+and the project's own tools are yours to run.
 
 ## Progress reporting
 
@@ -299,12 +305,12 @@ From outside, a person can see nothing while work runs. Leave one line at each o
 points below with \`asc progress report\` — this is **meaningful step reporting**, not log
 streaming.
 
-Pass the **same id** to \`--physical\` that was used with \`asc host claude bind\` (only the
-owner may record).
+Inside Claude Code \`--physical\` defaults to this Run (only the owner may record); pass it
+only when recording on behalf of another Run.
 
 | when | command |
 |---|---|
-| starting | \`asc progress report <S-ID> --physical <id> --phase "<what is happening>" --next "<next step>"\` |
+| starting | \`asc progress report <S-ID> --phase "<what is happening>" --next "<next step>"\` |
 | a meaningful chunk is done | \`… --phase "<now>" --milestone "<what finished>" --next "<next>"\` |
 | a new constraint or fact appears | \`… --phase "<now>" --unresolved "<what needs checking>" --decision later\` |
 | stopped, a decision is needed | \`… --phase "<why it stopped>" --decision now [--decision-ref REQ-0042]\` |
@@ -332,10 +338,11 @@ A change that gives a person no reason to look again is noise, not a report.
 - Declare that I verified what I built — independent verification is \`asc-review\`
 - Teach a person the internal order (session issue · host bind · grant issue · controller
   collect). On a healthy path they type none of those — \`work start\`, \`work publish\`,
-  \`work finish\` cover it
+  \`work finish\` cover it; \`session issue\` is the one they type when issuance is not
+  delegated, and the command is handed to them ready to run
 - Treat AUTO as permission, or MANUAL as approval. Neither mode decides what a person
   must decide
-- Turn enforcement off by removing the product. \`asc mode manual\` is the exit
+- Stand in for a guard. ASC does not intercept the shell; neither does this skill
 `
 }
 

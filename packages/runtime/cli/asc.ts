@@ -55,7 +55,6 @@ import {
   type SetupState,
 } from '../core/attach/setup-plan.ts'
 import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claude-code/binding.ts'
-import { readHeartbeat } from '../adapters/claude-code/observer.ts'
 import { judgePhysicalId, observedRunId } from '../adapters/claude-code/identity.ts'
 import type { ApprovalRequest } from '../core/model/entities.ts'
 import { staleSessions } from '../core/runtime/stale-session.ts'
@@ -68,8 +67,6 @@ import {
   type Obligation,
 } from '../core/approval/consumption.ts'
 import type { ResourceContextPort } from '../ports/resource-context.ts'
-import { FORBIDDEN_COMMAND_PATTERNS, workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
-import { applyHostReport, assessReadiness, probe, type CapabilityName } from '../adapters/claude-code/probe.ts'
 import {
   controlPlaneAccess,
   defaultPaths,
@@ -84,7 +81,7 @@ import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
 import { evaluateHealth, healthAlertLines, observationState } from '../core/monitor/health-alerts.ts'
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
-import { MANAGED_EXTERNAL_ACTIONS, addressableHere, type ScmPort } from '../ports/scm.ts'
+import { MANAGED_EXTERNAL_ACTIONS, type ScmPort } from '../ports/scm.ts'
 import { servicePath } from '../core/distribution/external-command.ts'
 import {
   isTransientPath,
@@ -362,11 +359,10 @@ They stay because recovery, diagnosis and scripting need them.
                       [--verifier none|running|pass|fail] [--verifier-detail <text>] [--terminal]
 
   asc host claude install [--force]     # --force: overwrite ASC files a person has edited
-  asc host claude uninstall|probe [--report <cap>=<bool>...]
-  asc host claude guard
-  asc host claude bind <S-ID> --physical <id> [--principal <p>] [--worker <id>] [--kind <k>] [--force]
-  asc host claude release <S-ID> --physical <id>
-  asc host claude contract <S-ID>
+  asc host claude uninstall
+  asc host claude bind <S-ID> [--physical <id>] [--principal <p>] [--worker <id>] [--kind <k>] [--force]
+                                        # recovery surface — asc work start binds this Run on the healthy path
+  asc host claude release <S-ID> [--physical <id>]
 
 Options
   --json          machine-readable output
@@ -420,7 +416,7 @@ async function resolveRoot(start: string, explicitRoot?: string): Promise<Resolu
     worktrees: gitWorktrees,
   })
   // 같은 저장소의 다른 checkout으로 풀렸으면 **이 경로를 등록해 둔다.** 그래야 다음부터는
-  // 예전과 같은 index 조회 하나로 끝나고, guard hook도 이 checkout을 관리 대상으로 본다.
+  // 예전과 같은 index 조회 하나로 끝나고, SessionStart hook 도 이 checkout 을 이 workspace 로 본다.
   if (resolution.kind === 'LINKED_WORKTREE') await rememberWorktree(home, index, resolution)
   return resolution
 }
@@ -841,7 +837,6 @@ function parseArgsOrThrow(argv: string[]) {
       kind: { type: 'string' },
       force: { type: 'boolean', default: false },
       agent: { type: 'boolean', default: false },
-      report: { type: 'string', multiple: true },
       flush: { type: 'boolean', default: false },
       path: { type: 'string', multiple: true },
       item: { type: 'string', multiple: true },
@@ -2701,8 +2696,8 @@ async function releaseRuntimeBinding(
   // 소유권은 사라져도 그 실행이 있었다는 사실은 남는다 (C-10 §1.3)
   if (released) for (const evidence of running) await audit.endExecution(evidence.executionId, 'RELEASED', at)
   if (!released) return { ok: false, detail: 'Release failed — you are not the owner' }
-  // **놓았다고 말하기 전에 확인한다.** guard 는 이 파일 하나로 관리 대상을 정하므로,
-  // 지워지지 않은 채 "released" 라고 적으면 그 세션의 외부 write 가 계속 막힌다.
+  // **놓았다고 말하기 전에 확인한다.** 소유권은 이 파일 하나로 정해지므로, 지워지지 않은 채
+  // "released" 라고 적으면 그 Run 은 계속 그 세션을 쥔 것으로 읽혀 다음 결합을 막는다.
   const after = await bindings.get(target)
   return after
     ? { ok: false, detail: `Release did not take — ${target} is still bound to ${after.physicalSessionId}.` }
@@ -2750,81 +2745,8 @@ async function runHost(
       return 0
     }
 
-    case 'guard': {
-      // 2층 — worker 세션에만 적용되는 permission deny. user-scope에 넣으면 사람의
-      // git push까지 전역으로 막히므로, worker 기동 시 --settings 로 주입하는 파일로 둔다.
-      const root = await discoverRoot(process.cwd(), values.root as string | undefined)
-      if (!root) {
-        console.error('No attached ASC runtime found — run this inside an attached project, or pass --root.')
-        return 2
-      }
-      const guardPath = join(root, 'adapters', 'claude-code', 'worker-settings.json')
-      await mkdir(dirname(guardPath), { recursive: true })
-      await writeFile(guardPath, workerSettings(), 'utf8')
-      console.log(`created: ${guardPath}`)
-      console.log('Inject this whenever an ASC-managed worker starts:')
-      console.log(`  claude --settings "${guardPath}" ...`)
-      return 0
-    }
-
-    case 'probe': {
-      const report = await verifyInstall(paths)
-      const installed = report.status === 'INSTALLED_CURRENT'
-      // 2층 판정 — attach된 프로젝트에서만 확인 가능하다
-      const probeRoot = await discoverRoot(process.cwd(), values.root as string | undefined)
-      let workerSettingsReady: boolean | undefined
-      if (probeRoot) {
-        const guardPath = join(probeRoot, 'adapters', 'claude-code', 'worker-settings.json')
-        workerSettingsReady = await readFile(guardPath, 'utf8')
-          .then((text) => text === workerSettings())
-          .catch(() => false)
-      }
-      let result = await probe({
-        guardInstalled: installed,
-        ...(workerSettingsReady !== undefined ? { workerSettingsReady } : {}),
-      })
-      // 호스트 세션이 자기 도구 목록을 보고 채우는 self-report (--report cap=true)
-      const reports = (values.report as string[] | undefined) ?? []
-      if (reports.length > 0) {
-        const parsed: Partial<Record<CapabilityName, boolean>> = {}
-        for (const entry of reports) {
-          const [name, value] = entry.split('=')
-          if (name && (value === 'true' || value === 'false')) {
-            parsed[name as CapabilityName] = value === 'true'
-          }
-        }
-        result = applyHostReport(result, parsed, new Date().toISOString())
-      }
-
-      // capability 표보다 먼저 설치 상태를 말한다 — 낡은 설치본이면 아래 판정도 낡은 것이다
-      for (const line of installReportLines(report)) console.log(line)
-      console.log(`Claude Code: ${result.claudeVersion ?? '(not found)'}`)
-      for (const [name, verdict] of Object.entries(result.capabilities)) {
-        const mark = verdict.available === true ? 'O' : verdict.available === false ? 'X' : '?'
-        console.log(`  ${mark} ${name.padEnd(24)} [${verdict.source}] ${verdict.detail ?? ''}`)
-      }
-
-      const readiness = assessReadiness(result)
-      if (!readiness.ok) {
-        console.error(`\nSTOP: a safety-critical capability is missing — ${readiness.missing.join(', ')}`)
-        console.error('Without the external-write guard, no ASC-managed autonomous worker runs.')
-      } else if (readiness.degraded.length > 0) {
-        console.log(`\ndegraded (optional capability missing or unverified): ${readiness.degraded.join(', ')}`)
-      }
-
-      // attach된 프로젝트면 결과를 Adapter metadata로 남긴다
-      if (probeRoot) {
-        const store = new MarkdownStateStore(probeRoot)
-        await store.scope('claude-code').set('capabilities', JSON.stringify(result))
-        // 뿌리는 workspace마다 다르다 — `.asc/` 로 적으면 local scope에서 없는 경로를 가리킨다
-        console.log(`\nRecorded in: ${join(probeRoot, 'adapters', 'claude-code', 'capabilities.json')}`)
-      }
-      return readiness.ok ? 0 : 1
-    }
-
     case 'bind':
-    case 'release':
-    case 'contract': {
+    case 'release': {
       if (!target) {
         console.error(`Usage: asc host claude ${command} <S-ID> ...`)
         return 2
@@ -2838,38 +2760,9 @@ async function runHost(
       const bindings = claudeBindings(store)
       const at = new Date().toISOString()
 
-      if (command === 'contract') {
-        const session = await store.get('session', target)
-        if (!session) {
-          console.error(`${target} was not found.`)
-          return 1
-        }
-        // 계약문이 Profile의 책임 지도를 인용하므로, 지금 설정이 lock과 같은지 먼저 본다.
-        // 어긋난 설정에서 뽑은 결정권을 worker에게 건네면 그 세션은 틀린 전제로 돈다.
-        const guard = await checkBootstrap(root)
-        if (guard.code !== 0) return guard.code
-        console.log(
-          workerContract({
-            logicalSessionId: session.id,
-            goal: session.goal,
-            doneCriteria: session.doneCriteria,
-            writeBoundary: session.writeBoundary,
-            ...(session.owner ? { owner: session.owner } : {}),
-            // 세션이 명시한 것과 Profile 지도에서 풀린 것을 합쳐 넘긴다. worker에게 필요한 것은
-            // "어디에 적혀 있는가"가 아니라 "이 결정이 누구 것인가"다.
-            ...(() => {
-              const decided = effectiveAuthority(session, guard.runtime?.ownership)
-              return Object.keys(decided).length > 0 ? { decisionAuthority: decided } : {}
-            })(),
-            ...(session.dependencies.length > 0 ? { dependencies: session.dependencies } : {}),
-          }),
-        )
-        return 0
-      }
-
       // **없는 세션에 결합을 만들지 않는다** (#77).
       //
-      // 0.8.4 는 physical 쪽 신원을 맞췄다 — guard 가 찾는 값과 같은 것만 받는다. 이것은
+      // 0.8.4 는 physical 쪽 신원을 맞췄다 — Host 가 보고하는 값과 같은 것만 받는다. 이것은
       // 그 반대편이다: 논리 세션이 실재하는지 아무도 보지 않아서, 발급이 실패한 id 로도
       // 결합·실행 증거·소유 주장이 만들어졌다. 그 결합은 Run 을 점유해 다음 bind 를
       // RUNTIME_CONFLICT 로 막고, 존재하지 않는 세션을 release 하라고 안내했다.
@@ -2891,7 +2784,7 @@ async function runHost(
         }
       }
 
-      // **결합이 가리키는 값과 guard 가 조회하는 값을 같게 한다** (0.8.4).
+      // **결합이 가리키는 값과 Host 가 보고하는 Run id 를 같게 한다** (0.8.4).
       //
       // release 는 그대로 둔다 — 이미 잘못 묶인 결합을 푸는 것이 이 명령의 일이고,
       // 거기에까지 모양을 요구하면 고칠 방법이 없어진다.
@@ -2999,7 +2892,7 @@ async function runHost(
       }
       await recordExecution('host bind')
       console.log(`${target} ← ${claimed.binding.physicalSessionId} (owner claim)`)
-      console.log('This session is now ASC-managed — external writes are stopped by the guard.')
+      console.log(`This Run now holds ${target}. Approved acts for it go out through ASC's executor.`)
       return 0
     }
 
@@ -3072,12 +2965,10 @@ async function runProceed(
       // 재개(RESUMED)는 아래 checkpoint가 그 역할을 하므로 중복해서 말하지 않는다.
       if (outcome.kind === 'CONTINUE_ACTIVE') {
         const progress = await progressService(store).get(outcome.contract.id)
-        const liveness = await livenessOf(store, outcome.contract.id)
         // 열린 상신은 신고와 무관하게 "지금 판단이 필요한 것"이다 — 화면이 그것을 먼저 말한다
         const rendered = renderProgress({
           session: outcome.contract,
           progress,
-          ...(liveness ? { liveness } : {}),
           ...(outcome.awaiting && outcome.awaiting.length > 0 ? { awaiting: outcome.awaiting } : {}),
         })
         console.log(`\n${rendered.body.join('\n\n')}`)
@@ -4158,19 +4049,6 @@ async function runClosure(
   return 2
 }
 
-/**
- * hook이 남긴 활동 신호. 진척이 아니라 "도구가 돌았다"까지이므로 Renderer에
- * 보조 정보로만 넘긴다 — 없으면 없는 대로 둔다 (B-18).
- */
-async function livenessOf(
-  store: MarkdownStateStore,
-  logicalSessionId: string,
-): Promise<{ lastActivityAt: string; lastTool?: string } | null> {
-  const beat = await readHeartbeat(store.scope(CLAUDE_SCOPE), logicalSessionId)
-  if (!beat) return null
-  return { lastActivityAt: beat.lastActivityAt, ...(beat.lastTool ? { lastTool: beat.lastTool } : {}) }
-}
-
 /** Core는 provider를 모른다 — 소유권 판정에 쓸 binding은 Surface가 조립해 넘긴다. */
 function progressService(store: MarkdownStateStore): ProgressService {
   return new ProgressService({
@@ -4301,12 +4179,10 @@ async function runProgress(
     }
     const openEscalations = await escalationLedger(store).pending()
     for (const { id, session } of targets) {
-      const liveness = await livenessOf(store, id)
       const awaiting = openEscalations.filter((record) => record.sessionId === id).map((r) => r.escalationId)
       const rendered = renderProgress({
         session,
         progress: await service.get(id),
-        ...(liveness ? { liveness } : {}),
         ...(awaiting.length > 0 ? { awaiting } : {}),
       })
       if (values.json) {
@@ -4718,20 +4594,8 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
       : { axis: 'executor', state: 'MISSING', detail: 'no binding provides an outward write path' },
   ]
 
-  // ② 막을 것을 실제로 막을 수 있는가. hook 이 없으면 AUTO 는 이름뿐이다.
-  const host = await verifyInstall(hostPaths())
-  axes.push({
-    axis: 'guard',
-    state:
-      host.status === 'INSTALLED_CURRENT'
-        ? 'READY'
-        : host.hookRegistered
-          ? 'DEGRADED'
-          : 'MISSING',
-    detail: host.status,
-  })
-
-  // ③ 그 상태에서 사람이 ASC 를 계속 부를 수 있는가 — 0.7.1 이 갇혔던 자리다.
+  // ② 무인 Run 이 ASC 명령을 프롬프트 없이 부를 수 있는가. AUTO 에서 관리 경로를 부르는
+  //    것은 Agent 이고, Agent 는 Host 의 권한 프롬프트에 답하지 못한다 (E-02).
   const access = await controlPlaneAccess(hostPaths())
   axes.push({
     axis: 'control-plane',
@@ -4739,46 +4603,6 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
     ...(access.detail ? { detail: access.detail } : {}),
   })
   return axes
-}
-
-/**
- * AUTO 에서 **막히지만 나갈 길이 없는** 행위들.
- *
- * 이것이 AUTO 를 거부할 사유는 아니다 — 나머지 행위는 정상이고, 하나 때문에 전부를
- * 막으면 이번엔 반대편 dead-end 가 된다. 대신 이름을 댄다. 실사용에서 사람이
- * `asc mode manual` 로 내려간 것은 화면이 그것을 권해서가 아니라 **막힌 뒤 아무 말도
- * 없었기** 때문이다.
- *
- * 계산은 좁게 한다. Guard 의 금지 패턴 전부가 아니라, 그중 관리 행위로 환원되는 것
- * (`action` 이 붙은 것)만 본다 — `gh api` 처럼 한 행위가 아닌 명령까지 세면 "나갈 길이
- * 없다" 가 늘 참이 되어 화면이 무의미해진다.
- */
-function deadEndActions(outward: ScmPort | null, providers?: DeadEndScope): string[] {
-  const blocked = new Set(
-    FORBIDDEN_COMMAND_PATTERNS.map((entry) => entry.action).filter((action): action is string => action !== undefined),
-  )
-  return MANAGED_EXTERNAL_ACTIONS.filter(
-    (action) =>
-      blocked.has(action) &&
-      !(outward?.supports?.(action) ?? false) &&
-      addressableHere(action, providers),
-  )
-}
-
-/** 이 workspace 가 실제로 쓰는 provider 들. **이름을 박아 넣지 않는다** — 조립에서 온다. */
-type DeadEndScope = {
-  /** Profile 이 선언한 결합의 adapter id. 팀이 쓰기로 한 것들이다. */
-  declared: ReadonlySet<string>
-  /** 이 빌드가 아는 adapter id 전부. 이름공간이 provider 의 것인지 가르는 데만 쓴다. */
-  known: ReadonlySet<string>
-}
-
-/** 선언된 adapter id 와 이 빌드가 아는 adapter id. 한 곳에서만 만든다. */
-function deadEndScope(runtime?: ResolvedRuntime): DeadEndScope {
-  return {
-    declared: new Set((runtime?.layers.profile.bindings ?? []).map((binding) => binding.adapter)),
-    known: new Set(monitorAdapters().map((adapter) => adapter.describe().id)),
-  }
 }
 
 /**
@@ -4808,7 +4632,7 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   const background = await backgroundHere(values)
 
   const store = root ? new MarkdownStateStore(root) : null
-  // 이 Run 의 답을 묻는다 — 화면이 guard 와 같은 것을 말해야 한다 (0.8.4).
+  // 이 Run 의 답을 묻는다 — 화면이 실행기와 같은 것을 말해야 한다 (0.8.4).
   const mode = store ? await readExecutionMode(store.scope('policy'), observedRunId()) : null
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
   // 밖을 읽을 수 있는가 · 밖에 쓸 수 있는가. 두 답 모두 조립 결과에서 나온다.
@@ -4833,8 +4657,6 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
       ),
       ...(channels?.unavailable ?? []),
     ],
-    // 축이 READY 여도 개별 행위는 나갈 길이 없을 수 있다 — 그 목록.
-    deadEnd: deadEndActions(ports?.scm ?? null, deadEndScope(runtime)),
   }
   // 붙일 수 있는데 아무도 안 붙인 것 (0.8.4 · C-2). 자동 승격하지 않는다 — 말만 한다.
   const survey = root ? await bindingSurvey(runtime).catch(() => null) : null
@@ -4964,10 +4786,6 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     if (external.write) {
       console.log(`  read-back available for: ${external.write.verifiable.join(', ') || 'nothing'}`)
     }
-    // Guard 가 막는데 이 통로가 싣지 않는 행위. AUTO 에서 그것들은 나갈 길이 없다.
-    if (external.deadEnd.length > 0) {
-      console.log(`  AUTO 에서 막히지만 관리 경로가 없는 행위: ${external.deadEnd.join(', ')}`)
-    }
     for (const reason of external.unavailable.slice(0, 3)) console.log(`  ${reason}`)
   }
   // **침묵을 남기지 않는다.** AVAILABLE 도 UNAVAILABLE 도 아닌 자리가 있었다: 발견됐고
@@ -5073,9 +4891,6 @@ async function runMode(
   const current = await readExecutionMode(scope, askedRun)
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
 
-  const outward = root ? await composedPorts(runtime).then((p) => p.scm ?? null).catch(() => null) : null
-  const deadEnds = deadEndActions(outward, deadEndScope(runtime))
-
   const show = (state: ExecutionModeState, extra: Record<string, unknown> = {}): void => {
     if (values.json) {
       console.log(
@@ -5089,7 +4904,6 @@ async function runMode(
             ...(state.runOverrides ? { runOverrides: state.runOverrides } : {}),
             enforcement: enforcementOf(state),
             autoReadiness: { ready: readiness.ready, axes: readiness.axes },
-            ...(deadEnds.length > 0 ? { deadEnd: deadEnds } : {}),
             ...extra,
           },
           null,
@@ -5103,11 +4917,6 @@ async function runMode(
       console.log(`  ${axis.state.padEnd(16)} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
     }
     console.log(readiness.ready ? '  AUTO READY' : '  AUTO NOT AVAILABLE')
-    // 축이 전부 READY 여도 개별 행위는 나갈 길이 없을 수 있다. 그 사실을 여기서 말하지
-    // 않으면 사람은 실행 시점에야 알고, 그때는 이미 막힌 뒤다.
-    if (deadEnds.length > 0) {
-      console.log(`  AUTO 에서 막히지만 관리 경로가 없는 행위: ${deadEnds.join(', ')}`)
-    }
     for (const [key, value] of Object.entries(extra)) console.log(`${key}: ${String(value)}`)
   }
 
@@ -5254,7 +5063,7 @@ function runTarget(
       ok: false,
       detail:
         '--this-run 을 썼는데 이 Run 의 id 를 관측하지 못했다. --run <id> 로 Run 을 지목하라 ' +
-        '(guard 가 조회하는 값과 같아야 한다).',
+        '(Host 가 그 Run 에 준 값과 같아야 한다).',
     }
   }
   return {
