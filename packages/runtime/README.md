@@ -7,7 +7,7 @@ proceed-by-default, escalation, the managed execution path (grant → review →
 verify), audit, host integration — lives here.
 
 ```bash
-npm install -g @asc-agent/runtime@0.9.0
+npm install -g @asc-agent/runtime@0.9.1
 ```
 
 npm owns the executable link (on Windows, npm's own `asc.cmd`). This package never edits
