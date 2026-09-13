@@ -121,6 +121,28 @@ describe('원격에 올리는 것도 승인된 행위 하나다', () => {
     ])
   })
 
+  it('remoteName 을 주면 그 remote 로 민다 — origin 을 가정하지 않는다 (0.9.0)', async () => {
+    const seen: string[][] = []
+    const { reader, writer } = fakeClient()
+    const scm = new GitLabScm({
+      reader,
+      writer,
+      defaultProject: 'g/p',
+      repoRoot: '/repo',
+      remoteName: 'upstream',
+      git: async (args) => {
+        seen.push([...args])
+        return { ok: true, detail: args[0] === 'rev-parse' ? 'abc123' : '' }
+      },
+    })
+    assert.equal(scm.remote, 'upstream')
+    await scm.execute({ action: 'git.push', target: 'feat/x', payload: '' })
+    assert.deepEqual(seen, [
+      ['rev-parse', 'HEAD'],
+      ['push', 'upstream', 'abc123:refs/heads/feat/x'],
+    ])
+  })
+
   it('되돌릴 수 없는 형태는 승인 한 번으로 열지 않는다', async () => {
     let called = false
     const scm = scmWith(async () => {

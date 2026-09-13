@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 
 import type { AdapterDescriptor, BindingCandidate, Capability } from '../../core/binding/types.ts'
 import type { Adapter, DiscoveryContext, ProbeResult } from '../../ports/adapter.ts'
-import { GitLabClient, discoverToken, encodeProject, glabAvailable, type ProcessRunner } from './client.ts'
+import { GitLabClient, discoverToken, encodeProject, glabAvailable, hostOf, type ProcessRunner } from './client.ts'
 
 const run = promisify(execFile)
 
@@ -40,8 +40,11 @@ const PROVIDES: readonly Capability[] = [
  */
 const CLAIMED_ELSEWHERE = new Set(['github.com'])
 
+/** `git remote -v` 의 한 줄 — 이름과 주소. 이름은 실행(push·ls-remote)이 어느 remote 로 갈지 정한다. */
+export type GitRemote = { name: string; url: string }
+
 export type GitLabAdapterDeps = {
-  listRemotes?: (projectRoot: string) => Promise<string[]>
+  listRemotes?: (projectRoot: string) => Promise<GitRemote[]>
   findToken?: (env?: NodeJS.ProcessEnv) => string | null
   reach?: (project: string, token: string) => Promise<{ ok: boolean; detail?: string }>
   /**
@@ -60,7 +63,7 @@ const defaultRun: ProcessRunner = async (command, args) => {
 }
 
 export class GitLabAdapter implements Adapter {
-  #listRemotes: (projectRoot: string) => Promise<string[]>
+  #listRemotes: (projectRoot: string) => Promise<GitRemote[]>
   #findToken: (env?: NodeJS.ProcessEnv) => string | null
   #reach: ((project: string, token: string) => Promise<{ ok: boolean; detail?: string }>) | undefined
   #host: string | undefined
@@ -72,6 +75,12 @@ export class GitLabAdapter implements Adapter {
    * 그렇지 않은 호출자는 `ASC_GITLAB_URL` 로 명시하면 된다.
    */
   #endpoints = new Map<string, string>()
+  /**
+   * 후보를 찾을 때 본 remote 이름. 실행기가 `git push <remote>` · `ls-remote <remote>` 를 할 때
+   * 이 값을 써야 발견한 그 주소로 나간다 — `origin` 을 가정하면 mirror 가 origin 인 저장소에서
+   * 엉뚱한 곳으로 민다. host 와 마찬가지로 Core 타입에 자리를 만들지 않고 여기 둔다.
+   */
+  #remotes = new Map<string, string>()
   #run: ProcessRunner
 
   constructor(deps: GitLabAdapterDeps = {}) {
@@ -105,17 +114,21 @@ export class GitLabAdapter implements Adapter {
     const override = this.#host ?? context.env?.ASC_GITLAB_HOST
     const found = new Map<string, BindingCandidate>()
 
-    for (const url of remotes) {
+    for (const { name, url } of remotes) {
       const parsed = parseRemote(url)
       if (!parsed) continue
       if (override ? parsed.host !== override : CLAIMED_ELSEWHERE.has(parsed.host)) continue
+      // 같은 project 를 두 remote 가 가리키면 먼저 본 것을 쓴다 — 후보는 하나다.
+      if (found.has(parsed.project)) continue
       // 하위 그룹이 흔하다 — `group/sub/project` 를 통째로 자원 이름으로 쓴다.
-      this.#endpoints.set(parsed.project, `https://${parsed.host}/api/v4`)
+      // `ASC_GITLAB_URL` 은 명시 override 다 — probe 만 보던 것을 조립까지 같은 값으로 맞춘다.
+      this.#endpoints.set(parsed.project, context.env?.ASC_GITLAB_URL ?? `https://${parsed.host}/api/v4`)
+      this.#remotes.set(parsed.project, name)
       found.set(parsed.project, {
         adapterId: 'gitlab',
         resource: parsed.project,
         provides: PROVIDES,
-        discoveredBy: `git remote (${parsed.host})`,
+        discoveredBy: `git remote ${name} (${parsed.host})`,
       })
     }
     return [...found.values()]
@@ -126,7 +139,7 @@ export class GitLabAdapter implements Adapter {
     if (!token) {
       // 토큰이 없다고 통로가 없는 것은 아니다 — 사람이 이미 `glab` 에 로그인해 뒀다면
       // 그 도구에게 요청을 대신 보내 달라고 할 수 있다. 토큰을 꺼내 오지는 않는다.
-      if (await glabAvailable(this.#run)) {
+      if (await glabAvailable(this.#run, hostOf(this.#endpoints.get(candidate.resource)))) {
         return {
           state: 'DEGRADED',
           provides: candidate.provides,
@@ -150,6 +163,11 @@ export class GitLabAdapter implements Adapter {
   endpointFor(resource: string): string | undefined {
     return this.#endpoints.get(resource)
   }
+
+  /** 이 후보를 발견한 remote 이름. 실행기의 push·ls-remote 가 이 remote 로 간다. */
+  remoteFor(resource: string): string | undefined {
+    return this.#remotes.get(resource)
+  }
 }
 
 export function parseRemote(url: string): { host: string; project: string } | null {
@@ -160,12 +178,18 @@ export function parseRemote(url: string): { host: string; project: string } | nu
   return null
 }
 
-async function defaultListRemotes(projectRoot: string): Promise<string[]> {
+async function defaultListRemotes(projectRoot: string): Promise<GitRemote[]> {
   const { stdout } = await run('git', ['-C', projectRoot, 'remote', '-v'])
-  return stdout
-    .split('\n')
-    .map((line) => line.split(/\s+/)[1])
-    .filter((url): url is string => Boolean(url))
+  const seen = new Set<string>()
+  const remotes: GitRemote[] = []
+  for (const line of stdout.split('\n')) {
+    const [name, url] = line.split(/\s+/)
+    // fetch/push 두 줄이 같은 remote 다 — 한 번만 센다
+    if (!name || !url || seen.has(name)) continue
+    seen.add(name)
+    remotes.push({ name, url })
+  }
+  return remotes
 }
 
 async function defaultReach(

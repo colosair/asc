@@ -27,6 +27,7 @@ import {
   GlabApiClient,
   discoverToken as discoverGitLabToken,
   glabAvailable,
+  hostOf,
   type ProcessRunner,
 } from '../adapters/gitlab/client.ts'
 import { GitLabCoordinationSurface } from '../adapters/gitlab/coordination.ts'
@@ -76,10 +77,19 @@ export type BuildInput = {
   repoRoot?: string
   /** 이벤트 조회 페이지 크기. */
   perPage?: number
-  /** 자격 조회 통로 주입점(테스트용). adapter id를 받아 그 adapter의 자격을 돌려준다. */
-  findToken?: (adapterId: string) => Promise<string | null>
+  /**
+   * 자격 조회 통로 주입점(테스트용). adapter id 와 binding 을 받아 그 adapter 의 자격을 돌려준다.
+   * binding 을 넘기는 이유: 자격이 host 마다 다를 수 있고, 도구(glab)에게 물을 때 어느 host 인지
+   * 말해 줘야 한다.
+   */
+  findToken?: (adapterId: string, binding: ResolvedBinding) => Promise<string | null>
   /** 이 binding이 어느 주소를 가리키는지. 발견 단계가 알아낸 값을 그대로 잇는다. */
   endpointFor?: (binding: ResolvedBinding) => string | undefined
+  /**
+   * 이 binding 을 발견한 git remote 의 이름. 실행기의 push · ls-remote 가 이 remote 로 간다.
+   * 발견 단계가 알아낸 값을 그대로 잇는다 — canonical source 의 순서나 `origin` 을 가정하지 않는다.
+   */
+  remoteFor?: (binding: ResolvedBinding) => string | undefined
 }
 
 /** adapter id → 실제 구현 생성. **여기가 provider 이름을 아는 유일한 자리다.** */
@@ -91,7 +101,11 @@ const FACTORIES: Record<string, Factory> = {
     const baseUrl = input.endpointFor?.(binding)
     // 토큰이 빈 문자열이면 자격이 도구 안에 있다는 뜻이다 (P1-H). 값을 꺼내 오지 않고
     // 그 도구에게 요청을 대신 보내 달라고 한다 — 읽기 전용이다.
-    const client = token === '' ? new GlabApiClient(defaultGlabRun) : new GitLabClient({ token, ...(baseUrl ? { baseUrl } : {}) })
+    const client =
+      token === ''
+        ? new GlabApiClient(defaultGlabRun, hostOf(baseUrl))
+        : new GitLabClient({ token, ...(baseUrl ? { baseUrl } : {}) })
+    const remoteName = input.remoteFor?.(binding)
     const project = binding.resource
     return {
       eventSource: new GitLabEventSource({ client, project, perPage: input.perPage ?? 30 }),
@@ -109,6 +123,7 @@ const FACTORIES: Record<string, Factory> = {
         defaultProject: project,
         sourceRefs: input.sourceRefs ?? {},
         ...(input.repoRoot ? { repoRoot: input.repoRoot } : {}),
+        ...(remoteName ? { remoteName } : {}),
       }),
       // canonical 통로는 아직 없다. 없는 것을 있는 척하지 않는다.
     }
@@ -163,10 +178,12 @@ const defaultGlabRun: ProcessRunner = async (command, args) => {
  * 돌려준다 — **값이 아니라 "통로가 있다"는 사실이다.** 둘 다 없으면 null 이고, 그때만
  * 조립하지 않는다.
  */
-const discoverGitLabAccess = async (): Promise<string | null> => {
+const discoverGitLabAccess = async (host?: string): Promise<string | null> => {
   const token = discoverGitLabToken()
   if (token) return token
-  return (await glabAvailable(defaultGlabRun)) ? '' : null
+  // 어느 host 에 로그인돼 있는지 물어야 한다 — cwd 의 git 컨텍스트에 맡기면 hook·홈 디렉터리에서
+  // gitlab.com 을 묻고 자체 호스팅 결합을 UNCONFIGURED 로 읽는다 (실측).
+  return (await glabAvailable(defaultGlabRun, host)) ? '' : null
 }
 
 /** 이 adapter는 토큰 없이 조립된다. 자격은 도구가 자기 안에서 진다. */
@@ -429,8 +446,8 @@ export async function buildObservationChannels(input: BuildInput): Promise<Obser
 
   const findToken =
     input.findToken ??
-    (async (adapterId: string) =>
-      adapterId === 'gitlab' ? await discoverGitLabAccess() : await discoverToken())
+    (async (adapterId: string, binding: ResolvedBinding) =>
+      adapterId === 'gitlab' ? await discoverGitLabAccess(hostOf(input.endpointFor?.(binding))) : await discoverToken())
 
   for (const binding of chosen) {
     const where = `${binding.adapterId}:${binding.resource}`
@@ -439,7 +456,7 @@ export async function buildObservationChannels(input: BuildInput): Promise<Obser
       unavailable.push(`${where}: 이 빌드에 조립 경로가 없다`)
       continue
     }
-    const token = TOKENLESS.has(binding.adapterId) ? '' : await findToken(binding.adapterId)
+    const token = TOKENLESS.has(binding.adapterId) ? '' : await findToken(binding.adapterId, binding)
     if (token === null) {
       // 자격이 없는 것은 "변화 없음"이 아니다 — 그 채널만 빠지고 이유가 남는다
       unavailable.push(`${where}: 자격이 없어 관측 통로를 만들지 않았다`)
@@ -471,8 +488,8 @@ export async function buildRuntimePorts(input: BuildInput): Promise<RuntimePorts
   // 자격은 adapter마다 다른 곳에 있다. Core는 이 사실을 모르고, 여기서만 안다.
   const findToken =
     input.findToken ??
-    (async (adapterId: string) =>
-      adapterId === 'gitlab' ? await discoverGitLabAccess() : await discoverToken())
+    (async (adapterId: string, binding: ResolvedBinding) =>
+      adapterId === 'gitlab' ? await discoverGitLabAccess(hostOf(input.endpointFor?.(binding))) : await discoverToken())
 
   // capability마다 따로 푼다. 한 binding이 여럿을 제공해도, 서로 다른 binding이 나눠
   // 맡아도 같은 경로로 조립된다 — 어느 갈래가 어디서 왔는지가 Port마다 정확해야 한다.
@@ -502,7 +519,7 @@ export async function buildRuntimePorts(input: BuildInput): Promise<RuntimePorts
         ports.unavailable.push(`${binding.adapterId}: 이 빌드에 조립 경로가 없다`)
         continue
       }
-      const token = TOKENLESS.has(binding.adapterId) ? '' : await findToken(binding.adapterId)
+      const token = TOKENLESS.has(binding.adapterId) ? '' : await findToken(binding.adapterId, binding)
       if (token === null) {
         ports.unavailable.push(`${binding.adapterId}: 자격이 없어 외부 조회를 만들지 않았다`)
         continue

@@ -478,6 +478,20 @@ function endpointOf(adapters: readonly Adapter[], binding: ResolvedBinding): str
   return undefined
 }
 
+/**
+ * 이 binding 을 발견한 git remote 의 이름 — 실행기의 push · ls-remote 가 갈 곳. 발견 단계가
+ * 안 것을 그대로 쓴다. canonical source 의 첫 항목이나 `origin` 을 가정하면 mirror 와 정본이
+ * 갈린 저장소에서 다른 곳으로 민다. provider 도 remote 이름도 여기 적지 않는다 — adapter 가 답한다.
+ */
+function remoteOf(adapters: readonly Adapter[], binding: ResolvedBinding): string | undefined {
+  for (const adapter of adapters) {
+    const withRemote = adapter as Adapter & { remoteFor?: (resource: string) => string | undefined }
+    if (adapter.describe().id !== binding.adapterId) continue
+    return withRemote.remoteFor?.(binding.resource)
+  }
+  return undefined
+}
+
 /** 관측 기록이 사는 자리. source id가 정한다 — provider 이름을 여기 박지 않는다. */
 const monitorScope = (sourceId: string): string => `monitor:${sourceId}`
 
@@ -3293,6 +3307,7 @@ async function buildWorkIngress(
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
 
   const work = ports.resourceContext
@@ -4411,6 +4426,7 @@ async function buildMonitorEngines(
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   // canonical.read 처럼 한 곳이어야 의미가 서는 것은 예전 경로 그대로 역할로 고른다.
   const singular = await buildRuntimePorts({
@@ -4419,6 +4435,7 @@ async function buildMonitorEngines(
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
 
   if (built.channels.length === 0) {
@@ -6537,6 +6554,7 @@ async function coordinationSurfaceFor(resolved?: ResolvedRuntime) {
     roles: rolesFor(plan, declared),
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   return { surface: ports.coordinationSurface, unavailable: ports.unavailable }
 }
@@ -6831,6 +6849,7 @@ async function runCoordinationObserve(
     roles: rolesFor(plan, declared),
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   const contextOf = (adapterId: string) =>
     built.channels.find((channel) => channel.adapterId === adapterId && channel.resourceContext)?.resourceContext
@@ -7329,6 +7348,7 @@ async function composedPorts(runtime?: ResolvedRuntime): Promise<Awaited<ReturnT
         }
       : {}),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   return ports
 }
@@ -7414,17 +7434,16 @@ async function reconcileInbox(
 
 /** 이 workspace 가 밖을 읽는 통로 전부. 관측 채널이 먼저고, 조립된 단일 통로가 뒤를 받친다. */
 async function inboxReaders(resolved?: ResolvedRuntime): Promise<ResourceContextPort[]> {
-  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const adapters = monitorAdapters()
-  const declared = resolved?.layers.profile.bindings ?? []
   const readers: ResourceContextPort[] = []
   try {
-    const { plan } = await bindingPlanFor(resolved)
+    // plan 을 만든 adapter 인스턴스를 같이 받는다 — host·remote 는 그 안에만 있다
+    const { plan, declared, projectRoot, adapters } = await bindingPlanFor(resolved)
     const built = await buildObservationChannels({
       plan,
       roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
       ...jamComposition(projectRoot),
       endpointFor: (binding) => endpointOf(adapters, binding),
+      remoteFor: (binding) => remoteOf(adapters, binding),
     })
     for (const channel of built.channels) if (channel.resourceContext) readers.push(channel.resourceContext)
   } catch {
@@ -7566,25 +7585,34 @@ function reconcileLines(result: Awaited<ReturnType<typeof reconcileInbox>>): str
  * 한 번의 실행 안에서 결합 구성이 달라질 이유가 없으므로 그 회차 동안만 붙들어 둔다.
  * 프로세스가 끝나면 사라진다 — 디스크에 남기지 않는다.
  */
-const planCache = new Map<string, Promise<BindingPlan>>()
+/**
+ * plan 과 **그 plan 을 만든 adapter 인스턴스**를 함께 캐시한다. 발견 단계가 알아낸 host·remote 는
+ * 그 인스턴스 안에만 있다(`endpointFor`·`remoteFor`). plan 만 캐시하고 adapter 를 매번 새로
+ * 만들면 두 번째 호출부터 빈 인스턴스에 묻게 되고, 자체 호스팅 결합이 조용히 gitlab.com 으로
+ * 조립된다 — 실측에서 그랬다.
+ */
+const planCache = new Map<string, { adapters: Adapter[]; plan: Promise<BindingPlan> }>()
 
 async function bindingPlanFor(
   runtime?: ResolvedRuntime,
 ): Promise<{ plan: BindingPlan; declared: readonly { role: string; adapter: string; resource: string }[]; projectRoot: string; adapters: Adapter[] }> {
   const { root: projectRoot } = await discoverProjectRoot(process.cwd())
   const declared = runtime?.layers.profile.bindings ?? []
-  const adapters = monitorAdapters()
   const key = `${projectRoot}|${declared.map((b) => `${b.role}:${b.adapter}:${b.resource}`).join(',')}`
-  let pending = planCache.get(key)
-  if (!pending) {
-    pending = composeBindings({
-      context: { projectRoot, env: process.env },
+  let cached = planCache.get(key)
+  if (!cached) {
+    const adapters = monitorAdapters()
+    cached = {
       adapters,
-      roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
-    })
-    planCache.set(key, pending)
+      plan: composeBindings({
+        context: { projectRoot, env: process.env },
+        adapters,
+        roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+      }),
+    }
+    planCache.set(key, cached)
   }
-  return { plan: await pending, declared, projectRoot, adapters }
+  return { plan: await cached.plan, declared, projectRoot, adapters: cached.adapters }
 }
 
 /**
@@ -7628,6 +7656,7 @@ async function composedReadChannels(runtime?: ResolvedRuntime): Promise<{ ids: s
     roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   return { ids: built.channels.map((channel) => channel.eventSource.id), unavailable: built.unavailable }
 }
