@@ -7278,11 +7278,14 @@ async function runGrant(
       }
       // 강제가 서 있는 자리에서는 되돌려 읽을 수 없는 행위를 실행하지 않는다 (P1-2).
       const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'), observedRunId())) === 'ENFORCE'
+      // 얼림은 실제 mutation 경계에서 읽는다 — 선언만 있고 아무도 안 읽으면 차단이 아니다.
+      const freezeLedger = new FreezeLedger(store.scope('policy'))
       const outcome = await new Executor({
         store,
         scm,
         runId: (values['run-id'] as string) ?? `cli-${process.pid}`,
         ...(enforcing ? { requireVerification: true } : {}),
+        freeze: () => freezeLedger.policy(),
       }).run(target)
 
       if (outcome.ok) {
@@ -7291,6 +7294,19 @@ async function runGrant(
       }
       // 실패의 종류를 뭉개지 않는다 (0.8.0 §P) — 다음 행동이 저마다 다르다.
       console.error(`${outcome.reason}${'detail' in outcome ? `: ${outcome.detail}` : ''}`)
+      if (outcome.reason === 'FROZEN') {
+        // 미룬 사실을 남긴다. Grant 는 READY 그대로 — 녹은 뒤 사람이 다시 보고 같은 Grant 로 부른다.
+        const grant = await store.get('grant', target)
+        await freezeLedger.defer({
+          id: target,
+          action: 'remote.write',
+          intent: grant ? `${grant.action} ${grant.target}` : target,
+          basis: grant?.basis?.sourceSha ? [grant.basis.sourceSha] : [],
+          grantRef: target,
+        })
+        for (const line of freezeLines(await freezeLedger.policy(), await freezeLedger.deferred())) console.error(line)
+        console.error('녹인 뒤 다시 확인하고 같은 Grant 로 다시 부른다: asc thaw')
+      }
       if (outcome.reason === 'UNCERTAIN') {
         console.error('밖에 나갔는지 알 수 없다. 다시 실행하지 마라 — 먼저 원격을 읽어 확인하고,')
         console.error('그 뒤에 사람이 새 Grant 를 낸다. 이 Grant 는 집힌 채로 남아 재사용되지 않는다.')
