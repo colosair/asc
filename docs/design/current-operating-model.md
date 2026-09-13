@@ -24,11 +24,12 @@ the whole boundary:
 ```text
 ASC defends      scope drift · acting beyond the instruction · lost work or handoffs ·
                  writing to the wrong target · acting on facts that moved after a decision ·
-                 in AUTO, going around the managed path with a raw write ·
+                 a managed act going out without its grant, twice, or after drift ·
                  calling a write successful when nobody read it back
 
-ASC does not     a hostile process holding the same OS user, shell and filesystem.
-                 It can edit ASC's state, answer its own inbox, remove the hook.
+ASC does not     a process holding the same OS user, shell and filesystem — hostile or
+                 merely careless. It can edit ASC's state, answer its own inbox, type
+                 `git push` at the shell.
                  That needs a boundary ASC does not own — an OS or host trust boundary —
                  and simulating one with more internal state buys nothing while making
                  the normal path heavier.
@@ -93,30 +94,33 @@ The inbox is not a gate in front of every write. It is where a *new* human decis
 The question this axis answers: *who carries out an approved act?*
 
 ```text
-MANUAL   ASC manages work, sessions, decisions, review and audit.
-         It does not route external writes through itself.
-         The guard hard-blocks nothing; it leaves one advisory line.
+MANUAL   A person performs an approved external act at the shell.
+         ASC manages work, sessions, decisions, review and audit; it does not execute.
 
-AUTO     An ASC-managed agent runs on its own.
-         Outward writes travel the managed path, and the guard blocks a raw bypass.
+AUTO     ASC's managed executor performs the approved act on behalf of an autonomous
+         agent, and refuses anything it cannot read back afterwards.
 ```
+
+Neither mode sandboxes the shell. A raw command typed by the same OS user is outside
+ASC's boundary — 0.9.0 retired the hook that pretended otherwise. Execution Mode answers
+*who performs*, not *what the shell may run*.
 
 Three facts about mode, each one a rule the code keeps:
 
 ```text
 Mode never decides what a person must decide, and a decision never decides the mode.
-A workspace nobody chose for is not in AUTO — an absent record enforces nothing.
-A mode record that cannot be read is not MANUAL either: raw external writes stay
-blocked and the reason is named, because otherwise a stored AUTO would fall away
-over one damaged file.
+A workspace nobody chose for is not in AUTO — an absent record means a person executes.
+A mode record that cannot be read is not MANUAL either: the managed executor treats
+the run as AUTO (read-back required) and the reason is named, because otherwise a
+stored AUTO would fall away over one damaged file.
 ```
 
-Turning AUTO on asks three questions — the ones only activation can answer:
+Turning AUTO on asks two questions — the ones only activation can answer:
 
 ```text
 executor        does a managed write path assemble here
-guard           is the guard actually installed
-control-plane   do ASC's own commands still run in this host
+control-plane   do ASC's own commands run in this host without a permission prompt
+                (an unattended Run cannot answer one)
 ```
 
 Whether a *particular* action can go out is answered when that action is attempted.
@@ -167,17 +171,16 @@ Decision Auth.   is a new human decision needed, and what is it
 Binding          which provider and which resource this work is tied to
 Remote Review    does the decided action hold against the outside world right now
 Execution Mode   who carries out an approved act
-Guard            is an AUTO-managed agent bypassing the managed path with a raw write
 Grant            an immutable one-shot ticket for one already-decided action
 Executor         perform that fixed action once
 Verify           does the outside now show what was expected
 ```
 
-Explicitly **not** the guard's business: approvals, controllers, mergeability, commit
-semantics, branch policy, project conventions. It answers one question and knows nothing
-about providers.
-
 Explicitly **not** the grant's business: proving who a person is, or deciding anything.
+
+There is no primitive that answers "is the shell doing something it should not". 0.8.x had
+one (the PreToolUse guard); it answered a question ASC cannot honestly answer for a
+same-user shell, and 0.9.0 removed it.
 
 ## 8. Adaptive agent composition
 

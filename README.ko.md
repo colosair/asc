@@ -187,19 +187,22 @@ asc workspace migrate
 Claude Code를 host로 쓸 때의 진입점이다.
 
 ```bash
-asc host claude install   # 3층 guard hook + skill bundle (~/.claude)
-asc host claude guard     # 2층 worker-settings (attach된 프로젝트에서)
-asc host claude probe     # capability 실측 + 설치 상태 판정
+asc host claude install   # skill bundle 3종 + SessionStart hook (~/.claude)
+asc host claude uninstall # ASC 설치물만 제거
+asc host claude bind      # 복구 표면 — healthy path 에서는 `asc work start` 가 이 Run 을 묶는다
 ```
+
+0.9.0 은 0.8.x 의 PreToolUse guard 를 걷어냈다. `asc update` · `asc refresh` 가 0.8.x 기계에서
+그 등록과 파일을 제거하며, 사람이 고친 파일은 남기고 말한다.
 
 Host 설치물은 **project-owned가 아니라 user-owned다.** `install`은 사용자 홈(`~/.claude`)에
 설치하며 경로 옵션이 없다. `uninstall`은 ASC 설치물만 제거한다. 설치 단위는 **Skill Bundle
 3종**이다 — `asc`(대표 표면) · `asc-inbox`(조사와 Decision Packet) · `asc-review`(독립 검증).
 사용자는 원칙적으로 `asc` 하나만 알면 된다.
 
-**`probe`에는 `claude` 실행파일이 PATH에 있어야 한다.** 없으면 안전 필수 capability
-(`external_write_guard`)를 실측할 수 없어 `STOP`으로 떨어진다(exit 1). 이는 ASC 결함이 아니라
-**prerequisite 부재**이며, 그 상태에서도 위 install/guard와 로컬 루프는 정상 동작한다.
+실행 모드는 "승인된 외부 행위를 누가 수행하는가" 하나를 묻는다. MANUAL 은 사람이 셸에서,
+AUTO 는 ASC 관리 실행기가 자율 Agent 를 대신해 수행한다. ASC 가 관리하는 외부 변경은 권한·Grant
+경로 없이는 실행되지 않는다. ASC 는 같은 OS 사용자의 셸을 격리한다고 주장하지 않는다.
 
 ## 기여자 경로
 

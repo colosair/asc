@@ -10,8 +10,8 @@ track of what each one is allowed to do, what it decided, and what still needs y
 
 ASC gives an agent a contract — a goal, done-criteria, a write boundary — lets it proceed
 on what it owns, and stops it at the boundaries that are yours: ownership, shared
-contracts, secrets, irreversible actions. Nothing reaches an external system without an
-approved execution grant. Everything is auditable afterwards.
+contracts, secrets, irreversible actions. No ASC-managed external mutation is executed
+without the required authority/grant path. Everything is auditable afterwards.
 
 > **The packages are on npm.** Install them with the exact commands below. Cloning this
 > repository is the [contributor path](#development) — it is not how you use ASC.
@@ -284,10 +284,13 @@ you are running — those are the two commands a person needs. The rest is the a
 surface, for diagnosis and recovery:
 
 ```bash
-asc host claude probe      # capability measurement + install state
-asc host claude guard      # worker settings, inside an attached project
-asc host claude install    # writes the integration directly
+asc host claude install    # writes the integration directly (skill bundle + SessionStart hook)
+asc host claude uninstall  # removes only what ASC installed
+asc host claude bind       # recovery: bind a session to a Run by hand — `asc work start` does it for you
 ```
+
+0.9.0 retired the 0.8.x PreToolUse guard. `asc update` and `asc refresh` remove its
+registration and file from a 0.8.x host; a file you edited is left in place and reported.
 
 Host artefacts are **user-owned, not project-owned**. `install` writes to your home
 directory; `uninstall` removes only what ASC installed.
@@ -335,7 +338,7 @@ asc uninstall   # remove the product; your state stays
 ```
 
 `update` installs the new release and then lets **that** build refresh the host
-integration, so a new runtime never runs next to an old hook. `refresh` is the one to
+integration, so a new runtime never leaves an older hook registration behind. `refresh` is the one to
 reach for when the host shows `INSTALLED_STALE` at the version you already have: it
 converges the host files and the machine registration and touches nothing else — not the
 profile, not the workspace, not the identity, not sessions, not the execution mode.
@@ -434,8 +437,13 @@ evidence is thin, the next block stays undecided.
 
 - No credential is ever written into a project file.
 - No machine-specific absolute path is ever written into a project file.
-- External writes leave only through an approved execution grant; a guard hook blocks
-  them at the point of execution for ASC-managed sessions.
+- No ASC-managed external mutation is executed without the required authority/grant
+  path: a person's decision, a one-shot grant, a pre-execution review, exactly one
+  mutation, a read-back, an audit record.
+- ASC does not claim to sandbox the same-OS-user shell. A raw `git push` typed at that
+  shell is outside ASC's enforcement boundary; the Host and the OS own that boundary.
+  Execution Mode answers who performs an approved act — a person (MANUAL) or ASC's
+  managed executor (AUTO) — not what the shell may run.
 - Host installation touches only the ASC namespace. Your files and other tools' hooks
   are left alone.
 

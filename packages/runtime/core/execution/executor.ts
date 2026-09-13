@@ -17,6 +17,7 @@
 import type { ExecutionGrant } from '../model/entities.ts'
 import { transitionGrant, transitionRequest } from '../model/transitions.ts'
 import { expectationOf, revalidate, verifyAgainst } from './remote-review.ts'
+import { judgeAction, type FreezePolicy } from '../policy/remote-freeze.ts'
 import type { ScmPort } from '../../ports/scm.ts'
 import type { StateStore } from '../../ports/state-store.ts'
 import { applyTransition } from '../runtime/store-ops.ts'
@@ -28,6 +29,13 @@ export type ExecuteOutcome =
   | { ok: false; reason: 'NOT_CLAIMABLE'; status: ExecutionGrant['status'] }
   | { ok: false; reason: 'CLAIMED_BY_OTHER' }
   | { ok: false; reason: 'EXPIRED' }
+  /**
+   * 원격이 얼어 있다 (C-10 §7). 밖은 그대로고 Grant 도 집지 않는다 — 녹은 뒤 사람이
+   * 다시 보고 같은 Grant 로 다시 부른다. 자동 재생은 없다.
+   *
+   * 얼림은 선언만으로는 차단이 아니다. 실제 mutation 경계인 이 자리에서 읽어야 집행이다.
+   */
+  | { ok: false; reason: 'FROZEN'; detail: string }
   /** 계약이 허용하지 않는 행위다 — 계약서와 다른 일을 하려는 것이므로 실행하지 않는다. */
   | { ok: false; reason: 'FORBIDDEN_ACTION'; detail: string }
   /** 승인 이후 대상이 움직였다 — 실행하지 않고 되돌린다. */
@@ -65,6 +73,11 @@ export type ExecutorDeps = {
    * 자리에서는 그 판단이 사람의 것이므로 호출자가 정한다.
    */
   requireVerification?: boolean
+  /**
+   * 원격 얼림 정책. 주면 CLAIM 전에 `remote.write` 를 묻는다 — 얼어 있으면 아무것도
+   * 집지 않고 FROZEN 으로 돌려준다. 안 주면 얼림을 모르는 호출자다(테스트·조립 전).
+   */
+  freeze?: () => Promise<FreezePolicy>
   now?: () => string
 }
 
@@ -73,6 +86,7 @@ export class Executor {
   #scm: ScmPort
   #runId: string
   #requireVerification: boolean
+  #freeze: (() => Promise<FreezePolicy>) | undefined
   #now: () => string
 
   constructor(deps: ExecutorDeps) {
@@ -80,6 +94,7 @@ export class Executor {
     this.#scm = deps.scm
     this.#runId = deps.runId
     this.#requireVerification = deps.requireVerification ?? false
+    this.#freeze = deps.freeze
     this.#now = deps.now ?? (() => new Date().toISOString())
   }
 
@@ -92,6 +107,12 @@ export class Executor {
     if (grant.expiresAt && grant.expiresAt <= at) {
       await this.#close(grant.id, 'EXPIRED', at, '만료')
       return { ok: false, reason: 'EXPIRED' }
+    }
+
+    // 0. 얼림 — 집기 전에 본다. 집고 나서 미루면 Grant 가 소진된 채 아무것도 안 나간다.
+    if (this.#freeze) {
+      const verdict = judgeAction(await this.#freeze(), 'remote.write')
+      if (verdict.decision !== 'ALLOW') return { ok: false, reason: 'FROZEN', detail: verdict.detail }
     }
 
     // 1. CLAIM — 두 Run이 동시에 들어와도 하나만 통과한다

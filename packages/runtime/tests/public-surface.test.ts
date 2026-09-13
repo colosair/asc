@@ -148,8 +148,8 @@ describe('Execution Mode — 명령 표면 (§10·§11·§12)', () => {
     //
     // **cwd 도 그 임시 자리로 옮긴다.** 조립은 `--root` 가 아니라 cwd 의 저장소에서 결합을
     // 발견하므로, 이 저장소 안에서 돌리면 개발자 기계의 원격이 executor 로 서고 이 시험은
-    // "나갈 길이 없다" 를 재현하지 못한다. 예전에는 host 통합이 낡아 있어서 guard 축이
-    // 대신 막아 주었을 뿐이다 — 시험이 기계 상태에 기대고 있었다.
+    // "나갈 길이 없다" 를 재현하지 못한다. 0.8.x 에는 host 통합이 낡아 있으면 guard 축이
+    // 대신 막아 주었다 — 시험이 기계 상태에 기대고 있었다. 0.9.0 에는 그 축이 없다.
     const raised = await run(['mode', 'auto', '--json', '--root', root], { cwd: dirname(root) })
     assert.equal(raised.code, 1)
     const verdict = JSON.parse(raised.out) as { mode: string; applied: boolean; autoReadiness: { ready: boolean } }

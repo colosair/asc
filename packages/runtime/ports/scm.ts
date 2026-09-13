@@ -26,8 +26,8 @@ export type BaselineQuery = { sourceId: string; ref?: string; paths?: readonly s
  * 는다 (`GITLAB_ACTIONS` 가 그렇게 됐다: import 하는 곳이 테스트 하나뿐이다).
  *
  * **여기 없는 외부 행위가 있을 수 있다.** 이 목록은 "외부 쓰기 전부" 가 아니라 그중
- * ASC 가 관리 실행으로 다루는 것이다. Guard 가 막는 것과도 같지 않다 — `gh api` 처럼
- * 한 행위로 환원되지 않는 명령은 막히지만 여기 없다.
+ * ASC 가 관리 실행으로 다루는 것이다. 셸에서 가능한 것 전부를 세지 않는다 — `gh api` 처럼
+ * 한 행위로 환원되지 않는 명령은 ASC 가 관리하지 않는다.
  */
 export const MANAGED_EXTERNAL_ACTIONS = [
   'git.push',
@@ -101,25 +101,4 @@ export interface ScmPort {
    * Port 자체는 권한을 판단하지 않으므로, 호출 지점이 좁게 유지되는 것이 계약이다.
    */
   execute(action: ExternalAction): Promise<ExternalActionResult>
-}
-
-/**
- * 이 행위가 **이 workspace 에서 물어볼 만한 것인가** (0.8.4 · C-10).
- *
- * GitLab 하나만 선언한 저장소에서 다른 provider 의 행위를 "나갈 길 없는 행위" 로 매 화면에
- * 띄우고 있었다. 참인 문장이지만 그 프로젝트가 영영 하지 않을 행위이고, 그런 줄이 늘면
- * 정작 진짜 dead-end 가 묻힌다.
- *
- * **provider 이름을 여기 적지 않는다.** action key 의 이름공간이 이 빌드가 아는 adapter id
- * 중 하나인데 이 workspace 가 선언하지 않았다면 그 행위는 여기 것이 아니다. 이름공간이
- * 어느 adapter id 도 아니면(provider 중립인 것들) 늘 센다 — 어느 결합이 맡든 해야 할 일이다.
- */
-export function addressableHere(
-  action: string,
-  providers?: { declared: ReadonlySet<string>; known: ReadonlySet<string> },
-): boolean {
-  if (!providers) return true
-  const namespace = action.split('.')[0] ?? ''
-  if (!providers.known.has(namespace)) return true
-  return providers.declared.has(namespace)
 }

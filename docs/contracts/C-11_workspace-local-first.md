@@ -125,22 +125,29 @@ Monitor의 프로젝트 단위 Run lease가 무너진다.
 **불변식 ⑧** — 저장 내용에 절대 경로를 넣지 않는다(현행 실측 0건 유지). locator는 index에만
 산다 — state가 경로를 알면 이동이 곧 오염이 된다.
 
-**불변식 ⑨** — 역색인 쓰기는 원자적이다(tmp+rename). 반쯤 쓰인 index를 guard가 읽으면
+**불변식 ⑨** — 역색인 쓰기는 원자적이다(tmp+rename). 반쯤 쓰인 index를 hook 이 읽으면
 판정이 흔들린다.
 
 ### 3.1 Reverse Index의 소비자 제약
 
-역색인의 가장 까다로운 독자는 **Claude guard hook**이다. hook은 어떤 프로젝트에서든 도는
-무의존 단일 파일이며(외부 import 0), 매 Bash 호출마다 실행된다.
+역색인의 가장 까다로운 독자는 **Claude SessionStart hook**이다(0.8.x 까지는 PreToolUse guard
+hook 도 같은 독자였다). hook은 어떤 프로젝트에서든 도는 무의존 단일 파일이며(외부 import 0),
+세션이 열릴 때마다 실행된다.
 
 **불변식 ⑩** — 역색인 포맷은 `readFileSync` 한 번 + `JSON.parse` 한 번으로 해석 가능해야
 한다. 이 제약이 포맷을 정한다 — 데이터베이스도, 다단 조회도 두지 않는다.
 
 ---
 
-## 4. Guard — 조건부 fail-closed
+## 4. Guard — 조건부 fail-closed (superseded — 0.9.0)
 
-현재 guard는 `.asc`를 못 찾으면 통과한다(`exit 0`). 그것은 "이 프로젝트는 ASC 소관이 아니다"의
+> **0.9.0** — raw write 를 fail-closed 로 막던 guard 는 폐기됐다. "protected operation" 은 이제
+> ASC 가 스스로 수행하는 것(Executor 의 관리 실행, monitor 의 원격 읽기)만이고, 그것들은 Executor
+> 와 freeze 정책 안에서 fail-closed 다. 불변식 ⑪(무관한 host 세션을 전역으로 막지 않는다)은
+> 살아 있다 — hook 이 하나도 없으니 자명하게 지켜진다. 불변식 ⑫는 SessionStart hook 에 그대로
+> 적용된다. 아래 본문은 이력이다.
+
+0.8.x 의 guard는 `.asc`를 못 찾으면 통과한다(`exit 0`). 그것은 "이 프로젝트는 ASC 소관이 아니다"의
 신호였고, repo-local 전제에서는 옳았다. storage가 사용자 소유로 옮겨가면 그 신호가 무의미해진다.
 
 ```text
@@ -165,7 +172,7 @@ grant-required action
 **불변식 ⑪** — ASC와 무관한 일반 host 세션까지 전역으로 차단하지 않는다.
 안전을 이유로 남의 도구를 망가뜨리지 않는다(`Host belongs to the user`).
 
-**불변식 ⑫** — guard는 생성 시점에 문자열로 굳는다. 변경 시 재설치가 필요하다는 사실을
+**불변식 ⑫** — hook 은 생성 시점에 문자열로 굳는다. 변경 시 재설치가 필요하다는 사실을
 사용자에게 알린다 — manifest digest 비교로는 source↔installed drift를 볼 수 없다(L-5).
 
 ---

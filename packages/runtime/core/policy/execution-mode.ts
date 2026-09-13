@@ -15,13 +15,17 @@ import { z } from 'zod'
 import type { ScopedStore } from '../../ports/state-store.ts'
 
 /**
- * MANUAL  ASC 가 작업·판단·기록을 관리하지만 외부 side effect 를 강제 라우팅하지 않는다.
- *         사람과 Host 가 실행한다. Guard 는 아무것도 hard-block 하지 않는다.
- * AUTO    ASC-managed Agent 가 자율 실행하고, 외부 write 는 승인된 실행 경로로만 나간다.
- *         raw 외부 write 는 Guard 가 막는다.
+ * 실행 모드는 한 가지를 묻는다 — **승인된 외부 행위를 누가 수행하는가.**
+ *
+ * MANUAL  사람이 셸에서 직접 수행한다. ASC 는 일·결정·검수·감사를 관리하고 실행에는
+ *         관여하지 않는다.
+ * AUTO    ASC 의 관리 실행기(`asc grant run`)가 자율 Agent 를 대신해 수행한다. 실행기는
+ *         되돌려 읽을 수 없는 행위를 내보내지 않는다.
  *
  * **어느 쪽도 HITL 을 바꾸지 않는다.** AUTO 가 사람의 결정을 대신 승인하지 않고,
  * MANUAL 이 승인을 받은 것으로 만들지도 않는다 (H-03 · H-04).
+ * **어느 쪽도 셸을 격리하지 않는다.** 같은 OS 사용자가 셸에서 직접 치는 raw 명령은 ASC
+ * 경계 밖이다 — 0.9.0 에서 그 경계를 가장하던 hook 을 걷어냈다.
  */
 export const ExecutionMode = z.enum(['MANUAL', 'AUTO'])
 export type ExecutionMode = z.infer<typeof ExecutionMode>
@@ -59,8 +63,9 @@ export const ExecutionModeRecord = z.object({
   /**
    * physical Run id → 그 Run 만의 답. 없으면 위의 workspace 값이 답이다.
    *
-   * 키가 Run id 인 이유: guard 가 실제로 손에 쥐는 값이 그것뿐이다. 논리 세션으로 키를
-   * 잡으면 hook 이 결합을 한 번 더 뒤져야 하고, 결합이 없는 Run 은 자기 답을 가질 수 없다.
+   * 키가 Run id 인 이유: Host 가 보고하는 값(`observedRunId`)이 그것이고, `asc grant run` 과
+   * `asc work publish` 가 그 값으로 이 Run 의 답을 찾는다. 논리 세션으로 키를 잡으면 결합이
+   * 없는 Run 은 자기 답을 가질 수 없다.
    */
   runs: z.record(z.string(), ExecutionModeForRun).optional(),
 })
@@ -105,11 +110,12 @@ export type ExecutionModeState = {
 }
 
 /**
- * 이 상태에서 밖으로 나가는 raw 쓰기를 강제 경로로 돌릴 것인가.
+ * 이 Run 의 실행을 관리 실행기가 맡는가.
  *
  * ```text
  * ENFORCE  AUTO 이거나, 기록을 읽지 못했다 (모르는 것을 푸는 쪽으로 기울지 않는다)
- * ADVISE   MANUAL 이거나, 아무도 고르지 않았다
+ *          — 실행기는 되돌려 읽을 수 없는 행위를 거절한다
+ * ADVISE   MANUAL 이거나, 아무도 고르지 않았다 — 실행은 사람의 것이고 그 판단도 사람의 것이다
  * ```
  *
  * **ENFORCE 는 AUTO 라는 뜻이 아니다.** 읽지 못한 자리는 AUTO 라고 주장하지 않으면서도
@@ -123,8 +129,8 @@ export function enforcementOf(state: ExecutionModeState): 'ENFORCE' | 'ADVISE' {
 export function modeLine(state: ExecutionModeState): string {
   if (state.degraded) {
     return state.degraded === 'MODE_STATE_INVALID'
-      ? 'Execution Mode: unreadable — the stored record is not valid. Raw external writes stay blocked until it is fixed.'
-      : 'Execution Mode: unreadable — the stored record could not be read. Raw external writes stay blocked until it is fixed.'
+      ? 'Execution Mode: unreadable — the stored record is not valid. The managed executor treats this run as AUTO (read-back required) until it is fixed.'
+      : 'Execution Mode: unreadable — the stored record could not be read. The managed executor treats this run as AUTO (read-back required) until it is fixed.'
   }
   const scope =
     state.decidedFor === 'run'
@@ -143,8 +149,8 @@ export function modeLine(state: ExecutionModeState): string {
  * 결과로만 존재할 수 있고(E-01), 기록이 없다는 사실은 그 둘 중 어느 것도 증명하지 않는다.
  * 기록 없이 AUTO 로 읽으면 readiness 를 한 번도 거치지 않은 enforcement 가 켜진다.
  *
- * 그래서 기록이 없는 workspace 는 hard enforcement 없이 돈다. ASC 가 꺼지는 것이 아니다 —
- * 일 관리·결정권·검수·감사는 그대로 살아 있고, Guard 만 강제하지 않는다 (§F).
+ * 그래서 기록이 없는 workspace 는 사람이 실행하는 자리로 돈다. ASC 가 꺼지는 것이 아니다 —
+ * 일 관리·결정권·검수·감사는 그대로 살아 있고, 관리 실행기의 read-back 강제만 서지 않는다 (§F).
  */
 export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'MANUAL'
 
@@ -266,7 +272,7 @@ export async function clearExecutionModeForRun(scope: ScopedStore, runId: string
 }
 
 /**
- * AUTO 를 켤 때 물어야 하는 것 — **셋이다.**
+ * AUTO 를 켤 때 물어야 하는 것 — **둘이다.**
  *
  * 한때 아홉이었다. binding·provider·review·verify·controller 까지 activation 시점에
  * 물었는데, 그것들은 행위마다 달라지는 사실이다: 어느 저장소로 가는지, 그 행위를 이
@@ -274,15 +280,17 @@ export async function clearExecutionModeForRun(scope: ScopedStore, runId: string
  * 그것을 다시 묻는다. 같은 사실을 두 번 판정하면 둘이 갈릴 자리를 만드는 것이고,
  * "AUTO 를 켜려면 미래의 모든 행위가 지금 가능해야 한다" 는 과장이 된다.
  *
- * 남은 셋은 activation 시점에만 답할 수 있는 것들이다:
+ * 0.8.x 에는 셋째 축(guard — hook 이 설치됐는가)이 있었다. 0.9.0 에서 hook 이 은퇴하면서
+ * 그 질문도 사라졌다 — AUTO 는 무엇을 막는 mode 가 아니라 누가 실행하는가의 답이다.
+ *
+ * 남은 둘은 activation 시점에만 답할 수 있는 것들이다:
  *
  * ```text
- * executor       관리된 쓰기 경로가 조립되는가 — 없으면 AUTO 는 막기만 하는 mode 다
- * guard          막을 것을 실제로 막을 수 있는가 — 없으면 AUTO 는 이름뿐이다
- * control-plane  Host 안에서 ASC 명령이 도는가 — 없으면 나갈 문이 없다 (0.7.1 실측)
+ * executor       관리된 쓰기 경로가 조립되는가 — 없으면 실행기가 맡을 것이 없다
+ * control-plane  Host 안에서 ASC 명령이 프롬프트 없이 도는가 — 무인 Run 은 프롬프트에 답하지 못한다
  * ```
  */
-export const READINESS_AXES = ['executor', 'guard', 'control-plane'] as const
+export const READINESS_AXES = ['executor', 'control-plane'] as const
 export type ReadinessAxisName = (typeof READINESS_AXES)[number]
 
 /**

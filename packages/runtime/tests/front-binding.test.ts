@@ -189,19 +189,18 @@ describe('설치 — 사람의 host 설정을 보존한다 (C-03 §5.1)', () => 
         (e.hooks ?? []).filter((h) => h._asc !== undefined),
       )
       assert.equal(ours.length, 1)
-      const guards = (settings.hooks?.PreToolUse ?? []).flatMap((e) =>
-        (e.hooks ?? []).filter((h) => h._asc !== undefined),
-      )
-      assert.equal(guards.length, 1)
+      // 0.9.0 — PreToolUse 에는 우리 것이 없다
+      assert.equal(settings.hooks?.PreToolUse, undefined)
     } finally {
       await rm(p.dir, { recursive: true, force: true })
     }
   })
 
-  it('표식 없는 옛 설치본을 입양한다 — 재설치가 guard를 두 번 등록하지 않는다', async () => {
+  it('표식 없는 옛 guard 등록은 우리 것이다 — 재설치가 걷어낸다 (0.9.0)', async () => {
     const p = await paths()
     try {
       // 표식(_asc)을 붙이기 전 버전이 남긴 등록. 실제 사용 기계에서 이 상태를 봤다.
+      // 0.8.x 까지는 입양했고, 0.9.0 부터는 guard 자체가 은퇴했으므로 걷는다.
       await mkdir(p.claudeHome, { recursive: true })
       await writeFile(
         join(p.claudeHome, 'settings.json'),
@@ -218,12 +217,11 @@ describe('설치 — 사람의 host 설정을 보존한다 (C-03 §5.1)', () => 
         'utf8',
       )
 
-      await install(p)
+      const outcome = await install(p)
+      assert.ok(outcome.removed.some((line) => /PreToolUse hook entry retired/.test(line)))
       const settings = await settingsOf(p)
-      const preToolUse = settings.hooks?.PreToolUse ?? []
-      const guards = preToolUse.flatMap((e) => (e.hooks ?? []).filter((h) => h.command?.includes('guard-hook')))
-      assert.equal(guards.length, 1, '옛 항목을 입양했으므로 하나뿐이다')
-      assert.equal(guards[0]!._asc, 'asc-external-write-guard', '이제 우리 것으로 표시된다')
+      assert.equal(settings.hooks?.PreToolUse, undefined, '우리 옛 등록만 있던 이벤트는 키째 걷힌다')
+      assert.equal((await verifyInstall(p)).status, 'INSTALLED_CURRENT')
     } finally {
       await rm(p.dir, { recursive: true, force: true })
     }
@@ -252,9 +250,7 @@ describe('설치 — 사람의 host 설정을 보존한다 (C-03 §5.1)', () => 
       const withoutEntry: InstallPaths = { claudeHome: p.claudeHome }
       await install(withoutEntry)
       const settings = await settingsOf(withoutEntry)
-      assert.equal(settings.hooks?.SessionStart, undefined)
-      // guard 는 그대로 선다 — 안전 층은 entry 와 무관하다
-      assert.equal((settings.hooks?.PreToolUse ?? []).length, 1)
+      assert.equal(settings.hooks, undefined, 'entry 없는 설치는 hook 을 하나도 심지 않는다')
       assert.equal((await verifyInstall(withoutEntry)).status, 'INSTALLED_CURRENT')
     } finally {
       await rm(p.dir, { recursive: true, force: true })

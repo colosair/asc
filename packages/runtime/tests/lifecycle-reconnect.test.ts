@@ -216,9 +216,9 @@ describe('C-4 — 관측 상태를 한 낱말로 말한다', () => {
   })
 })
 
-describe('C-8 — 결합이 가리키는 것과 Guard 가 찾는 것이 같다', () => {
-  // 실측: --physical windows-worker-57 로 묶인 결합을 guard 는 영영 찾지 못했다.
-  // guard 는 hook payload 의 session_id 로만 찾는다.
+describe('C-8 — 결합이 가리키는 것과 Host 가 보고하는 Run id 가 같다', () => {
+  // 실측: --physical windows-worker-57 로 묶인 결합은 어느 조회도 영영 찾지 못했다.
+  // Run 은 Host 가 준 id(CLAUDE_CODE_SESSION_ID) 하나로만 자기 결합을 찾는다.
   const RUN = 'f44a9a81-b331-499a-8264-9a269f5767d7'
   const OTHER = '11111111-2222-4333-8444-555555555555'
 

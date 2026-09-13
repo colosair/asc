@@ -8,7 +8,6 @@ import { describe, it } from 'node:test'
 
 import type { BindingPlan, Capability, ResolvedBinding } from '../core/binding/types.ts'
 import { undeclaredBindings, workItemGap, workItemRoles } from '../composition/runtime.ts'
-import { addressableHere, MANAGED_EXTERNAL_ACTIONS } from '../ports/scm.ts'
 import { composeBindings } from '../composition/registry.ts'
 
 const CODE: readonly Capability[] = [
@@ -102,42 +101,6 @@ describe('C-1 — 작업 항목 통로가 비어 있다는 사실과 그 이유�
     assert.equal(gap.candidates[0]?.state, 'UNCONFIGURED')
   })
 })
-
-describe('C-10 — dead-end 는 이 workspace 가 실제로 쓰는 것만 센다', () => {
-  const known = new Set(['gitlab', 'github', 'jam'])
-
-  it('선언하지 않은 provider 의 행위는 세지 않는다', () => {
-    assert.equal(
-      addressableHere('github.issue_comment.create', { declared: new Set(['gitlab']), known }),
-      false,
-      'GitLab 하나만 선언한 저장소가 영영 하지 않을 행위다',
-    )
-  })
-
-  it('선언한 provider 의 행위는 센다', () => {
-    assert.equal(addressableHere('gitlab.mr.create', { declared: new Set(['gitlab']), known }), true)
-  })
-
-  it('provider 중립 행위는 언제나 센다', () => {
-    for (const action of ['git.push', 'coordination.publish']) {
-      assert.equal(addressableHere(action, { declared: new Set(['gitlab']), known }), true)
-    }
-  })
-
-  it('scope 를 모르면 좁히지 않는다 — 0.8.3 의 계산을 그대로 둔다', () => {
-    for (const action of MANAGED_EXTERNAL_ACTIONS) assert.equal(addressableHere(action), true)
-  })
-
-  it('provider hardcode 로 되돌아가지 않는다', async () => {
-    const { readFile } = await import('node:fs/promises')
-    const source = await readFile(new URL('../ports/scm.ts', import.meta.url), 'utf8')
-    const predicate = source.slice(source.indexOf('export function addressableHere'))
-    for (const name of ['gitlab', 'github', 'jam']) {
-      assert.doesNotMatch(predicate, new RegExp(`'${name}'`), `${name} 이 판정 안에 박혀 있다`)
-    }
-  })
-})
-
 describe('조립은 값을 치를 이유가 있을 때만 밖에 묻는다 (0.8.4)', () => {
   // 실측: 도구 하나의 "설치돼 있는가" 를 묻는 데 외부 프로세스가 떴고 한 번에 9초였다.
   // 그것을 adapter 마다 무조건 물어서, 그 도구와 아무 상관없는 저장소의 모든 명령이

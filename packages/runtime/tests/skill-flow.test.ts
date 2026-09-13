@@ -75,9 +75,50 @@ describe('권한 경계와 금지된 지름길', () => {
     assert.match(skill.body, /git push/, '무엇이 막히는지 이름을 댄다')
   })
 
-  it('막힌 것을 우회하라고 말하지 않는다', () => {
-    // guard 에 걸리는 것은 풀 문제가 아니라 계약으로 가라는 신호다.
-    assert.match(skill.body, /being stopped is not a puzzle to solve/)
+  it('적힌 명령에 deprecated alias 가 없다 — skill 이 옛 길을 정상 경로처럼 가르치지 않는다', () => {
+    assert.doesNotMatch(skill.body, /asc proceed\b/)
+    assert.doesNotMatch(skill.body, /asc progress show\b/)
+  })
+
+  // 0.9.0 — 실행 모드는 "누가 승인된 행위를 수행하는가" 하나를 답한다. skill 이 그 뜻을
+  // 두 모드에서 서로 모순되게 적으면 Agent 는 어느 쪽에서도 움직일 수 없다. 여기서는
+  // 절대 문장을 요구하지 않고 **두 모드의 계약이 서로 어긋나지 않는지** 를 본다.
+  describe('AUTO 와 MANUAL 의 계약이 서로 모순되지 않는다', () => {
+    const paragraphs = skill.body.split(/\n\s*\n/)
+    const auto = paragraphs.filter((p) => /^\*\*In AUTO\*\*/.test(p.trim()))
+    const manual = paragraphs.filter((p) => /^\*\*In MANUAL\*\*/.test(p.trim()))
+
+    it('두 모드가 각각 한 문단으로 적혀 있다', () => {
+      assert.equal(auto.length, 1)
+      assert.equal(manual.length, 1)
+    })
+
+    it('AUTO 문단은 관리 경로(publish → grant run)를 가리킨다', () => {
+      assert.match(auto[0]!, /asc work publish/)
+      assert.match(auto[0]!, /asc grant run/)
+    })
+
+    it('MANUAL 문단은 셸을 가로막지 않는다고 말하고, 직접 수행을 열어 둔다', () => {
+      assert.match(manual[0]!, /does not intercept or sandbox the shell/)
+      assert.match(manual[0]!, /may perform an external mutation directly/)
+    })
+
+    it('MANUAL 문단이 raw 쓰기를 절대 금지하지 않는다 — skill 이 guard 를 글로 재생성하지 않는다', () => {
+      assert.doesNotMatch(manual[0]!, /\b(never|must not)\b[^.]*\bgit push\b/i)
+      assert.doesNotMatch(manual[0]!, /\bgit push\b[^.]*\b(never|must not)\b/i)
+    })
+
+    it('MANUAL 문단이 Agent 에게 자체 거절을 만들지 말라고 적는다', () => {
+      assert.match(manual[0]!, /Do not invent a\s+refusal of your own/)
+    })
+
+    it('두 문단이 같은 행위에 상반된 절대 지시를 내리지 않는다', () => {
+      // AUTO 가 "raw 로 우회하지 말라" 고 하는 것과 MANUAL 이 "직접 해도 된다" 고 하는 것은
+      // 같은 행위에 대한 상반된 지시가 아니다 — 모드가 다르다. 모순은 한쪽이 "어느 모드에서도
+      // (either mode / in both modes) 안 된다" 고 적는 순간 생긴다.
+      assert.doesNotMatch(auto[0]!, /either mode|both modes|in any mode/i)
+      assert.doesNotMatch(manual[0]!, /either mode|both modes|in any mode/i)
+    })
   })
 
   it('발급과 선택은 사람의 자리라고 적는다', () => {

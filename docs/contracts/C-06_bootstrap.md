@@ -195,5 +195,5 @@ package.json (C-06 작성 시점):  "private": true · bin 없음 · files 없�
 · 자동 업데이트 / 버전 호환 검사 (ascCompatibility)
 · .asc runtime의 머신 간 이동 (P1 관찰 ⑪ — local state 계약 유지 중)
 · host 자동 설치 (지금은 감지·안내까지. `host claude install`은 사용자가 부른다)
-· probe의 guardInstalled 해석 (P1 관찰 ⑤ — 계약 해석 결정 선행)
+· (0.9.0 에서 닫힘) probe의 guardInstalled 해석 — probe 와 guard 가 함께 폐기됐다
 ```

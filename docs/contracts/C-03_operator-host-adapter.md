@@ -213,7 +213,12 @@ uninstall           → ASC가 설치했다고 검증된 파일만 제거 (manif
 제거 후             → 프로젝트 정상 + 무관한 Claude 설정 손상 0
 ```
 
-### 5.2 Capability Probe
+> **Superseded in 0.9.0 (§5.2 · §5.3)** — capability probe 와 external-write guard 는 0.9.0 에서
+> 폐기됐다. 관리 실행의 경계는 Grant → Review → Executor → Verify 가 지고, ASC 는 같은 OS 사용자의
+> 셸을 격리한다고 주장하지 않는다. 아래 두 절은 이력으로 남긴다. 현재 계약은
+> `docs/releases/v0.9.0.md` 와 `docs/design/current-operating-model.md` §5·§7 이다.
+
+### 5.2 Capability Probe (superseded — 0.9.0)
 
 버전표·OS표 하드코딩 금지 — 공식 Docs와 CHANGELOG가 일시적으로 다를 수 있으므로
 **실제 probe가 우선**한다. 대상 13종:
@@ -235,7 +240,7 @@ optional 부재       → degrade (기록 남김)
 특히 **external-write enforcement가 불가능하면 ASC-managed autonomous background
 worker 실행을 허용하지 않는다.**
 
-### 5.3 External Write Guard — Gate Blocker
+### 5.3 External Write Guard — Gate Blocker (superseded — 0.9.0)
 
 Claude background worker는 환경에 따라 commit·branch push·draft PR을 기본 수행할
 수 있다. ASC-managed worker의 외부 write는 기존 계약 경로만 허용한다:

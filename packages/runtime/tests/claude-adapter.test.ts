@@ -9,15 +9,6 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 
 import { claudeBindings, CLAUDE_PROVIDER, CLAUDE_SCOPE } from '../adapters/claude-code/binding.ts'
-import { readHeartbeat } from '../adapters/claude-code/observer.ts'
-import {
-  FORBIDDEN_COMMAND_PATTERNS,
-  hookScript,
-  isForbiddenCommand,
-  workerContract,
-  workerSettings,
-  PERMISSION_DENY_RULES,
-} from '../adapters/claude-code/guard.ts'
 import {
   install,
   installReportLines,
@@ -27,13 +18,6 @@ import {
   verifyInstalled,
   type InstallPaths,
 } from '../adapters/claude-code/install.ts'
-import {
-  applyHostReport,
-  assessReadiness,
-  probe,
-  CAPABILITIES,
-  type CommandRunner,
-} from '../adapters/claude-code/probe.ts'
 import { inboxSkillText, reviewSkillText, skillBundle, skillText } from '../adapters/claude-code/skill.ts'
 import { MarkdownStateStore } from '../adapters/markdown/state-store.ts'
 import { writeExecutionMode } from '../core/policy/execution-mode.ts'
@@ -66,382 +50,31 @@ describe('Core 독립성 — Claude 문자열 격리', () => {
     }
   })
 })
-
-describe('External Write Guard — 규칙 정본 (C-03 §5.3)', () => {
-  it('차단 대상이 전부 걸린다', () => {
-    for (const command of [
-      'git push origin feature',
-      'git push --force-with-lease',
-      'cd repo && git -c user.name=x push',
-      'gh pr create --title x',
-      'gh pr merge 42',
-      'gh pr comment 42 --body hi',
-      'gh issue create --title x',
-      'gh issue comment 19 --body x',
-      'gh api repos/o/r/issues -f title=x',
-      'gh api /repos/o/r/pulls/1/comments --method POST',
-      'glab mr create',
-      'glab api projects',
-    ]) {
-      assert.equal(isForbiddenCommand(command).forbidden, true, command)
-    }
-  })
-
-  it('정상 작업 명령은 걸리지 않는다', () => {
-    for (const command of [
-      'git status',
-      'git commit -m "local work"', // commit은 local write — Session Contract의 몫
-      'git log --oneline',
-      'gh pr list',
-      'gh pr view 42',
-      'gh issue view 19',
-      'npm test',
-      'node cli/asc.ts grant run G-0001', // ASC 승인 경로는 Bash 밖(fetch)이지만 명령 자체도 무해
-    ]) {
-      assert.equal(isForbiddenCommand(command).forbidden, false, command)
-    }
-  })
-
-  it('permission deny 규칙(2층)이 패턴 정본(3층)과 같은 대상을 겨눈다', () => {
-    for (const rule of ['Bash(git push:*)', 'Bash(gh pr create:*)', 'Bash(gh api:*)', 'Bash(glab mr create:*)']) {
-      assert.ok(PERMISSION_DENY_RULES.includes(rule), rule)
-    }
-    assert.ok(FORBIDDEN_COMMAND_PATTERNS.length >= 6)
-  })
-})
-
-describe('guard hook(3층) — 실행 직전 차단', () => {
-  /** hook 스크립트를 실제 프로세스로 돌려 exit code를 본다. */
-  async function invokeHook(input: Record<string, unknown>): Promise<{ code: number; stderr: string }> {
-    const dir = await tempDir('asc-hook-')
-    const script = join(dir, 'guard-hook.mjs')
-    await writeFile(script, hookScript(), 'utf8')
-    try {
-      // stdin을 닫아 줘야 hook의 readFileSync(0)가 끝난다 — execFileSync의 input이 그 역할
-      execFileSync('node', [script], { input: JSON.stringify(input), timeout: 10_000 })
-      return { code: 0, stderr: '' }
-    } catch (error) {
-      const failure = error as { status?: number; stderr?: Buffer }
-      return { code: failure.status ?? 1, stderr: failure.stderr?.toString() ?? '' }
-    }
-  }
-
-  /**
-   * 붙은 프로젝트 하나. **mode 를 명시한다** — 0.8.0 보정에서 기록 없는 workspace 는
-   * AUTO 가 아니게 됐다(§B). 강제를 검사하려면 그 강제를 켠 상태를 만들어야 한다.
-   */
-  async function attachedProject(
-    mode: 'MANUAL' | 'AUTO' = 'AUTO',
-  ): Promise<{ project: string; store: MarkdownStateStore }> {
-    const project = await tempDir('asc-hookproj-')
-    const store = await MarkdownStateStore.open(join(project, '.asc'))
-    await writeExecutionMode(store.scope('policy'), mode, 'controller-a', NOW)
-    return { project, store }
-  }
-
-  it('managed 세션의 git push는 exit 2로 막힌다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-
-    const outcome = await invokeHook(
-      { tool_name: 'Bash', tool_input: { command: 'git push origin main' }, session_id: 'claude-abc', cwd: project },
-    )
-    assert.equal(outcome.code, 2)
-    assert.match(outcome.stderr, /ASC guard/)
-    assert.match(outcome.stderr, /Execution Grant/)
-  })
-
-  it('같은 프로젝트라도 사람 세션(미등록)은 통과한다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-
-    // 0.7.0 에서 이 자리의 판정이 바뀌었다. 예전에는 통과였다 — "사람 세션의 git push 까지
-    // 막으면 guard 가 아니라 방해다" 가 그 근거였다. 그런데 그 통과가 **결합이 사라졌을 때도**
-    // 열려 있었고, 그러면 관리 대상 세션의 외부 write 가 조용히 나간다. 이제 ASC 가 맡은
-    // workspace 에서는 밖으로 나가는 쓰기가 논리 세션 밖에서 성립하지 않는다.
-    const outcome = await invokeHook(
-      { tool_name: 'Bash', tool_input: { command: 'git push origin main' }, session_id: 'human-session', cwd: project },
-    )
-    assert.equal(outcome.code, 2)
-    assert.match(outcome.stderr, /논리 세션 밖에서 나갈 수 없다/)
-    assert.match(outcome.stderr, /asc work start/, '다음 걸음을 그대로 준다')
-  })
-
-  it('미등록 세션이라도 읽기는 막지 않는다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-    for (const command of ['git status', 'git log --oneline -5', 'git fetch origin', 'npm test']) {
-      const outcome = await invokeHook(
-        { tool_name: 'Bash', tool_input: { command }, session_id: 'human-session', cwd: project },
-      )
-      assert.equal(outcome.code, 0, command)
-    }
-  })
-
-  // 0.7.0 — 따옴표 안은 인자이지 실행이 아니다 (D-04).
-  //
-  // 예전에는 명령 문자열 전체에 정규식을 걸어 `git commit -m "docs: push 관련"` 이
-  // `git push` 로 읽혔다. hook 이 받는 것이 문자열 하나뿐이라는 플랫폼 제약은 그대로이고,
-  // 인용부호와 제어 연산자를 구분하는 데까지가 이 층의 몫이다.
-  it('실행되지 않는 문장 안의 낱말을 명령으로 읽지 않는다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-    const passes = [
-      'git commit -m "push later"',
-      'echo "git push later"',
-      'asc progress report --next "branch push 예정"',
-      "git commit -m 'chore: gh api 정리'",
-    ]
-    for (const command of passes) {
-      const outcome = await invokeHook(
-        { tool_name: 'Bash', tool_input: { command }, session_id: 'claude-abc', cwd: project },
-      )
-      assert.equal(outcome.code, 0, command)
-    }
-  })
-
-  it('조각으로 이어 붙여도, 문자열로 넘겨도 밖으로 나가는 쓰기는 막는다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-    const blocks = [
-      'git push',
-      'git -C repo push',
-      'git commit -m "x" && git push',
-      'git add -A\ngit push origin main',
-      "sh -c 'git push'",
-      "eval 'git push'",
-      'glab mr create',
-    ]
-    for (const command of blocks) {
-      const outcome = await invokeHook(
-        { tool_name: 'Bash', tool_input: { command }, session_id: 'claude-abc', cwd: project },
-      )
-      assert.equal(outcome.code, 2, command)
-    }
-  })
-
-  // 0.7.0 / D-03 — 놓은 것이 guard 에 닿는다.
-  //
-  // 이 연결이 없어서 조사에서 못 잡았다. binding 단위 검사와 guard 단위 검사는 각각
-  // 있었는데, **release 뒤에 guard 가 무엇이라 답하는지**를 보는 것이 없었다.
-  it('release 하면 그 Run 은 더 이상 관리 대상이 아니다', async () => {
-    const { project, store } = await attachedProject()
-    const bindings = claudeBindings(store)
-    await bindings.claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-
-    const blocked = await invokeHook({
-      tool_name: 'Bash',
-      tool_input: { command: 'git push origin main' },
-      session_id: 'claude-abc',
-      cwd: project,
-    })
-    assert.equal(blocked.code, 2, '계약 안에서는 승인 경로로만 나간다')
-    assert.match(blocked.stderr, /AUTO 로 관리되는 이 세션에서 막힌다/)
-    // #74 — 어느 workspace 기준으로 막았는지 말한다. 그 기준은 세션의 작업 디렉터리이지
-    // 명령이 가리키는 대상이 아니고, 화면이 그 차이를 숨기면 남의 저장소로 나가는 쓰기에
-    // 이 workspace 의 관리 경로가 정답인 것처럼 제시된다.
-    assert.match(blocked.stderr, /판정 기준 workspace/)
-    assert.match(blocked.stderr, /명령이 가리키는 대상이 아니다/)
-    assert.match(blocked.stderr, /asc mode manual --this-run/, '이 Run 만 내리는 출구를 준다')
-
-    assert.equal(await bindings.release('S-20260823-01', 'claude-abc'), true)
-
-    const after = await invokeHook({
-      tool_name: 'Bash',
-      tool_input: { command: 'git push origin main' },
-      session_id: 'claude-abc',
-      cwd: project,
-    })
-    // 계약 밖으로 나왔다. 그렇다고 열리지는 않는다 — ASC 가 맡은 자리이므로 여전히
-    // 막히되, 이유가 다르다: 관리 대상 세션의 금지가 아니라 세션 밖의 외부 write 다.
-    assert.equal(after.code, 2)
-    assert.match(after.stderr, /논리 세션 밖에서 나갈 수 없다/)
-    assert.doesNotMatch(after.stderr, /ASC-managed/, '놓은 계약의 이름으로 막지 않는다')
-  })
-
-  it('ASC 무관 프로젝트는 항상 통과한다', async () => {
-    const plain = await tempDir('asc-plain-')
-    const outcome = await invokeHook(
-      { tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: 'any', cwd: plain },
-    )
-    assert.equal(outcome.code, 0)
-  })
-
-  it('managed 세션이라도 무해한 명령은 통과한다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-    for (const command of ['npm test', 'git commit -m x', 'gh pr view 1']) {
-      const outcome = await invokeHook(
-        { tool_name: 'Bash', tool_input: { command }, session_id: 'claude-abc', cwd: project },
-      )
-      assert.equal(outcome.code, 0, command)
-    }
-  })
-
-  it('workerId로 등록된 subagent도 막힌다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      {
-        logicalSessionId: 'S-20260823-01',
-        provider: CLAUDE_PROVIDER,
-        physicalSessionId: 'claude-abc',
-        workerId: 'subagent-7',
-      },
-      NOW,
-    )
-    const outcome = await invokeHook(
-      { tool_name: 'Bash', tool_input: { command: 'gh pr create' }, session_id: 'subagent-7', cwd: project },
-    )
-    assert.equal(outcome.code, 2)
-  })
-
-  it('Bash 외 도구·깨진 입력은 판단하지 않는다', async () => {
-    const outcome = await invokeHook({ tool_name: 'Read', tool_input: { file_path: 'x' }, session_id: 'any' })
-    assert.equal(outcome.code, 0)
-  })
-
-  // ── Runtime Observer (B-18) — 같은 hook에 실리지만 safety와 책임이 다르다 ──
-
-  it('managed 세션의 활동은 heartbeat로 남고, binding 파일은 건드리지 않는다', async () => {
-    const { project, store } = await attachedProject()
-    const bindings = claudeBindings(store)
-    await bindings.claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-    const bindingFile = join(project, '.asc/adapters/claude-code/runtime-binding-S-20260823-01.json')
-    const before = await readFile(bindingFile, 'utf8')
-
-    const outcome = await invokeHook({
-      tool_name: 'Bash',
-      tool_input: { command: 'npm test' },
-      session_id: 'claude-abc',
-      cwd: project,
-    })
-
-    assert.equal(outcome.code, 0)
-    const beat = await readHeartbeat(store.scope(CLAUDE_SCOPE), 'S-20260823-01')
-    assert.ok(beat, 'heartbeat가 남지 않았다')
-    assert.equal(beat.physicalSessionId, 'claude-abc')
-    assert.equal(beat.lastTool, 'Bash')
-    // 안전 판정의 근거 파일은 관찰 때문에 흔들리면 안 된다
-    assert.equal(await readFile(bindingFile, 'utf8'), before, 'observer가 binding 파일을 고쳤다')
-  })
-
-  it('workerId로 매치된 subagent도 owner id로 기록된다 — heartbeat는 Logical Session당 하나다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      {
-        logicalSessionId: 'S-20260823-01',
-        provider: CLAUDE_PROVIDER,
-        physicalSessionId: 'claude-owner',
-        workerId: 'claude-worker',
-      },
-      NOW,
-    )
-
-    await invokeHook({
-      tool_name: 'Bash',
-      tool_input: { command: 'ls' },
-      session_id: 'claude-worker',
-      cwd: project,
-    })
-
-    const beat = await readHeartbeat(store.scope(CLAUDE_SCOPE), 'S-20260823-01')
-    assert.equal(beat?.physicalSessionId, 'claude-owner')
-    assert.equal(beat?.observedSessionId, 'claude-worker')
-  })
-
-  it('unmanaged 세션은 관찰도 남기지 않는다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-
-    await invokeHook({
-      tool_name: 'Bash',
-      tool_input: { command: 'ls' },
-      session_id: 'human-session',
-      cwd: project,
-    })
-
-    assert.equal(await readHeartbeat(store.scope(CLAUDE_SCOPE), 'S-20260823-01'), null)
-  })
-
-  it('관찰이 실패해도 차단은 그대로다 — telemetry가 safety를 흔들지 않는다', async () => {
-    const { project, store } = await attachedProject()
-    await claudeBindings(store).claim(
-      { logicalSessionId: 'S-20260823-01', provider: CLAUDE_PROVIDER, physicalSessionId: 'claude-abc' },
-      NOW,
-    )
-    // heartbeat 목적지를 디렉터리로 점유해 기록을 실패시킨다. 권한 모델에 기대지 않는 방식이라
-    // 어느 OS에서도 같게 실패한다 — 파일 자리에 디렉터리가 있으면 rename이 통하지 않는다.
-    await mkdir(join(project, '.asc/adapters/claude-code/heartbeat-S-20260823-01.json'), {
-      recursive: true,
-    })
-
-    const blocked = await invokeHook({
-      tool_name: 'Bash',
-      tool_input: { command: 'git push origin main' },
-      session_id: 'claude-abc',
-      cwd: project,
-    })
-    const allowed = await invokeHook({
-      tool_name: 'Bash',
-      tool_input: { command: 'npm test' },
-      session_id: 'claude-abc',
-      cwd: project,
-    })
-
-    assert.equal(blocked.code, 2, '관찰 실패가 차단을 무력화했다')
-    assert.match(blocked.stderr, /ASC guard/)
-    assert.equal(allowed.code, 0, '관찰 실패가 무해한 명령까지 막았다')
-    assert.equal(await readHeartbeat(store.scope(CLAUDE_SCOPE), 'S-20260823-01'), null)
-  })
-})
-
 describe('install / uninstall (C-03 §5.1)', () => {
+  // SessionStart hook 은 부를 CLI(entry)를 알 때만 심는다 — 설치 계약은 그 hook 으로 검증한다
+  const ENTRY = '/opt/asc/dist/cli/asc.js'
   async function freshPaths(): Promise<InstallPaths> {
-    return { claudeHome: await tempDir('asc-claude-home-') }
+    return { claudeHome: await tempDir('asc-claude-home-'), entry: ENTRY }
   }
 
   it('설치 → 검증 → 반복 설치는 idempotent', async () => {
     const paths = await freshPaths()
     const first = await install(paths, () => NOW)
     assert.ok(first.written.some((p) => p.includes('SKILL.md')))
-    assert.ok(first.written.some((p) => p.includes('guard-hook.mjs')))
+    assert.ok(first.written.some((p) => p.includes('front-hook.mjs')))
     assert.ok(first.written.some((p) => p.includes('settings.json')))
+    assert.deepEqual(first.removed, [])
     assert.equal(await verifyInstalled(paths), true)
 
     const second = await install(paths, () => NOW)
     assert.deepEqual(second.written, [])
     assert.deepEqual(second.skipped, [])
+    assert.deepEqual(second.removed, [])
 
-    // hook 항목이 중복 등록되지 않았다
+    // hook 항목이 중복 등록되지 않았고, PreToolUse 는 더 이상 심지 않는다 (0.9.0)
     const settings = JSON.parse(await readFile(join(paths.claudeHome, 'settings.json'), 'utf8'))
-    assert.equal(settings.hooks.PreToolUse.length, 1)
+    assert.equal(settings.hooks.SessionStart.length, 1)
+    assert.equal(settings.hooks.PreToolUse, undefined)
   })
 
   it('같은 경로의 사용자 파일은 덮지 않는다', async () => {
@@ -461,19 +94,27 @@ describe('install / uninstall (C-03 §5.1)', () => {
     await mkdir(paths.claudeHome, { recursive: true })
     await writeFile(
       join(paths.claudeHome, 'settings.json'),
-      JSON.stringify({ theme: 'dark', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] }] } }),
+      JSON.stringify({
+        theme: 'dark',
+        hooks: {
+          PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] }],
+          SessionStart: [{ hooks: [{ type: 'command', command: 'my-start-hook' }] }],
+        },
+      }),
       'utf8',
     )
     await install(paths, () => NOW)
 
     const outcome = await uninstall(paths)
     assert.ok(outcome.removed.some((p) => p.includes('SKILL.md')))
-    assert.ok(outcome.removed.some((p) => p.includes('guard-hook.mjs')))
+    assert.ok(outcome.removed.some((p) => p.includes('front-hook.mjs')))
 
     const settings = JSON.parse(await readFile(join(paths.claudeHome, 'settings.json'), 'utf8'))
     assert.equal(settings.theme, 'dark') // 무관 설정 보존
     assert.equal(settings.hooks.PreToolUse.length, 1) // 사용자 hook 보존
     assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, 'my-own-hook')
+    assert.equal(settings.hooks.SessionStart.length, 1)
+    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, 'my-start-hook')
     assert.equal(await verifyInstalled(paths), false)
   })
 
@@ -500,10 +141,10 @@ describe('install / uninstall (C-03 §5.1)', () => {
     assert.match(await readFile(skillPath, 'utf8'), /사용자 추가 규칙/)
   })
 
-  it('설치 파일이 변조되면 verify가 false다 — probe의 STOP 근거', async () => {
+  it('설치 파일이 변조되면 verify가 false다', async () => {
     const paths = await freshPaths()
     await install(paths, () => NOW)
-    await writeFile(join(paths.claudeHome, 'asc', 'guard-hook.mjs'), '// gutted\n', 'utf8')
+    await writeFile(join(paths.claudeHome, 'asc', 'front-hook.mjs'), '// gutted\n', 'utf8')
     assert.equal(await verifyInstalled(paths), false)
   })
 })
@@ -511,12 +152,13 @@ describe('install / uninstall (C-03 §5.1)', () => {
 // L-5 closure — 설치본이 지금 source보다 뒤처진 것(stale)과 사람이 고친 것(modified)은
 // 다른 사실이다. 예전 verify는 manifest digest만 봐서 전자를 아예 못 봤다.
 describe('설치 drift 판정 (L-5)', () => {
+  const ENTRY = '/opt/asc/dist/cli/asc.js'
   async function freshPaths(): Promise<InstallPaths> {
-    return { claudeHome: await tempDir('asc-drift-home-') }
+    return { claudeHome: await tempDir('asc-drift-home-'), entry: ENTRY }
   }
 
   const skillPathOf = (paths: InstallPaths) => join(paths.claudeHome, 'skills', 'asc', 'SKILL.md')
-  const hookPathOf = (paths: InstallPaths) => join(paths.claudeHome, 'asc', 'guard-hook.mjs')
+  const hookPathOf = (paths: InstallPaths) => join(paths.claudeHome, 'asc', 'front-hook.mjs')
   const manifestPathOf = (paths: InstallPaths) => join(paths.claudeHome, 'asc', 'install-manifest.json')
 
   /**
@@ -597,18 +239,18 @@ describe('설치 drift 판정 (L-5)', () => {
     await install(paths, () => NOW)
     const settingsPath = join(paths.claudeHome, 'settings.json')
     const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
-    settings.hooks.PreToolUse[0].hooks[0].command = 'node "/opt/old-asc/guard-hook.mjs"'
-    settings.hooks.PreToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] })
+    settings.hooks.SessionStart[0].hooks[0].command = 'node "/opt/old-asc/front-hook.mjs"'
+    settings.hooks.SessionStart.push({ hooks: [{ type: 'command', command: 'my-own-hook' }] })
     await writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
 
     assert.equal((await verifyInstall(paths)).status, 'INSTALLED_STALE')
 
     await install(paths, () => NOW)
     const fixed = JSON.parse(await readFile(settingsPath, 'utf8'))
-    assert.equal(fixed.hooks.PreToolUse.length, 2, 'hook 항목을 늘리지 않는다')
-    assert.match(fixed.hooks.PreToolUse[0].hooks[0].command, /guard-hook\.mjs/)
-    assert.doesNotMatch(fixed.hooks.PreToolUse[0].hooks[0].command, /old-asc/)
-    assert.equal(fixed.hooks.PreToolUse[1].hooks[0].command, 'my-own-hook', '남의 hook은 건드리지 않는다')
+    assert.equal(fixed.hooks.SessionStart.length, 2, 'hook 항목을 늘리지 않는다')
+    assert.match(fixed.hooks.SessionStart[0].hooks[0].command, /front-hook\.mjs/)
+    assert.doesNotMatch(fixed.hooks.SessionStart[0].hooks[0].command, /old-asc/)
+    assert.equal(fixed.hooks.SessionStart[1].hooks[0].command, 'my-own-hook', '남의 hook은 건드리지 않는다')
     assert.equal((await verifyInstall(paths)).status, 'INSTALLED_CURRENT')
   })
 
@@ -617,7 +259,7 @@ describe('설치 drift 판정 (L-5)', () => {
     const mine = join(paths.claudeHome, 'skills', 'my-skill', 'SKILL.md')
     await mkdir(join(paths.claudeHome, 'skills', 'my-skill'), { recursive: true })
     await writeFile(mine, '# 내 skill\n', 'utf8')
-    await installAsOlderVersion(paths, hookPathOf(paths), '// 옛 guard\n')
+    await installAsOlderVersion(paths, hookPathOf(paths), '// 옛 front hook\n')
 
     await install(paths, () => NOW)
     assert.equal(await readFile(mine, 'utf8'), '# 내 skill\n')
@@ -625,122 +267,161 @@ describe('설치 drift 판정 (L-5)', () => {
   })
 })
 
-describe('worker-settings — 2층 wiring', () => {
-  it('deny 규칙 정본이 전부 들어간다', () => {
-    const parsed = JSON.parse(workerSettings())
-    assert.deepEqual(parsed.permissions.deny, [...PERMISSION_DENY_RULES])
+// 0.9.0 — 0.8.x 가 심은 PreToolUse guard 는 더 이상 싣지 않는다. 새 버전이 안 심는 것으로는
+// 끝나지 않는다: 옛 파일과 settings 등록이 남아 있으면 그 hook 이 계속 돈다. install(=refresh
+// =update 의 마지막 걸음) 이 ASC 소유가 증명되는 것만 걷고, 사람이 고친 것은 남기고 말한다.
+describe('0.9.0 upgrade — the 0.8.x guard is retired', () => {
+  const ENTRY = '/opt/asc/dist/cli/asc.js'
+  const sha16 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
+  const OLD_GUARD = '// 0.8.5 external-write guard\n'
+  const OLD_FRONT = '// 0.8.5 front hook\n'
+
+  type Shape = { marked?: boolean; unmarked?: boolean; guardText?: string; userPreToolUse?: boolean }
+
+  /** 0.8.5 가 설치했다면 남았을 HOME. 파일·manifest digest·settings 등록을 그대로 재현한다. */
+  async function home085(shape: Shape = {}): Promise<{ paths: InstallPaths; guard: string; settingsPath: string }> {
+    const claudeHome = await tempDir('asc-085-home-')
+    const paths: InstallPaths = { claudeHome, entry: ENTRY }
+    const guard = join(claudeHome, 'asc', 'guard-hook.mjs')
+    const front = join(claudeHome, 'asc', 'front-hook.mjs')
+    const guardText = shape.guardText ?? OLD_GUARD
+    await mkdir(join(claudeHome, 'asc'), { recursive: true })
+    await writeFile(guard, guardText, 'utf8')
+    await writeFile(front, OLD_FRONT, 'utf8')
+    // skill 3종은 0.8.5 시점 내용 — 여기서는 지금 텍스트로 두고 manifest 에 그 digest 를 적는다
+    const files: Record<string, string> = { [guard]: sha16(OLD_GUARD), [front]: sha16(OLD_FRONT) }
+    for (const skill of locate(paths).skills) {
+      await mkdir(join(skill.path, '..'), { recursive: true })
+      await writeFile(skill.path, skill.text, 'utf8')
+      files[skill.path] = sha16(skill.text)
+    }
+    await writeFile(
+      join(claudeHome, 'asc', 'install-manifest.json'),
+      JSON.stringify(
+        {
+          files,
+          settingsHook: true,
+          installedAt: '2026-09-11T12:16:35.334Z',
+          permissionAllow: ['Bash(asc:*)'],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+    const preToolUse: unknown[] = []
+    if (shape.marked ?? true) {
+      preToolUse.push({
+        matcher: 'Bash',
+        hooks: [{ type: 'command', command: `node "${guard}"`, _asc: 'asc-external-write-guard' }],
+      })
+    }
+    if (shape.unmarked) {
+      preToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: `node "${guard}"` }] })
+    }
+    if (shape.userPreToolUse ?? true) {
+      preToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] })
+    }
+    const settingsPath = join(claudeHome, 'settings.json')
+    await writeFile(
+      settingsPath,
+      JSON.stringify(
+        {
+          permissions: { allow: ['Bash(ls:*)', 'Bash(asc:*)'] },
+          hooks: {
+            PreToolUse: preToolUse,
+            SessionStart: [
+              { hooks: [{ type: 'command', command: 'caveman-hook' }] },
+              { hooks: [{ type: 'command', command: `node "${front}"`, _asc: 'asc-front-binding' }] },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+    return { paths, guard, settingsPath }
+  }
+
+  const readSettings = async (path: string) => JSON.parse(await readFile(path, 'utf8'))
+  const exists = (path: string) => readFile(path, 'utf8').then(() => true, () => false)
+
+  it('손대지 않은 0.8.5 설치본은 STALE 이다 — 걷을 것이 남아 있다', async () => {
+    const { paths } = await home085()
+    assert.equal((await verifyInstall(paths)).status, 'INSTALLED_STALE')
   })
 
-  it('worker 전용이다 — user settings에 섞을 값이 아니라는 근거가 파일에 남는다', () => {
-    assert.match(workerSettings(), /ASC-managed worker 전용/)
-    assert.match(workerSettings(), /--settings/)
+  it('install 이 guard 파일·manifest 항목·PreToolUse 등록을 걷고, 사람의 것은 전부 남긴다', async () => {
+    const { paths, guard, settingsPath } = await home085()
+    const outcome = await install(paths, () => NOW)
+
+    assert.ok(outcome.removed.includes(guard), 'ASC 것으로 증명된 파일은 걷는다')
+    assert.ok(outcome.removed.some((p) => /PreToolUse hook entry retired/.test(p)))
+    assert.equal(await exists(guard), false)
+    const manifest = JSON.parse(await readFile(join(paths.claudeHome, 'asc', 'install-manifest.json'), 'utf8'))
+    assert.equal(manifest.files[guard], undefined)
+
+    const settings = await readSettings(settingsPath)
+    assert.deepEqual(settings.hooks.PreToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] }])
+    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, 'caveman-hook')
+    assert.match(settings.hooks.SessionStart[1].hooks[0].command, /front-hook\.mjs/)
+    assert.equal(settings.hooks.SessionStart.length, 2)
+    assert.deepEqual(settings.permissions.allow, ['Bash(ls:*)', 'Bash(asc:*)'], 'control-plane 허용은 그대로다')
+    assert.equal((await verifyInstall(paths)).status, 'INSTALLED_CURRENT')
+
+    const again = await install(paths, () => NOW)
+    assert.deepEqual([again.written, again.skipped, again.removed], [[], [], []], '두 번째 install 은 no-op')
+  })
+
+  it('표식 없이 우리 옛 스크립트를 가리키는 등록도 우리 것이다 — 같이 걷는다', async () => {
+    const { paths, settingsPath } = await home085({ marked: false, unmarked: true })
+    await install(paths, () => NOW)
+    const settings = await readSettings(settingsPath)
+    assert.deepEqual(settings.hooks.PreToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] }])
+    assert.equal((await verifyInstall(paths)).status, 'INSTALLED_CURRENT')
+  })
+
+  it('사람이 고친 guard 파일은 지우지 않고 말한다 — 등록은 걷고, --force 만 지운다', async () => {
+    const { paths, guard, settingsPath } = await home085({ guardText: '// I edited this\n' })
+    const outcome = await install(paths, () => NOW)
+
+    assert.equal(await exists(guard), true)
+    assert.ok(outcome.skipped.some((s) => s.path === guard && /no longer shipped/.test(s.reason)))
+    assert.equal((await readSettings(settingsPath)).hooks.PreToolUse.length, 1, '등록은 파일과 무관하게 걷는다')
+    // 파일이 남아 있어도 우리가 싣는 것은 전부 맞으므로 CURRENT 다 — 남은 파일은 uninstall 이 다시 말한다
+    assert.equal((await verifyInstall(paths)).status, 'INSTALLED_CURRENT')
+
+    const forced = await install(paths, () => NOW, { force: true })
+    assert.ok(forced.removed.includes(guard))
+    assert.equal(await exists(guard), false)
+
+    // uninstall 도 같은 원칙 — 고친 파일은 남기고 이유를 말한다
+    const other = await home085({ guardText: '// I edited this\n' })
+    await install(other.paths, () => NOW)
+    const un = await uninstall(other.paths)
+    assert.ok(un.kept.some((k) => k.path === other.guard && /cannot prove ASC owns it/.test(k.reason)))
+    assert.equal(await exists(other.guard), true)
+  })
+
+  it('우리 등록만 있던 PreToolUse 는 키째 사라진다', async () => {
+    const { paths, settingsPath } = await home085({ userPreToolUse: false })
+    await install(paths, () => NOW)
+    assert.equal((await readSettings(settingsPath)).hooks.PreToolUse, undefined)
+  })
+
+  it('uninstall 도 0.8.5 설치본을 통째로 걷는다 — 표식 있는 것, 없는 것, 파일', async () => {
+    const { paths, guard, settingsPath } = await home085({ marked: true, unmarked: true })
+    const outcome = await uninstall(paths)
+    assert.ok(outcome.removed.includes(guard))
+    assert.equal(await exists(guard), false)
+    const settings = await readSettings(settingsPath)
+    assert.deepEqual(settings.hooks.PreToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] }])
+    assert.deepEqual(settings.hooks.SessionStart, [{ hooks: [{ type: 'command', command: 'caveman-hook' }] }])
+    assert.deepEqual(settings.permissions.allow, ['Bash(ls:*)'])
   })
 })
-
-describe('capability probe (C-03 §5.2)', () => {
-  // CLI 실행 결과를 주입한다. 호스트에 claude가 깔렸는지로 판정이 달라지면 그건 계약 검증이
-  // 아니라 그 머신의 사정을 재는 것이다 — 두 경우를 각각 명시적으로 세운다.
-  const cliPresent: CommandRunner = async (_command, args) =>
-    args[0] === '--version' ? { ok: true, stdout: '2.1.233 (Claude Code)\n' } : { ok: true, stdout: '[]' }
-  const cliAbsent: CommandRunner = async () => ({ ok: false, stdout: '' })
-
-  it('guard 미설치면 external_write_guard=false → STOP', async () => {
-    const result = await probe({ guardInstalled: false, now: () => NOW, run: cliPresent })
-    assert.equal(result.capabilities.external_write_guard.available, false)
-    const readiness = assessReadiness(result)
-    assert.ok(!readiness.ok && readiness.reason === 'STOP')
-    assert.deepEqual(readiness.missing, ['external_write_guard'])
-  })
-
-  it('hook만 있고 worker-settings가 없으면 여전히 STOP — 2층도 enforcement다', async () => {
-    const result = await probe({
-      guardInstalled: true,
-      workerSettingsReady: false,
-      now: () => NOW,
-      run: cliPresent,
-    })
-    assert.equal(result.capabilities.external_write_guard.available, false)
-    assert.match(result.capabilities.external_write_guard.detail!, /worker-settings 미준비/)
-    const readiness = assessReadiness(result)
-    assert.ok(!readiness.ok && readiness.reason === 'STOP')
-  })
-
-  it('두 층이 다 서면 external_write_guard=true', async () => {
-    const result = await probe({
-      guardInstalled: true,
-      workerSettingsReady: true,
-      now: () => NOW,
-      run: cliPresent,
-    })
-    assert.equal(result.capabilities.external_write_guard.available, true)
-  })
-
-  it('CLI가 없으면 2층이 다 서 있어도 STOP — 실측하지 못한 것을 있다고 치지 않는다', async () => {
-    const result = await probe({
-      guardInstalled: true,
-      workerSettingsReady: true,
-      now: () => NOW,
-      run: cliAbsent,
-    })
-    assert.equal(result.claudeVersion, null)
-    assert.equal(result.capabilities.external_write_guard.available, false)
-    assert.equal(result.capabilities.external_write_guard.source, 'cli-probe')
-    const readiness = assessReadiness(result)
-    assert.ok(!readiness.ok && readiness.reason === 'STOP')
-    assert.deepEqual(readiness.missing, ['external_write_guard'])
-  })
-
-  it('기본 runner는 실제 CLI다 — 주입 슬롯이 실측을 대신하지 않는다', async () => {
-    const source = await readFile('adapters/claude-code/probe.ts', 'utf8')
-    assert.match(source, /input\.run \?\? tryRun/, '주입이 없으면 실제 CLI를 불러야 한다')
-    assert.match(source, /exec\('claude', \['--version'\]\)/, 'CLI 실측이 사라졌다')
-  })
-
-  it('runtime tool은 아는 척하지 않는다 — unknown + host-report로만 채워진다', async () => {
-    const result = await probe({
-      guardInstalled: true,
-      workerSettingsReady: true,
-      now: () => NOW,
-      run: cliPresent,
-    })
-    assert.equal(result.capabilities.cross_session_message.available, 'unknown')
-    assert.equal(result.capabilities.goal_loop.available, 'unknown')
-
-    const reported = applyHostReport(result, { cross_session_message: true, goal_loop: true }, NOW)
-    assert.equal(reported.capabilities.cross_session_message.available, true)
-    assert.equal(reported.capabilities.cross_session_message.source, 'host-report')
-  })
-
-  it('cli-probe 확정값은 self-report가 덮지 못한다', async () => {
-    const result = await probe({ guardInstalled: false, now: () => NOW, run: cliPresent })
-    const reported = applyHostReport(result, { external_write_guard: true }, NOW)
-    // 실측이 자기 보고보다 세다 — guard가 없다는 실측을 "있다"는 주장이 못 뒤집는다
-    assert.equal(reported.capabilities.external_write_guard.available, false)
-    assert.equal(reported.capabilities.external_write_guard.source, 'cli-probe')
-  })
-
-  it('probe 대상은 13종이고 external_write_guard가 포함된다', () => {
-    assert.equal(CAPABILITIES.length, 13)
-    assert.ok(CAPABILITIES.includes('external_write_guard'))
-  })
-})
-
-describe('worker 계약문(1층)과 skill', () => {
-  it('계약문에 금지·완료조건·범위가 들어간다', () => {
-    const text = workerContract({
-      logicalSessionId: 'S-20260823-01',
-      goal: '로그인 구현',
-      doneCriteria: ['npm test 통과'],
-      writeBoundary: ['src/auth/**'],
-    })
-    assert.match(text, /git push/)
-    assert.match(text, /Execution Grant/)
-    assert.match(text, /npm test 통과/)
-    assert.match(text, /src\/auth\/\*\*/)
-    assert.match(text, /정보일 뿐이다/)
-    assert.match(text, /독립 검증\(Verifier\)은 별도로 돈다/)
-  })
-
+describe('skill', () => {
   it('skill은 자연어 트리거와 명시 호출을 함께 제공하고 금지선을 담는다', () => {
     const text = skillText()
     assert.match(text, /ASC로 진행해/)
@@ -773,9 +454,9 @@ describe('B-26 Gate — Skill Bundle (C-05)', () => {
     const second = await install(paths, () => NOW)
     assert.deepEqual(second.written, [])
 
-    // skill이 늘어도 hook은 하나다 — guard는 안전 층이라 중복 등록이 곧 위험이다
+    // skill이 늘어도 PreToolUse 는 심지 않는다 (0.9.0) — entry 없는 설치는 hook 자체가 없다
     const settings = JSON.parse(await readFile(join(paths.claudeHome, 'settings.json'), 'utf8'))
-    assert.equal(settings.hooks.PreToolUse.length, 1)
+    assert.equal(settings.hooks, undefined)
   })
 
   it('uninstall이 빈 skill 디렉터리를 남기지 않는다 (P1 관찰 ⑥)', async () => {
@@ -833,22 +514,6 @@ describe('B-26 Gate — Skill Bundle (C-05)', () => {
     assert.match(text, /run the tests yourself/)
     assert.match(text, /It does not fix/)
     assert.match(text, /unresolved/)
-  })
-
-  it('worker 계약은 조사·검증 표면을 노출하지 않는다 (C-05 §2 배치)', () => {
-    // Implementer에게 inbox 탐색을 지시하면 그 세션은 다른 일을 찾아 범위를 넓힌다
-    const text = workerContract({
-      logicalSessionId: 'S-20260826-01',
-      goal: 'FE callback 구현',
-      doneCriteria: ['테스트 통과'],
-      writeBoundary: ['web-frontend/**'],
-      owner: 'frontend',
-    })
-    assert.doesNotMatch(text, /asc-inbox/)
-    assert.doesNotMatch(text, /asc-review/)
-    assert.doesNotMatch(text, /asc inbox/)
-    // 검증은 별도로 돈다는 사실만 알린다 — 스스로 하라는 지시가 아니다
-    assert.match(text, /독립 검증\(Verifier\)은 별도로 돈다/)
   })
 
   it('asc는 조사와 검증을 스스로 하지 않고, 결정을 떠넘기지 않는다', () => {
@@ -921,61 +586,5 @@ describe('관찰 이벤트 ≠ 전이 (C-03 §5.5·§5.6)', () => {
     )
     assert.equal((await bindings.get('S-20260823-01'))!.physicalSessionId, 'claude-respawned')
     assert.equal((await store.get('session', 'S-20260823-01'))!.status, 'ACTIVE')
-  })
-})
-
-describe('F6 — 일이 시작되면 논리 세션 안에서 시작된다', () => {
-  const script = hookScript()
-
-  it('S1 — 읽기 도구는 이 문을 지나지 않는다', () => {
-    // 상태를 보는 세션까지 끌어들이면 자동화가 아니라 방해다.
-    assert.match(script, /const MUTATORS = new Set\(\['Edit', 'Write', 'MultiEdit', 'NotebookEdit'\]\)/)
-    assert.doesNotMatch(script, /MUTATORS[^)]*'Read'/)
-    assert.doesNotMatch(script, /MUTATORS[^)]*'Grep'/)
-    assert.match(script, /if \(input\.tool_name !== 'Bash' && !isMutation\) process\.exit\(0\)/)
-  })
-
-  it('S2 — 관리 밖 세션의 변경은 막히고, 다음 한 걸음이 함께 온다', () => {
-    assert.match(script, /if \(isMutation && !managed\)/)
-    assert.match(script, /asc work start <WORK-KEY>/)
-    assert.match(script, /asc host claude bind <S-ID> --physical/)
-    // 사람에게 "ASC 적용해" 라고 말하게 하지 않는다 — 명령은 agent 가 실행한다.
-    assert.doesNotMatch(script, /console\.error[^)]*ASC 적용/)
-  })
-
-  it('S5 — 세션 안에 들어간 뒤에는 변경을 막지 않는다', () => {
-    // managed 이면 그 아래 금지 목록(Bash 명령)만 남는다. 0.8.0 에서 그 판정이
-    // AUTO 블록 안으로 들어갔고, 변경 도구는 그 분기에 들어가지 않는다.
-    assert.match(script, /\} else if \(!isMutation\) \{/)
-  })
-
-  it('S6 — MANUAL 은 아무것도 hard-block 하지 않는다 (0.8.0 Axis C)', () => {
-    // 막는 판정 전체가 AUTO 블록 안에 있다. MANUAL 에서는 그 문이 서지 않는다.
-    // 0.8.0 보정 P0-1 — 세 자리를 가른다: 고르지 않음 / 고른 값 / 읽지 못함.
-    // 0.8.4 — 이 Run 의 답을 먼저 본다. 값이 workspace 에만 있으면 한 Run 의 결정이
-    // 다른 Run 의 집행 강도를 바꾼다.
-    assert.match(script, /const state = executionState\(ascRoot, observedSessionId\)/)
-    assert.match(script, /record\.runs \? record\.runs\[runId\] : undefined/)
-    assert.match(script, /if \(state\.enforcement === 'ADVISE'\) \{/)
-    assert.match(script, /if \(state\.degraded\) \{/)
-    assert.match(script, /if \(state\.mode === 'AUTO'\) \{/)
-    // 기록은 두 mode 모두에서 돈다 — 관리와 실행은 다른 축이다.
-    assert.match(script, /if \(managed\) \{\s*try \{\s*recordActivity/)
-  })
-
-  it('E-02 — ASC control-plane 은 어느 mode 에서도 막히지 않는다', () => {
-    assert.match(script, /function isControlPlane/)
-    assert.match(script, /if \(isControlPlane\(segment\.bare\)\) continue/)
-  })
-
-  it('ASC 와 무관한 프로젝트는 그대로 통과한다', () => {
-    assert.match(script, /if \(!ascRoot\) process\.exit\(0\)/)
-  })
-
-  it('변경 도구도 같은 hook 이 맡는다 — 두 번째 문을 만들지 않는다', () => {
-    const pre = locate({ claudeHome: '/home/me/.claude' }).hooks.filter((hook) => hook.event === 'PreToolUse')
-    assert.ok(pre.some((hook) => hook.matcher === 'Bash'))
-    assert.ok(pre.some((hook) => hook.matcher?.includes('Edit') && hook.matcher?.includes('Write')))
-    assert.equal(new Set(pre.map((hook) => hook.script)).size, 1, '같은 스크립트여야 규칙이 한 곳에 있다')
   })
 })

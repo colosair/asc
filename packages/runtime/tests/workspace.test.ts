@@ -249,7 +249,7 @@ describe('B-44 Gate — index 파일 (C-11 §3)', () => {
     }
   })
 
-  it('guard가 읽을 수 있는 형태로 저장된다 — 한 번 읽고 한 번 파싱한다', async () => {
+  it('SessionStart hook 이 읽을 수 있는 형태로 저장된다 — 한 번 읽고 한 번 파싱한다', async () => {
     const home = await mkdtemp(join(tmpdir(), 'asc-index-'))
     try {
       const id = newWorkspaceId()
@@ -262,7 +262,7 @@ describe('B-44 Gate — index 파일 (C-11 §3)', () => {
       })
       await writeIndex(home, index)
 
-      // guard가 하는 일 그대로: 한 번 읽고 한 번 파싱한다
+      // hook 이 하는 일 그대로: 한 번 읽고 한 번 파싱한다
       const raw = JSON.parse(await readFile(join(home, 'workspace-index.json'), 'utf8'))
       assert.equal(raw.locators['/home/me/proj'].workspaceId, id)
       assert.equal(raw.locators['/home/me/proj'].root, join(home, 'workspaces', id))
@@ -580,7 +580,7 @@ describe('linked worktree — 같은 workspace의 다른 execution instance', ()
     })
 
     assert.equal(resolved.kind, 'REGISTERED')
-    // guard hook이 매 Bash 호출마다 지나는 길이다 — 여기서 subprocess가 생기면 안 된다
+    // SessionStart hook 과 모든 CLI 명령이 지나는 길이다 — 여기서 subprocess가 생기면 안 된다
     assert.equal(asked, 0, 'index가 맞으면 Git을 부르지 않는다')
   })
 

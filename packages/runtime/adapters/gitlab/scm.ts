@@ -140,6 +140,11 @@ export class GitLabScm implements ScmPort {
    * 승인된 단일 행위. **아는 것만 한다** — Grant 의 allowedWrites 검사(Executor)에 더해
    * adapter 도 자기 몫으로 닫아 둔다.
    */
+  /** 실행(push · ls-remote)이 향하는 git remote. 조립이 발견 단계의 값을 넘겼는지 밖에서 확인할 자리다. */
+  get remote(): string {
+    return this.#remote
+  }
+
   /** 이 통로가 아는 행위. execute 의 분기와 같은 목록이어야 한다. */
   supports(action: string): boolean {
     return (GITLAB_ACTIONS as readonly string[]).includes(action)

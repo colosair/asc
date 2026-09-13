@@ -278,6 +278,8 @@ describe('RuntimeBinding — Adapter scope와 소유권 (C-03 §3)', () => {
       readFile('core/model/entities.ts', 'utf8'),
       readFile('core/operator/proceed.ts', 'utf8'),
       readFile('core/operator/runtime-binding.ts', 'utf8'),
+      // 0.9.0: work start 가 Run 을 묶어도 그 seam 은 Surface 에 있다 — 세션 런타임은 Host 를 모른다
+      readFile('core/runtime/session.ts', 'utf8'),
     ])
     assert.doesNotMatch(core.join('\n'), /claude/i)
   })

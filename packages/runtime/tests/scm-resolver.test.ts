@@ -278,27 +278,56 @@ describe('선언과 구현이 어긋나지 않는다 (실제 어댑터)', () => 
 // AUTO dead-end — Guard 가 막는데 관리 경로가 없으면 그 사실이 이름으로 나와야 한다.
 // 실사용에서 사람이 mode manual 로 내려간 것은 화면이 그것을 권해서가 아니라, 막힌 뒤
 // 아무 말도 없었기 때문이다.
-describe('막는 것과 내보내는 것이 어긋나면 이름을 댄다', () => {
-  it('action key 가 붙은 금지 패턴은 관리 어휘 안에 있다', async () => {
-    const { FORBIDDEN_COMMAND_PATTERNS } = await import('../adapters/claude-code/guard.ts')
-    const { MANAGED_EXTERNAL_ACTIONS } = await import('../ports/scm.ts')
-    const vocabulary = new Set<string>(MANAGED_EXTERNAL_ACTIONS)
-    for (const entry of FORBIDDEN_COMMAND_PATTERNS) {
-      if (entry.action === undefined) continue // 한 행위로 환원되지 않는 패턴 — 정상이다
-      assert.ok(vocabulary.has(entry.action), `${entry.label} 의 action '${entry.action}' 가 어휘 밖이다`)
-    }
+// 0.9.0 — 실행이 향하는 remote 는 **선택된 execution binding 을 발견한 remote** 다. canonical
+// source 의 첫 항목이나 `origin` 을 가정하면 mirror 와 정본이 갈린 저장소에서 다른 곳으로 민다.
+describe('실행 remote 는 선택된 결합이 정한다 — canonical 순서가 아니다', () => {
+  const declared = [{ role: 'code-primary', adapter: 'gitlab', resource: 'team/project' }]
+  const plan = planOf(
+    binding({ adapterId: 'gitlab', resource: 'team/project', role: 'code-primary', provides: ['canonical.read'] }),
+    binding({ adapterId: 'github', resource: 'org/mirror', provides: ['canonical.read'] }),
+  )
+
+  it('origin = 자체 호스팅 정본, mirror = GitHub — 조립된 GitLabScm 은 발견된 remote 로 간다', async () => {
+    const ports = await buildRuntimePorts({
+      plan,
+      roles: rolesFor(plan, declared),
+      findToken: async () => 'token',
+      remoteFor: (b) => (b.adapterId === 'gitlab' ? 'origin' : 'mirror'),
+    })
+    assert.equal(ports.scm!.id, 'gitlab')
+    assert.equal((ports.scm as { remote?: string }).remote, 'origin')
   })
 
-  it('일부 패턴은 action 이 없어도 된다 — 억지 매핑을 강요하지 않는다', async () => {
-    const { FORBIDDEN_COMMAND_PATTERNS } = await import('../adapters/claude-code/guard.ts')
-    // 한 명령이 여러 행위를 덮는 경우가 실제로 있다. 전부 채우라고 요구하면 이 파일이
-    // provider 목록이 된다.
-    assert.ok(
-      FORBIDDEN_COMMAND_PATTERNS.some((entry) => entry.action === undefined),
-      '모든 패턴에 action 이 붙었다 — 억지 매핑이 들어갔는지 본다',
-    )
+  it('remote 이름이 무엇이든 발견된 그대로다 — upstream 이 정본이면 upstream 으로 민다', async () => {
+    const ports = await buildRuntimePorts({
+      plan,
+      roles: rolesFor(plan, declared),
+      findToken: async () => 'token',
+      remoteFor: (b) => (b.adapterId === 'gitlab' ? 'upstream' : 'origin'),
+    })
+    assert.equal((ports.scm as { remote?: string }).remote, 'upstream')
   })
 
+  it('remoteFor 가 답하지 않으면 origin 이다 — 없는 것을 지어내지 않되 기존 기본값은 지킨다', async () => {
+    const ports = await buildRuntimePorts({ plan, roles: rolesFor(plan, declared), findToken: async () => 'token' })
+    assert.equal((ports.scm as { remote?: string }).remote, 'origin')
+  })
+
+  it('findToken 은 어느 binding 인지 받는다 — host 마다 자격이 다를 수 있다', async () => {
+    const seen: string[] = []
+    await buildRuntimePorts({
+      plan,
+      roles: rolesFor(plan, declared),
+      findToken: async (adapterId, b) => {
+        seen.push(`${adapterId}:${b.resource}`)
+        return 'token'
+      },
+    })
+    assert.ok(seen.includes('gitlab:team/project'), seen.join(','))
+  })
+})
+
+describe('통로가 실을 수 있는 행위는 통로가 말한다', () => {
   it('push 를 못 싣는 통로가 슬롯을 맡으면 git.push 가 dead-end 다', async () => {
     // 실사용 실패 그대로: mirror 가 executor 를 맡았고 그 통로는 push 를 못 한다.
     const ports = await buildRuntimePorts({

@@ -10,6 +10,7 @@ import { LocalIdentityBinding } from '../adapters/local/identity.ts'
 import { ApprovalService } from '../core/approval/service.ts'
 import { Executor } from '../core/execution/executor.ts'
 import { GrantService } from '../core/execution/grant.ts'
+import { FreezePolicy } from '../core/policy/remote-freeze.ts'
 import { ApprovalRequest } from '../core/model/entities.ts'
 import type { StateStore } from '../ports/state-store.ts'
 
@@ -243,6 +244,33 @@ describe('실행 — 한 번만, 그리고 확인 후에', () => {
     // 정말 안 나갔는지 알 수 없으므로 같은 계약을 다시 쓰지 않는다
     assert.equal((await store.get('grant', 'G-0001'))!.status, 'INVALIDATED')
     assert.equal((await store.get('request', 'REQ-0042'))!.status, 'APPROVED')
+  })
+
+  it('원격이 얼어 있으면 집지도 않고 FROZEN — Grant 는 READY 그대로, 밖으로 나간 것 0', async () => {
+    // 0.9.0: 선언만 있고 정상 실행 계층이 소비하지 않던 remote.write 얼림을 실제 mutation
+    // 경계에서 집행한다. 녹은 뒤 같은 Grant 로 다시 부르면 그때 나간다 — 자동 재생은 없다.
+    const { store, scm } = await approved()
+    await grantsOn(store).issue(grantInput())
+    let frozen = true
+    const executor = new Executor({
+      store,
+      scm,
+      runId: 'run-1',
+      now: () => LATER,
+      freeze: async () => FreezePolicy.parse({ frozen, since: NOW, reason: '배포 동결' }),
+    })
+
+    const outcome = await executor.run('G-0001')
+    assert.ok(!outcome.ok && outcome.reason === 'FROZEN')
+    assert.match(outcome.detail, /얼어 있다/)
+    assert.equal(scm.executed.length, 0)
+    assert.equal((await store.get('grant', 'G-0001'))!.status, 'READY')
+    assert.equal((await store.get('grant', 'G-0001'))!.claimedBy, undefined)
+
+    frozen = false
+    const thawed = await executor.run('G-0001')
+    assert.ok(thawed.ok)
+    assert.equal(scm.executed.length, 1)
   })
 
   it('없는 계약은 NOT_FOUND', async () => {

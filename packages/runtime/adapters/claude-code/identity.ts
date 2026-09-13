@@ -1,15 +1,16 @@
-// Physical Run identity — 결합이 가리키는 것과 Guard 가 조회하는 것을 같게 한다 (0.8.4).
+// Physical Run identity — 결합이 가리키는 것과 Host 가 보고하는 것을 같게 한다 (0.8.4).
 //
 // 실기계에서 이랬다:
 //
 //   asc host claude bind S-… --physical windows-worker-57   → 성공했다고 기록됐다
-//   guard 는 hook payload 의 session_id 로 결합을 찾는다        → 그 결합을 못 본다
+//   Run 이 실제로 쥔 id 는 Host 가 준 UUID 였다                → 그 결합을 아무도 못 본다
 //
-// 그래서 "결합돼 있다"고 화면이 말하는 Run 이 AUTO 에서 계속 "논리 세션 밖" 으로 막혔다.
-// 막지 못하는 것을 막는 척한 것이 아니라 그 반대다 — 결합했다고 말해 놓고 결합의 효력이
-// 없었다. 어느 쪽이든 화면과 집행이 갈리는 것은 같은 종류의 거짓말이다.
+// 그래서 "결합돼 있다"고 화면이 말하는 Run 이 자기 세션의 소유자로 인정받지 못했다 —
+// per-run Execution Mode 도, 진척 보고의 소유권 검사도, 실행기의 claimedBy 도 전부 Host 가
+// 준 그 값으로 이 Run 을 찾는다. 결합했다고 말해 놓고 결합의 효력이 없는 것은 화면과
+// 집행이 갈리는 거짓말이다.
 //
-// 고치는 방법은 하나뿐이다: **bind 가 받는 값과 guard 가 읽는 값을 같은 것으로 고정한다.**
+// 고치는 방법은 하나뿐이다: **bind 가 받는 값과 Host 가 보고하는 값을 같은 것으로 고정한다.**
 // ASC 가 스스로 알 수 있으면 스스로 취하고, 사람이 넘기면 실제 값과 대조한다.
 
 /** Claude Code 가 자기 Run id 를 심어 두는 자리. Host 계약이라 여기서만 안다. */
@@ -63,7 +64,7 @@ export type PhysicalIdVerdict =
  * **모양을 요구하는 것이 이 함수의 전부다.** 그 이상은 못 한다 — 다른 Run 의 id 가 진짜인지
  * 여기서 확인할 방법이 없고, 확인하는 척하면 그것이 또 하나의 거짓말이 된다. 다만 이
  * 한 가지로 실제 사고는 닫힌다: `windows-worker-57` 같은 라벨은 어떤 Run 도 아니어서
- * guard 가 영영 찾지 못했고, 그 결합은 있는데도 없는 것으로 다뤄졌다.
+ * 어느 조회도 영영 찾지 못했고, 그 결합은 있는데도 없는 것으로 다뤄졌다.
  */
 export function judgePhysicalId(input: { provided?: string; observed?: string }): PhysicalIdVerdict {
   const provided = input.provided?.trim()
@@ -76,7 +77,7 @@ export function judgePhysicalId(input: { provided?: string; observed?: string })
       reason: 'UNKNOWN_RUN',
       detail:
         `이 Run 의 id 를 관측하지 못했다 (${RUN_ID_ENV} 없음). ` +
-        '--physical 로 Run id 를 넘겨라 — guard 가 조회하는 값과 같아야 한다.',
+        '--physical 로 Run id 를 넘겨라 — Host 가 그 Run 에 준 값과 같아야 한다.',
     }
   }
 
@@ -86,8 +87,8 @@ export function judgePhysicalId(input: { provided?: string; observed?: string })
       reason: 'NOT_A_RUN_ID',
       ...(observed ? { observed } : {}),
       detail:
-        `'${provided}' 는 Host 가 주는 Run id 의 모양이 아니다. guard 는 Run 자신의 id 로 결합을 ` +
-        '찾으므로, 사람이 붙인 라벨로 묶으면 그 결합은 기록에만 있고 아무것도 막지 못한다.',
+        `'${provided}' 는 Host 가 주는 Run id 의 모양이 아니다. ASC 는 Run 자신의 id 로 결합을 ` +
+        '찾으므로, 사람이 붙인 라벨로 묶으면 그 결합은 기록에만 있고 어디서도 효력이 없다.',
     }
   }
 

@@ -55,7 +55,6 @@ import {
   type SetupState,
 } from '../core/attach/setup-plan.ts'
 import { CLAUDE_PROVIDER, CLAUDE_SCOPE, claudeBindings } from '../adapters/claude-code/binding.ts'
-import { readHeartbeat } from '../adapters/claude-code/observer.ts'
 import { judgePhysicalId, observedRunId } from '../adapters/claude-code/identity.ts'
 import type { ApprovalRequest } from '../core/model/entities.ts'
 import { staleSessions } from '../core/runtime/stale-session.ts'
@@ -68,8 +67,6 @@ import {
   type Obligation,
 } from '../core/approval/consumption.ts'
 import type { ResourceContextPort } from '../ports/resource-context.ts'
-import { FORBIDDEN_COMMAND_PATTERNS, workerContract, workerSettings } from '../adapters/claude-code/guard.ts'
-import { applyHostReport, assessReadiness, probe, type CapabilityName } from '../adapters/claude-code/probe.ts'
 import {
   controlPlaneAccess,
   defaultPaths,
@@ -84,7 +81,7 @@ import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
 import { evaluateHealth, healthAlertLines, observationState } from '../core/monitor/health-alerts.ts'
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
-import { MANAGED_EXTERNAL_ACTIONS, addressableHere, type ScmPort } from '../ports/scm.ts'
+import { MANAGED_EXTERNAL_ACTIONS, type ScmPort } from '../ports/scm.ts'
 import { servicePath } from '../core/distribution/external-command.ts'
 import {
   isTransientPath,
@@ -231,7 +228,7 @@ Execution
   asc mode manual           step back to advisory. Recorded, with who said so
 
 Work
-  asc work start [WORK]     start or resume the work, inside a contract
+  asc work start [WORK]     start or resume the work, inside a contract — binds this Run to it
   asc work status [S-ID]    where it is right now
   asc work publish          send the approved result outside
   asc work publish --review read the target, the SHA and the binding — change nothing
@@ -356,17 +353,16 @@ They stay because recovery, diagnosis and scripting need them.
   asc coordination observe [--json]    # did anything come back on what we published
 
   asc progress show   [<S-ID>]
-  asc progress report <S-ID> --physical <id> --phase <text>
+  asc progress report <S-ID> [--physical <id>] --phase <text>   # --physical defaults to this Run
                       [--milestone <text>...] [--next <text>] [--unresolved <text>...]
                       [--decision none|later|now] [--decision-ref <text>]
                       [--verifier none|running|pass|fail] [--verifier-detail <text>] [--terminal]
 
   asc host claude install [--force]     # --force: overwrite ASC files a person has edited
-  asc host claude uninstall|probe [--report <cap>=<bool>...]
-  asc host claude guard
-  asc host claude bind <S-ID> --physical <id> [--principal <p>] [--worker <id>] [--kind <k>] [--force]
-  asc host claude release <S-ID> --physical <id>
-  asc host claude contract <S-ID>
+  asc host claude uninstall
+  asc host claude bind <S-ID> [--physical <id>] [--principal <p>] [--worker <id>] [--kind <k>] [--force]
+                                        # recovery surface — asc work start binds this Run on the healthy path
+  asc host claude release <S-ID> [--physical <id>]
 
 Options
   --json          machine-readable output
@@ -420,7 +416,7 @@ async function resolveRoot(start: string, explicitRoot?: string): Promise<Resolu
     worktrees: gitWorktrees,
   })
   // 같은 저장소의 다른 checkout으로 풀렸으면 **이 경로를 등록해 둔다.** 그래야 다음부터는
-  // 예전과 같은 index 조회 하나로 끝나고, guard hook도 이 checkout을 관리 대상으로 본다.
+  // 예전과 같은 index 조회 하나로 끝나고, SessionStart hook 도 이 checkout 을 이 workspace 로 본다.
   if (resolution.kind === 'LINKED_WORKTREE') await rememberWorktree(home, index, resolution)
   return resolution
 }
@@ -478,6 +474,20 @@ function endpointOf(adapters: readonly Adapter[], binding: ResolvedBinding): str
     const withEndpoint = adapter as Adapter & { endpointFor?: (resource: string) => string | undefined }
     if (adapter.describe().id !== binding.adapterId) continue
     return withEndpoint.endpointFor?.(binding.resource)
+  }
+  return undefined
+}
+
+/**
+ * 이 binding 을 발견한 git remote 의 이름 — 실행기의 push · ls-remote 가 갈 곳. 발견 단계가
+ * 안 것을 그대로 쓴다. canonical source 의 첫 항목이나 `origin` 을 가정하면 mirror 와 정본이
+ * 갈린 저장소에서 다른 곳으로 민다. provider 도 remote 이름도 여기 적지 않는다 — adapter 가 답한다.
+ */
+function remoteOf(adapters: readonly Adapter[], binding: ResolvedBinding): string | undefined {
+  for (const adapter of adapters) {
+    const withRemote = adapter as Adapter & { remoteFor?: (resource: string) => string | undefined }
+    if (adapter.describe().id !== binding.adapterId) continue
+    return withRemote.remoteFor?.(binding.resource)
   }
   return undefined
 }
@@ -841,7 +851,6 @@ function parseArgsOrThrow(argv: string[]) {
       kind: { type: 'string' },
       force: { type: 'boolean', default: false },
       agent: { type: 'boolean', default: false },
-      report: { type: 'string', multiple: true },
       flush: { type: 'boolean', default: false },
       path: { type: 'string', multiple: true },
       item: { type: 'string', multiple: true },
@@ -2701,12 +2710,119 @@ async function releaseRuntimeBinding(
   // 소유권은 사라져도 그 실행이 있었다는 사실은 남는다 (C-10 §1.3)
   if (released) for (const evidence of running) await audit.endExecution(evidence.executionId, 'RELEASED', at)
   if (!released) return { ok: false, detail: 'Release failed — you are not the owner' }
-  // **놓았다고 말하기 전에 확인한다.** guard 는 이 파일 하나로 관리 대상을 정하므로,
-  // 지워지지 않은 채 "released" 라고 적으면 그 세션의 외부 write 가 계속 막힌다.
+  // **놓았다고 말하기 전에 확인한다.** 소유권은 이 파일 하나로 정해지므로, 지워지지 않은 채
+  // "released" 라고 적으면 그 Run 은 계속 그 세션을 쥔 것으로 읽혀 다음 결합을 막는다.
   const after = await bindings.get(target)
   return after
     ? { ok: false, detail: `Release did not take — ${target} is still bound to ${after.physicalSessionId}.` }
     : { ok: true }
+}
+
+/**
+ * 이 Run 이 세션을 잡는다 — `work start` 의 healthy path 와 `host claude bind`(복구 표면)가
+ * 같은 것을 해야 해서 여기 있다 (0.9.0).
+ *
+ * 원자성·충돌·묘비 계약은 ScopedRuntimeBindings 그대로다. 여기는 그 결과를 세 갈래로
+ * 말하고, 새로 잡았을 때만 실행 증거를 남긴다. **뺏지 않는다** — CONFLICT 는 사실이고,
+ * 갈아끼우는 것은 사람이 `--force` 로 하는 일이다.
+ */
+type BindingOutcome =
+  | { state: 'CLAIMED' | 'ALREADY'; physical: string }
+  | {
+      state: 'CONFLICT'
+      physical: string
+      holder: { logicalSessionId: string; physicalSessionId: string }
+      detail: string
+    }
+
+async function claimRuntimeBinding(
+  store: MarkdownStateStore,
+  target: string,
+  physical: string,
+  at: string,
+  opts: { evidenceSource: string; principal?: string; workerId?: string; runtimeKind?: string },
+  say: (line: string) => void = () => {},
+): Promise<BindingOutcome> {
+  const bindings = claudeBindings(store)
+  const audit = auditLedger(store)
+
+  // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
+  // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
+  // 여기이고, 사람이 따로 기억해야 하는 정리 절차는 결국 안 돌아간다.
+  for (const dead of await bindings.stale()) {
+    if (await bindings.forget(dead.logicalSessionId)) {
+      say(`(stale binding cleared: ${dead.logicalSessionId} ← ${dead.physicalSessionId})`)
+    }
+  }
+
+  // 같은 Run 이 같은 세션을 이미 쥐고 있으면 할 일이 없다 — 증거도 두 번 남기지 않는다.
+  const held = await bindings.get(target)
+  if (held && held.physicalSessionId === physical) return { state: 'ALREADY', physical }
+
+  const spec = {
+    logicalSessionId: target,
+    provider: CLAUDE_PROVIDER,
+    physicalSessionId: physical,
+    ...(opts.workerId ? { workerId: opts.workerId } : {}),
+    ...(opts.runtimeKind ? { runtimeKind: opts.runtimeKind } : {}),
+  }
+  const claimed = await bindings.claim(spec, at)
+  if (!claimed.ok) {
+    // 부딪힌 상대가 **어느 세션인지** 말한다. 같은 Run 이 다른 세션을 잡고 있는 경우와
+    // 이 세션을 다른 Run 이 잡고 있는 경우는 사람이 할 일이 다르다.
+    const other = claimed.current.logicalSessionId
+    let detail: string
+    if (other === target) {
+      detail =
+        `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
+        '죽은 세션이 확실하면 --force 로 rebind하라.'
+    } else {
+      // 같은 Run 이 다른 세션을 잡고 있는 경우에도 사람이 할 일은 둘로 갈린다.
+      // **끝난 세션이 아직 붙들고 있는 것**은 놓아야 할 잔재이고, 살아 있는 세션을
+      // 잡고 있는 것은 설계대로다 — 그때는 Run 을 나누는 것이 답이다. 둘을 같은
+      // 문장으로 말하던 동안 앞의 경우가 세 번이나 사람 실수로 읽혔다 (#63).
+      const holder = await store.get('session', other)
+      const finished = holder?.status === 'DONE'
+      detail = finished
+        ? `RUNTIME_CONFLICT: 이 Run(${physical}) 은 끝난 세션 ${other} 을 아직 잡고 있다. ` +
+          `놓아라: asc host claude release ${other} --physical ${physical}`
+        : `RUNTIME_CONFLICT: 이 Run(${physical}) 은 지금 ${other} 을 잡고 있다. ` +
+          '한 Run 은 한 세션만 잡는다 — 그 세션을 계속 쓸 것이면 이 작업은 다른 Run 으로 하고, ' +
+          `아니면 먼저 놓아라: asc host claude release ${other} --physical ${physical}`
+    }
+    return {
+      state: 'CONFLICT',
+      physical,
+      holder: { logicalSessionId: other, physicalSessionId: claimed.current.physicalSessionId },
+      detail,
+    }
+  }
+
+  // principal은 physical 참조와 다르다 (C-10 §3). 선언이 없으면 유추한 것이고,
+  // 유추한 principal 위에서는 어떤 독립성 주장도 UNVERIFIED를 넘지 못한다.
+  const principal = opts.principal ?? physical
+  const principalSource = opts.principal ? 'declared' : 'derived'
+  const recorded = await audit.execute({
+    logicalSessionId: target,
+    hostAdapter: CLAUDE_PROVIDER,
+    principal,
+    principalSource,
+    physicalReference: physical,
+    startedAt: at,
+    evidenceSource: opts.evidenceSource,
+  })
+  say(`execution evidence ${recorded.evidence.executionId} · principal ${principal} (${principalSource})`)
+  return { state: 'CLAIMED', physical }
+}
+
+/**
+ * Host 가 보고하는 Run id 로 `--physical` 을 채운다 — **소유권을 소비하는 lifecycle 명령에서만**
+ * 부른다 (work finish · session pause/done · progress report · host claude release). 명시된
+ * 값이 항상 우선이고, Claude Run 밖이면 undefined 그대로다. 일반 명령의 인자에 Host 신원을
+ * 심지 않는다 — 그것은 Host/lifecycle seam 의 일이다.
+ */
+function effectivePhysical(values: { physical?: unknown }): string | undefined {
+  return typeof values.physical === 'string' && values.physical.length > 0 ? values.physical : observedRunId()
 }
 
 /**
@@ -2731,11 +2847,14 @@ async function runHost(
       if (before.status === 'INSTALLED_STALE') console.log('The installation is behind the current source — converging it.')
       const outcome = await install(paths, undefined, { force: Boolean(values.force) })
       for (const path of outcome.written) console.log(`installed: ${path}`)
+      for (const path of outcome.removed) console.log(`removed: ${path}`)
       for (const skip of outcome.skipped) console.log(`skipped: ${skip.path} — ${skip.reason}`)
-      if (outcome.written.length === 0 && outcome.skipped.length === 0) console.log('Already installed (no change)')
+      if (outcome.written.length === 0 && outcome.removed.length === 0 && outcome.skipped.length === 0) {
+        console.log('Already installed (no change)')
+      }
       // 무엇이 남았는지 install 직후에 말한다 — 사람이 따로 물어보게 하지 않는다
       for (const line of installReportLines(await verifyInstall(paths))) console.log(line)
-      console.log('\nThe guard hook is registered. External writes from ASC-managed sessions are blocked at execution time.')
+      console.log('\nHost integration is current. A Claude session opened in an ASC workspace restores its state at SessionStart.')
       return outcome.skipped.length > 0 ? 1 : 0
     }
 
@@ -2747,81 +2866,8 @@ async function runHost(
       return 0
     }
 
-    case 'guard': {
-      // 2층 — worker 세션에만 적용되는 permission deny. user-scope에 넣으면 사람의
-      // git push까지 전역으로 막히므로, worker 기동 시 --settings 로 주입하는 파일로 둔다.
-      const root = await discoverRoot(process.cwd(), values.root as string | undefined)
-      if (!root) {
-        console.error('No attached ASC runtime found — run this inside an attached project, or pass --root.')
-        return 2
-      }
-      const guardPath = join(root, 'adapters', 'claude-code', 'worker-settings.json')
-      await mkdir(dirname(guardPath), { recursive: true })
-      await writeFile(guardPath, workerSettings(), 'utf8')
-      console.log(`created: ${guardPath}`)
-      console.log('Inject this whenever an ASC-managed worker starts:')
-      console.log(`  claude --settings "${guardPath}" ...`)
-      return 0
-    }
-
-    case 'probe': {
-      const report = await verifyInstall(paths)
-      const installed = report.status === 'INSTALLED_CURRENT'
-      // 2층 판정 — attach된 프로젝트에서만 확인 가능하다
-      const probeRoot = await discoverRoot(process.cwd(), values.root as string | undefined)
-      let workerSettingsReady: boolean | undefined
-      if (probeRoot) {
-        const guardPath = join(probeRoot, 'adapters', 'claude-code', 'worker-settings.json')
-        workerSettingsReady = await readFile(guardPath, 'utf8')
-          .then((text) => text === workerSettings())
-          .catch(() => false)
-      }
-      let result = await probe({
-        guardInstalled: installed,
-        ...(workerSettingsReady !== undefined ? { workerSettingsReady } : {}),
-      })
-      // 호스트 세션이 자기 도구 목록을 보고 채우는 self-report (--report cap=true)
-      const reports = (values.report as string[] | undefined) ?? []
-      if (reports.length > 0) {
-        const parsed: Partial<Record<CapabilityName, boolean>> = {}
-        for (const entry of reports) {
-          const [name, value] = entry.split('=')
-          if (name && (value === 'true' || value === 'false')) {
-            parsed[name as CapabilityName] = value === 'true'
-          }
-        }
-        result = applyHostReport(result, parsed, new Date().toISOString())
-      }
-
-      // capability 표보다 먼저 설치 상태를 말한다 — 낡은 설치본이면 아래 판정도 낡은 것이다
-      for (const line of installReportLines(report)) console.log(line)
-      console.log(`Claude Code: ${result.claudeVersion ?? '(not found)'}`)
-      for (const [name, verdict] of Object.entries(result.capabilities)) {
-        const mark = verdict.available === true ? 'O' : verdict.available === false ? 'X' : '?'
-        console.log(`  ${mark} ${name.padEnd(24)} [${verdict.source}] ${verdict.detail ?? ''}`)
-      }
-
-      const readiness = assessReadiness(result)
-      if (!readiness.ok) {
-        console.error(`\nSTOP: a safety-critical capability is missing — ${readiness.missing.join(', ')}`)
-        console.error('Without the external-write guard, no ASC-managed autonomous worker runs.')
-      } else if (readiness.degraded.length > 0) {
-        console.log(`\ndegraded (optional capability missing or unverified): ${readiness.degraded.join(', ')}`)
-      }
-
-      // attach된 프로젝트면 결과를 Adapter metadata로 남긴다
-      if (probeRoot) {
-        const store = new MarkdownStateStore(probeRoot)
-        await store.scope('claude-code').set('capabilities', JSON.stringify(result))
-        // 뿌리는 workspace마다 다르다 — `.asc/` 로 적으면 local scope에서 없는 경로를 가리킨다
-        console.log(`\nRecorded in: ${join(probeRoot, 'adapters', 'claude-code', 'capabilities.json')}`)
-      }
-      return readiness.ok ? 0 : 1
-    }
-
     case 'bind':
-    case 'release':
-    case 'contract': {
+    case 'release': {
       if (!target) {
         console.error(`Usage: asc host claude ${command} <S-ID> ...`)
         return 2
@@ -2835,38 +2881,9 @@ async function runHost(
       const bindings = claudeBindings(store)
       const at = new Date().toISOString()
 
-      if (command === 'contract') {
-        const session = await store.get('session', target)
-        if (!session) {
-          console.error(`${target} was not found.`)
-          return 1
-        }
-        // 계약문이 Profile의 책임 지도를 인용하므로, 지금 설정이 lock과 같은지 먼저 본다.
-        // 어긋난 설정에서 뽑은 결정권을 worker에게 건네면 그 세션은 틀린 전제로 돈다.
-        const guard = await checkBootstrap(root)
-        if (guard.code !== 0) return guard.code
-        console.log(
-          workerContract({
-            logicalSessionId: session.id,
-            goal: session.goal,
-            doneCriteria: session.doneCriteria,
-            writeBoundary: session.writeBoundary,
-            ...(session.owner ? { owner: session.owner } : {}),
-            // 세션이 명시한 것과 Profile 지도에서 풀린 것을 합쳐 넘긴다. worker에게 필요한 것은
-            // "어디에 적혀 있는가"가 아니라 "이 결정이 누구 것인가"다.
-            ...(() => {
-              const decided = effectiveAuthority(session, guard.runtime?.ownership)
-              return Object.keys(decided).length > 0 ? { decisionAuthority: decided } : {}
-            })(),
-            ...(session.dependencies.length > 0 ? { dependencies: session.dependencies } : {}),
-          }),
-        )
-        return 0
-      }
-
       // **없는 세션에 결합을 만들지 않는다** (#77).
       //
-      // 0.8.4 는 physical 쪽 신원을 맞췄다 — guard 가 찾는 값과 같은 것만 받는다. 이것은
+      // 0.8.4 는 physical 쪽 신원을 맞췄다 — Host 가 보고하는 값과 같은 것만 받는다. 이것은
       // 그 반대편이다: 논리 세션이 실재하는지 아무도 보지 않아서, 발급이 실패한 id 로도
       // 결합·실행 증거·소유 주장이 만들어졌다. 그 결합은 Run 을 점유해 다음 bind 를
       // RUNTIME_CONFLICT 로 막고, 존재하지 않는 세션을 release 하라고 안내했다.
@@ -2879,26 +2896,18 @@ async function runHost(
         return 1
       }
 
-      // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
-      // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
-      // 여기이고, 사람이 따로 기억해야 하는 정리 절차는 결국 안 돌아간다.
-      for (const dead of await bindings.stale()) {
-        if (await bindings.forget(dead.logicalSessionId)) {
-          console.error(`(stale binding cleared: ${dead.logicalSessionId} ← ${dead.physicalSessionId})`)
-        }
-      }
-
-      // **결합이 가리키는 값과 guard 가 조회하는 값을 같게 한다** (0.8.4).
+      // **결합이 가리키는 값과 Host 가 보고하는 Run id 를 같게 한다** (0.8.4).
       //
-      // release 는 그대로 둔다 — 이미 잘못 묶인 결합을 푸는 것이 이 명령의 일이고,
+      // release 는 모양을 요구하지 않는다 — 이미 잘못 묶인 결합을 푸는 것이 이 명령의 일이고,
       // 거기에까지 모양을 요구하면 고칠 방법이 없어진다.
       let physical: string
       if (command === 'release') {
-        if (!values.physical) {
-          console.error('--physical <Claude session id> is required.')
+        const resolved = effectivePhysical(values)
+        if (!resolved) {
+          console.error('--physical <Claude session id> is required outside a Claude Code Run.')
           return 2
         }
-        physical = values.physical as string
+        physical = resolved
       } else {
         const verdict = judgePhysicalId({
           ...(typeof values.physical === 'string' ? { provided: values.physical } : {}),
@@ -2921,8 +2930,6 @@ async function runHost(
         }
       }
 
-      const audit = auditLedger(store)
-
       if (command === 'release') {
         const outcome = await releaseRuntimeBinding(store, target, physical, at)
         if (!outcome.ok) {
@@ -2933,18 +2940,21 @@ async function runHost(
         return 0
       }
 
-      const spec = {
-        logicalSessionId: target,
-        provider: CLAUDE_PROVIDER,
-        physicalSessionId: physical,
-        ...(values.worker ? { workerId: values.worker as string } : {}),
-        ...(values.kind ? { runtimeKind: values.kind as string } : {}),
-      }
-      // principal은 physical 참조와 다르다 (C-10 §3). 선언이 없으면 유추한 것이고,
-      // 유추한 principal 위에서는 어떤 독립성 주장도 UNVERIFIED를 넘지 못한다.
-      const principal = (values.principal as string) ?? physical
-      const principalSource = values.principal ? 'declared' : 'derived'
-      const recordExecution = async (evidenceSource: string) => {
+      if (values.force) {
+        // 죽은 owner를 사람이 확인하고 갈아끼우는 명시적 복구다 — 자동 탈취가 아니다
+        const audit = auditLedger(store)
+        const spec = {
+          logicalSessionId: target,
+          provider: CLAUDE_PROVIDER,
+          physicalSessionId: physical,
+          ...(values.worker ? { workerId: values.worker as string } : {}),
+          ...(values.kind ? { runtimeKind: values.kind as string } : {}),
+        }
+        const principal = (values.principal as string) ?? physical
+        const principalSource = values.principal ? 'declared' : 'derived'
+        const superseded = (await audit.executionsOf(target)).filter((e) => e.status === 'RUNNING')
+        const rebound = await bindings.rebind(spec, at)
+        for (const evidence of superseded) await audit.endExecution(evidence.executionId, 'SUPERSEDED', at)
         const recorded = await audit.execute({
           logicalSessionId: target,
           hostAdapter: CLAUDE_PROVIDER,
@@ -2952,51 +2962,36 @@ async function runHost(
           principalSource,
           physicalReference: physical,
           startedAt: at,
-          evidenceSource,
+          evidenceSource: 'host bind --force',
         })
         console.log(`execution evidence ${recorded.evidence.executionId} · principal ${principal} (${principalSource})`)
-      }
-
-      if (values.force) {
-        // 죽은 owner를 사람이 확인하고 갈아끼우는 명시적 복구다 — 자동 탈취가 아니다
-        const superseded = (await audit.executionsOf(target)).filter((e) => e.status === 'RUNNING')
-        const rebound = await bindings.rebind(spec, at)
-        for (const evidence of superseded) await audit.endExecution(evidence.executionId, 'SUPERSEDED', at)
-        await recordExecution('host bind --force')
         console.log(`${target} ← ${rebound.physicalSessionId} (explicit rebind)`)
         return 0
       }
-      const claimed = await bindings.claim(spec, at)
-      if (!claimed.ok) {
-        // 부딪힌 상대가 **어느 세션인지** 말한다. 같은 Run 이 다른 세션을 잡고 있는 경우와
-        // 이 세션을 다른 Run 이 잡고 있는 경우는 사람이 할 일이 다르다.
-        const other = claimed.current.logicalSessionId
-        if (other === target) {
-          console.error(
-            `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
-              '죽은 세션이 확실하면 --force 로 rebind하라.',
-          )
-          return 1
-        }
-        // 같은 Run 이 다른 세션을 잡고 있는 경우에도 사람이 할 일은 둘로 갈린다.
-        // **끝난 세션이 아직 붙들고 있는 것**은 놓아야 할 잔재이고, 살아 있는 세션을
-        // 잡고 있는 것은 설계대로다 — 그때는 Run 을 나누는 것이 답이다. 둘을 같은
-        // 문장으로 말하던 동안 앞의 경우가 세 번이나 사람 실수로 읽혔다 (#63).
-        const holder = await store.get('session', other)
-        const finished = holder?.status === 'DONE'
-        console.error(
-          finished
-            ? `RUNTIME_CONFLICT: 이 Run(${physical}) 은 끝난 세션 ${other} 을 아직 잡고 있다. ` +
-              `놓아라: asc host claude release ${other} --physical ${physical}`
-            : `RUNTIME_CONFLICT: 이 Run(${physical}) 은 지금 ${other} 을 잡고 있다. ` +
-              '한 Run 은 한 세션만 잡는다 — 그 세션을 계속 쓸 것이면 이 작업은 다른 Run 으로 하고, ' +
-              `아니면 먼저 놓아라: asc host claude release ${other} --physical ${physical}`,
-        )
+
+      const outcome = await claimRuntimeBinding(
+        store,
+        target,
+        physical,
+        at,
+        {
+          evidenceSource: 'host bind',
+          ...(values.principal ? { principal: values.principal as string } : {}),
+          ...(values.worker ? { workerId: values.worker as string } : {}),
+          ...(values.kind ? { runtimeKind: values.kind as string } : {}),
+        },
+        (line) => console.log(line),
+      )
+      if (outcome.state === 'CONFLICT') {
+        console.error(outcome.detail)
         return 1
       }
-      await recordExecution('host bind')
-      console.log(`${target} ← ${claimed.binding.physicalSessionId} (owner claim)`)
-      console.log('This session is now ASC-managed — external writes are stopped by the guard.')
+      if (outcome.state === 'ALREADY') {
+        console.log(`${target} ← ${outcome.physical} (already held by this Run)`)
+        return 0
+      }
+      console.log(`${target} ← ${outcome.physical} (owner claim)`)
+      console.log(`This Run now holds ${target}. Approved acts for it go out through ASC's executor.`)
       return 0
     }
 
@@ -3053,9 +3048,41 @@ async function runProceed(
   // 도구 자식(JAM MCP 서버 등)을 여기서 닫는다 — 안 닫으면 출력까지 끝내고도 종료하지 못한다.
   await closeToolClients()
 
+  // **이 Run 이 세션을 잡는다** (0.9.0). 논리 세션의 전이는 Operator 가 끝냈고, 그것과
+  // "지금 도는 Run 이 그 세션의 소유자인가" 는 다른 사실이다. Host 가 Run id 를 보고하면
+  // 여기서 결합까지 이어 준다 — 사람이 `host claude bind` 를 알아야 하는 자리를 없앤다.
+  // Core/Operator 는 Host 를 모른다. 이 seam 은 Surface 의 것이다.
+  const heldNotes: string[] = []
+  const binding: (BindingOutcome | { state: 'NO_RUN' }) | undefined =
+    outcome.kind === 'STARTED' || outcome.kind === 'RESUMED' || outcome.kind === 'CONTINUE_ACTIVE'
+      ? observedRunId()
+        ? await claimRuntimeBinding(
+            store,
+            outcome.contract.id,
+            observedRunId()!,
+            new Date().toISOString(),
+            { evidenceSource: 'work start' },
+            (line) => heldNotes.push(line),
+          )
+        : { state: 'NO_RUN' }
+      : undefined
+  // 세션은 시작됐지만 이 Run 은 소유권을 얻지 못했다 — 성공이 아니다. 전이를 되돌리지도,
+  // 기존 소유자를 뺏지도 않는다. 사실을 두 줄로 나눠 말하고 non-zero 로 끝낸다.
+  const conflicted = binding?.state === 'CONFLICT'
+  if (binding?.state === 'CONFLICT' && 'contract' in outcome) {
+    // JSON 이든 아니든 stderr 로 말한다 — stdout 은 한 문서, 진단은 진단 자리에.
+    console.error(
+      `${outcome.contract.id} is ${outcome.kind === 'STARTED' ? 'STARTED' : 'running'}, but this Run did not obtain ownership — ` +
+        `${binding.holder.physicalSessionId} holds ${binding.holder.logicalSessionId}. ASC does not take it over.`,
+    )
+    console.error(binding.detail)
+    console.error('only the owner can record progress, pause or finish it; see `asc host claude bind --force` for recovery.')
+  }
+
   if (values.json) {
-    console.log(JSON.stringify(outcome, null, 2))
-    return outcome.kind.startsWith('BLOCKED') || outcome.kind === 'FAILED' ? 1 : 0
+    console.log(JSON.stringify({ ...outcome, ...(binding ? { binding } : {}) }, null, 2))
+    if (outcome.kind.startsWith('BLOCKED') || outcome.kind === 'FAILED') return 1
+    return conflicted ? 1 : 0
   }
 
   switch (outcome.kind) {
@@ -3064,17 +3091,21 @@ async function runProceed(
     case 'CONTINUE_ACTIVE': {
       const verb = outcome.kind === 'STARTED' ? '시작' : outcome.kind === 'RESUMED' ? '재개' : '계속'
       console.log(`${outcome.contract.id} ${verb} — ${outcome.contract.goal}`)
+      for (const line of heldNotes) console.log(line)
+      if (binding?.state === 'CLAIMED') console.log(`this Run now holds ${outcome.contract.id} (${binding.physical})`)
+      if (binding?.state === 'ALREADY') console.log(`this Run already holds ${outcome.contract.id}`)
+      if (binding?.state === 'NO_RUN') {
+        console.log('run binding: skipped — not inside a Claude Code Run (CLAUDE_CODE_SESSION_ID unset)')
+      }
 
       // 이어가는 경우에는 계약 복창보다 "지금 어떻게 되고 있는가"가 먼저다.
       // 재개(RESUMED)는 아래 checkpoint가 그 역할을 하므로 중복해서 말하지 않는다.
       if (outcome.kind === 'CONTINUE_ACTIVE') {
         const progress = await progressService(store).get(outcome.contract.id)
-        const liveness = await livenessOf(store, outcome.contract.id)
         // 열린 상신은 신고와 무관하게 "지금 판단이 필요한 것"이다 — 화면이 그것을 먼저 말한다
         const rendered = renderProgress({
           session: outcome.contract,
           progress,
-          ...(liveness ? { liveness } : {}),
           ...(outcome.awaiting && outcome.awaiting.length > 0 ? { awaiting: outcome.awaiting } : {}),
         })
         console.log(`\n${rendered.body.join('\n\n')}`)
@@ -3100,7 +3131,7 @@ async function runProceed(
       if (outcome.contract.writeBoundary.length > 0) {
         console.log(`Write boundary: ${outcome.contract.writeBoundary.join(', ')}`)
       }
-      return 0
+      return conflicted ? 1 : 0
     }
     case 'NEEDS_SELECTION':
       console.log(`There are ${outcome.candidates.length} runnable sessions. Name the one you mean (--session):`)
@@ -3276,6 +3307,7 @@ async function buildWorkIngress(
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
 
   const work = ports.resourceContext
@@ -3804,11 +3836,12 @@ async function runSession(
         ...(values.blocker ? { blockers: values.blocker as string[] } : {}),
         ...(values.risk ? { risks: values.risk as string[] } : {}),
         ...(values.evidence ? { evidenceRefs: values.evidence as string[] } : {}),
-        ...(values.physical ? { writtenBy: values.physical as string } : {}),
+        ...(effectivePhysical(values) ? { writtenBy: effectivePhysical(values)! } : {}),
         recordedAt: at,
       })
+      // 소유권을 소비하는 자리 — Host 가 보고하는 Run id 로 채운다 (명시값 우선)
       return report(
-        await runtime.pause(target, checkpoint, values.physical as string | undefined),
+        await runtime.pause(target, checkpoint, effectivePhysical(values)),
         `${target} PAUSED — 다음: ${checkpoint.nextAction}`,
       )
     }
@@ -3838,7 +3871,8 @@ async function runSession(
         next: values.next,
         recordedAt: at,
       })
-      const outcome = await runtime.complete(target, handoff, values.physical as string | undefined)
+      // 소유권을 소비하는 자리 — Host 가 보고하는 Run id 로 채운다 (명시값 우선)
+      const outcome = await runtime.complete(target, handoff, effectivePhysical(values))
       if (!outcome.ok) return report(outcome, '')
       console.log(`${target} DONE — handoff written`)
       console.log('Updating state and blocks is the Controller\'s: `asc controller collect`')
@@ -4155,19 +4189,6 @@ async function runClosure(
   return 2
 }
 
-/**
- * hook이 남긴 활동 신호. 진척이 아니라 "도구가 돌았다"까지이므로 Renderer에
- * 보조 정보로만 넘긴다 — 없으면 없는 대로 둔다 (B-18).
- */
-async function livenessOf(
-  store: MarkdownStateStore,
-  logicalSessionId: string,
-): Promise<{ lastActivityAt: string; lastTool?: string } | null> {
-  const beat = await readHeartbeat(store.scope(CLAUDE_SCOPE), logicalSessionId)
-  if (!beat) return null
-  return { lastActivityAt: beat.lastActivityAt, ...(beat.lastTool ? { lastTool: beat.lastTool } : {}) }
-}
-
 /** Core는 provider를 모른다 — 소유권 판정에 쓸 binding은 Surface가 조립해 넘긴다. */
 function progressService(store: MarkdownStateStore): ProgressService {
   return new ProgressService({
@@ -4298,12 +4319,10 @@ async function runProgress(
     }
     const openEscalations = await escalationLedger(store).pending()
     for (const { id, session } of targets) {
-      const liveness = await livenessOf(store, id)
       const awaiting = openEscalations.filter((record) => record.sessionId === id).map((r) => r.escalationId)
       const rendered = renderProgress({
         session,
         progress: await service.get(id),
-        ...(liveness ? { liveness } : {}),
         ...(awaiting.length > 0 ? { awaiting } : {}),
       })
       if (values.json) {
@@ -4317,15 +4336,18 @@ async function runProgress(
   }
 
   if (command === 'report') {
-    if (!target || !values.physical || !values.phase) {
-      console.error('Usage: asc progress report <S-ID> --physical <id> --phase "what is happening now"')
+    // 소유권을 소비하는 자리 — Host 가 보고하는 Run id 로 채운다 (명시값 우선). Run 밖이면 요구한다.
+    const physical = effectivePhysical(values)
+    if (!target || !physical || !values.phase) {
+      console.error('Usage: asc progress report <S-ID> [--physical <id>] --phase "what is happening now"')
+      console.error('  --physical defaults to this Run inside Claude Code; outside one it is required.')
       return 2
     }
     const decision = parseEnumArg(values.decision, ['none', 'later', 'now'] as const, 'decision')
     const verifier = parseEnumArg(values.verifier, ['none', 'running', 'pass', 'fail'] as const, 'verifier')
     if (decision === null || verifier === null) return 2
 
-    const outcome = await service.report(target, values.physical as string, {
+    const outcome = await service.report(target, physical, {
       phase: values.phase as string,
       ...(values.milestone ? { milestones: values.milestone as string[] } : {}),
       ...(values.next ? { nextStep: values.next as string } : {}),
@@ -4404,6 +4426,7 @@ async function buildMonitorEngines(
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   // canonical.read 처럼 한 곳이어야 의미가 서는 것은 예전 경로 그대로 역할로 고른다.
   const singular = await buildRuntimePorts({
@@ -4412,6 +4435,7 @@ async function buildMonitorEngines(
     perPage: 30,
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
 
   if (built.channels.length === 0) {
@@ -4715,20 +4739,8 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
       : { axis: 'executor', state: 'MISSING', detail: 'no binding provides an outward write path' },
   ]
 
-  // ② 막을 것을 실제로 막을 수 있는가. hook 이 없으면 AUTO 는 이름뿐이다.
-  const host = await verifyInstall(hostPaths())
-  axes.push({
-    axis: 'guard',
-    state:
-      host.status === 'INSTALLED_CURRENT'
-        ? 'READY'
-        : host.hookRegistered
-          ? 'DEGRADED'
-          : 'MISSING',
-    detail: host.status,
-  })
-
-  // ③ 그 상태에서 사람이 ASC 를 계속 부를 수 있는가 — 0.7.1 이 갇혔던 자리다.
+  // ② 무인 Run 이 ASC 명령을 프롬프트 없이 부를 수 있는가. AUTO 에서 관리 경로를 부르는
+  //    것은 Agent 이고, Agent 는 Host 의 권한 프롬프트에 답하지 못한다 (E-02).
   const access = await controlPlaneAccess(hostPaths())
   axes.push({
     axis: 'control-plane',
@@ -4736,46 +4748,6 @@ async function observeReadiness(root: string | null, runtime?: ResolvedRuntime):
     ...(access.detail ? { detail: access.detail } : {}),
   })
   return axes
-}
-
-/**
- * AUTO 에서 **막히지만 나갈 길이 없는** 행위들.
- *
- * 이것이 AUTO 를 거부할 사유는 아니다 — 나머지 행위는 정상이고, 하나 때문에 전부를
- * 막으면 이번엔 반대편 dead-end 가 된다. 대신 이름을 댄다. 실사용에서 사람이
- * `asc mode manual` 로 내려간 것은 화면이 그것을 권해서가 아니라 **막힌 뒤 아무 말도
- * 없었기** 때문이다.
- *
- * 계산은 좁게 한다. Guard 의 금지 패턴 전부가 아니라, 그중 관리 행위로 환원되는 것
- * (`action` 이 붙은 것)만 본다 — `gh api` 처럼 한 행위가 아닌 명령까지 세면 "나갈 길이
- * 없다" 가 늘 참이 되어 화면이 무의미해진다.
- */
-function deadEndActions(outward: ScmPort | null, providers?: DeadEndScope): string[] {
-  const blocked = new Set(
-    FORBIDDEN_COMMAND_PATTERNS.map((entry) => entry.action).filter((action): action is string => action !== undefined),
-  )
-  return MANAGED_EXTERNAL_ACTIONS.filter(
-    (action) =>
-      blocked.has(action) &&
-      !(outward?.supports?.(action) ?? false) &&
-      addressableHere(action, providers),
-  )
-}
-
-/** 이 workspace 가 실제로 쓰는 provider 들. **이름을 박아 넣지 않는다** — 조립에서 온다. */
-type DeadEndScope = {
-  /** Profile 이 선언한 결합의 adapter id. 팀이 쓰기로 한 것들이다. */
-  declared: ReadonlySet<string>
-  /** 이 빌드가 아는 adapter id 전부. 이름공간이 provider 의 것인지 가르는 데만 쓴다. */
-  known: ReadonlySet<string>
-}
-
-/** 선언된 adapter id 와 이 빌드가 아는 adapter id. 한 곳에서만 만든다. */
-function deadEndScope(runtime?: ResolvedRuntime): DeadEndScope {
-  return {
-    declared: new Set((runtime?.layers.profile.bindings ?? []).map((binding) => binding.adapter)),
-    known: new Set(monitorAdapters().map((adapter) => adapter.describe().id)),
-  }
 }
 
 /**
@@ -4805,7 +4777,7 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   const background = await backgroundHere(values)
 
   const store = root ? new MarkdownStateStore(root) : null
-  // 이 Run 의 답을 묻는다 — 화면이 guard 와 같은 것을 말해야 한다 (0.8.4).
+  // 이 Run 의 답을 묻는다 — 화면이 실행기와 같은 것을 말해야 한다 (0.8.4).
   const mode = store ? await readExecutionMode(store.scope('policy'), observedRunId()) : null
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
   // 밖을 읽을 수 있는가 · 밖에 쓸 수 있는가. 두 답 모두 조립 결과에서 나온다.
@@ -4830,8 +4802,6 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
       ),
       ...(channels?.unavailable ?? []),
     ],
-    // 축이 READY 여도 개별 행위는 나갈 길이 없을 수 있다 — 그 목록.
-    deadEnd: deadEndActions(ports?.scm ?? null, deadEndScope(runtime)),
   }
   // 붙일 수 있는데 아무도 안 붙인 것 (0.8.4 · C-2). 자동 승격하지 않는다 — 말만 한다.
   const survey = root ? await bindingSurvey(runtime).catch(() => null) : null
@@ -4873,6 +4843,11 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   // 결합에는 볼 이력이 없다. 그래서 finish 가 놓지 않던 동안 생긴 것들은 자동 정리도
   // 비껴갔고, 실기계에서 여섯 개가 일주일을 그렇게 살았다. 다음 bind 가 실패하거나
   // `uninstall plan` 을 읽을 때에야 한꺼번에 드러났다 (#63).
+  // 어느 Run 이 어느 세션을 쥐고 있는가 — 한 번 읽어 JSON 과 화면이 같은 것을 말한다 (0.9.0).
+  const heldBy = new Map<string, string>(
+    store ? (await claudeBindings(store).current()).map((b) => [b.logicalSessionId, b.physicalSessionId]) : [],
+  )
+  const thisRun = observedRunId()
   const heldByFinished = store
     ? await (async () => {
         const held = await claudeBindings(store).current()
@@ -4919,7 +4894,12 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
           ...(survey
             ? { bindings: { declared: survey.declared, undeclared: survey.undeclared, workItem: survey.workItem } }
             : {}),
-          work: sessions.map((session) => ({ id: session.id, status: session.status, role: session.role })),
+          work: sessions.map((session) => ({
+            id: session.id,
+            status: session.status,
+            role: session.role,
+            ...(heldBy.has(session.id) ? { heldBy: heldBy.get(session.id) } : {}),
+          })),
           awaitingHuman: waiting.length,
           ...(service ? { service } : {}),
           ...(background ? { background } : {}),
@@ -4961,10 +4941,6 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     if (external.write) {
       console.log(`  read-back available for: ${external.write.verifiable.join(', ') || 'nothing'}`)
     }
-    // Guard 가 막는데 이 통로가 싣지 않는 행위. AUTO 에서 그것들은 나갈 길이 없다.
-    if (external.deadEnd.length > 0) {
-      console.log(`  AUTO 에서 막히지만 관리 경로가 없는 행위: ${external.deadEnd.join(', ')}`)
-    }
     for (const reason of external.unavailable.slice(0, 3)) console.log(`  ${reason}`)
   }
   // **침묵을 남기지 않는다.** AVAILABLE 도 UNAVAILABLE 도 아닌 자리가 있었다: 발견됐고
@@ -4996,13 +4972,17 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   console.log('')
   if (sessions.length > 0) {
     console.log('Work in progress:')
-    for (const session of sessions) console.log(`  ${session.id} ${session.status} — ${session.goal ?? ''}`)
+    for (const session of sessions) {
+      const owner = heldBy.get(session.id)
+      const holding = owner ? (owner === thisRun ? ' · held by this Run' : ` · held by ${owner}`) : ''
+      console.log(`  ${session.id} ${session.status} — ${session.goal ?? ''}${holding}`)
+    }
   } else if (root) {
     console.log('Work in progress: none')
   }
   // 멈춘 채 아무도 붙들지 않은 세션 (0.8.5). **닫지 않는다** — 이름과 근거와 다음 명령만 준다.
   if (store && sessions.length > 0) {
-    const held = new Set((await claudeBindings(store).current()).map((binding) => binding.logicalSessionId))
+    const held = new Set(heldBy.keys())
     const progress = progressService(store)
     const rows = await Promise.all(
       sessions.map(async (session) => ({
@@ -5070,9 +5050,6 @@ async function runMode(
   const current = await readExecutionMode(scope, askedRun)
   const readiness = judgeAutoReadiness(await observeReadiness(root, runtime))
 
-  const outward = root ? await composedPorts(runtime).then((p) => p.scm ?? null).catch(() => null) : null
-  const deadEnds = deadEndActions(outward, deadEndScope(runtime))
-
   const show = (state: ExecutionModeState, extra: Record<string, unknown> = {}): void => {
     if (values.json) {
       console.log(
@@ -5086,7 +5063,6 @@ async function runMode(
             ...(state.runOverrides ? { runOverrides: state.runOverrides } : {}),
             enforcement: enforcementOf(state),
             autoReadiness: { ready: readiness.ready, axes: readiness.axes },
-            ...(deadEnds.length > 0 ? { deadEnd: deadEnds } : {}),
             ...extra,
           },
           null,
@@ -5100,11 +5076,6 @@ async function runMode(
       console.log(`  ${axis.state.padEnd(16)} ${axis.axis}${axis.detail ? ` — ${axis.detail}` : ''}`)
     }
     console.log(readiness.ready ? '  AUTO READY' : '  AUTO NOT AVAILABLE')
-    // 축이 전부 READY 여도 개별 행위는 나갈 길이 없을 수 있다. 그 사실을 여기서 말하지
-    // 않으면 사람은 실행 시점에야 알고, 그때는 이미 막힌 뒤다.
-    if (deadEnds.length > 0) {
-      console.log(`  AUTO 에서 막히지만 관리 경로가 없는 행위: ${deadEnds.join(', ')}`)
-    }
     for (const [key, value] of Object.entries(extra)) console.log(`${key}: ${String(value)}`)
   }
 
@@ -5251,7 +5222,7 @@ function runTarget(
       ok: false,
       detail:
         '--this-run 을 썼는데 이 Run 의 id 를 관측하지 못했다. --run <id> 로 Run 을 지목하라 ' +
-        '(guard 가 조회하는 값과 같아야 한다).',
+        '(Host 가 그 Run 에 준 값과 같아야 한다).',
     }
   }
   return {
@@ -5519,9 +5490,10 @@ async function runWork(
       // **DONE 을 되돌리지는 않는다.** handoff 는 이미 쓰였고, 반쯤 되돌린 상태가
       // 이 결함이 만든 것보다 낫지 않다. 놓지 못했으면 그 사실을 말하고 종료 코드로
       // 드러낸다 — 조용히 성공이라 적지 않는다.
-      // `--physical` 이 없는 경로는 여기 오지 못한다 — 결합이 있으면 `done` 이 먼저
-      // owner 를 요구하고, 결합이 없으면 놓을 것이 없다. 그래서 분기를 두지 않는다.
-      const physical = values.physical as string | undefined
+      // `--physical` 은 이 Run 의 id 로 채워진다(0.9.0, 명시값 우선). 그 값이 없는 경로는
+      // 여기 오지 못한다 — 결합이 있으면 `done` 이 먼저 owner 를 요구하고, 결합이 없으면
+      // 놓을 것이 없다. 그래서 분기를 두지 않는다.
+      const physical = effectivePhysical(values)
       if (physical && (await claudeBindings(store).get(session))) {
         const released = await releaseRuntimeBinding(store, session, physical, new Date().toISOString())
         if (released.ok) console.log(`${session} ownership released`)
@@ -6582,6 +6554,7 @@ async function coordinationSurfaceFor(resolved?: ResolvedRuntime) {
     roles: rolesFor(plan, declared),
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   return { surface: ports.coordinationSurface, unavailable: ports.unavailable }
 }
@@ -6876,6 +6849,7 @@ async function runCoordinationObserve(
     roles: rolesFor(plan, declared),
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   const contextOf = (adapterId: string) =>
     built.channels.find((channel) => channel.adapterId === adapterId && channel.resourceContext)?.resourceContext
@@ -7278,11 +7252,14 @@ async function runGrant(
       }
       // 강제가 서 있는 자리에서는 되돌려 읽을 수 없는 행위를 실행하지 않는다 (P1-2).
       const enforcing = enforcementOf(await readExecutionMode(store.scope('policy'), observedRunId())) === 'ENFORCE'
+      // 얼림은 실제 mutation 경계에서 읽는다 — 선언만 있고 아무도 안 읽으면 차단이 아니다.
+      const freezeLedger = new FreezeLedger(store.scope('policy'))
       const outcome = await new Executor({
         store,
         scm,
         runId: (values['run-id'] as string) ?? `cli-${process.pid}`,
         ...(enforcing ? { requireVerification: true } : {}),
+        freeze: () => freezeLedger.policy(),
       }).run(target)
 
       if (outcome.ok) {
@@ -7291,6 +7268,19 @@ async function runGrant(
       }
       // 실패의 종류를 뭉개지 않는다 (0.8.0 §P) — 다음 행동이 저마다 다르다.
       console.error(`${outcome.reason}${'detail' in outcome ? `: ${outcome.detail}` : ''}`)
+      if (outcome.reason === 'FROZEN') {
+        // 미룬 사실을 남긴다. Grant 는 READY 그대로 — 녹은 뒤 사람이 다시 보고 같은 Grant 로 부른다.
+        const grant = await store.get('grant', target)
+        await freezeLedger.defer({
+          id: target,
+          action: 'remote.write',
+          intent: grant ? `${grant.action} ${grant.target}` : target,
+          basis: grant?.basis?.sourceSha ? [grant.basis.sourceSha] : [],
+          grantRef: target,
+        })
+        for (const line of freezeLines(await freezeLedger.policy(), await freezeLedger.deferred())) console.error(line)
+        console.error('녹인 뒤 다시 확인하고 같은 Grant 로 다시 부른다: asc thaw')
+      }
       if (outcome.reason === 'UNCERTAIN') {
         console.error('밖에 나갔는지 알 수 없다. 다시 실행하지 마라 — 먼저 원격을 읽어 확인하고,')
         console.error('그 뒤에 사람이 새 Grant 를 낸다. 이 Grant 는 집힌 채로 남아 재사용되지 않는다.')
@@ -7358,6 +7348,7 @@ async function composedPorts(runtime?: ResolvedRuntime): Promise<Awaited<ReturnT
         }
       : {}),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   return ports
 }
@@ -7443,17 +7434,16 @@ async function reconcileInbox(
 
 /** 이 workspace 가 밖을 읽는 통로 전부. 관측 채널이 먼저고, 조립된 단일 통로가 뒤를 받친다. */
 async function inboxReaders(resolved?: ResolvedRuntime): Promise<ResourceContextPort[]> {
-  const { root: projectRoot } = await discoverProjectRoot(process.cwd())
-  const adapters = monitorAdapters()
-  const declared = resolved?.layers.profile.bindings ?? []
   const readers: ResourceContextPort[] = []
   try {
-    const { plan } = await bindingPlanFor(resolved)
+    // plan 을 만든 adapter 인스턴스를 같이 받는다 — host·remote 는 그 안에만 있다
+    const { plan, declared, projectRoot, adapters } = await bindingPlanFor(resolved)
     const built = await buildObservationChannels({
       plan,
       roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
       ...jamComposition(projectRoot),
       endpointFor: (binding) => endpointOf(adapters, binding),
+      remoteFor: (binding) => remoteOf(adapters, binding),
     })
     for (const channel of built.channels) if (channel.resourceContext) readers.push(channel.resourceContext)
   } catch {
@@ -7595,25 +7585,34 @@ function reconcileLines(result: Awaited<ReturnType<typeof reconcileInbox>>): str
  * 한 번의 실행 안에서 결합 구성이 달라질 이유가 없으므로 그 회차 동안만 붙들어 둔다.
  * 프로세스가 끝나면 사라진다 — 디스크에 남기지 않는다.
  */
-const planCache = new Map<string, Promise<BindingPlan>>()
+/**
+ * plan 과 **그 plan 을 만든 adapter 인스턴스**를 함께 캐시한다. 발견 단계가 알아낸 host·remote 는
+ * 그 인스턴스 안에만 있다(`endpointFor`·`remoteFor`). plan 만 캐시하고 adapter 를 매번 새로
+ * 만들면 두 번째 호출부터 빈 인스턴스에 묻게 되고, 자체 호스팅 결합이 조용히 gitlab.com 으로
+ * 조립된다 — 실측에서 그랬다.
+ */
+const planCache = new Map<string, { adapters: Adapter[]; plan: Promise<BindingPlan> }>()
 
 async function bindingPlanFor(
   runtime?: ResolvedRuntime,
 ): Promise<{ plan: BindingPlan; declared: readonly { role: string; adapter: string; resource: string }[]; projectRoot: string; adapters: Adapter[] }> {
   const { root: projectRoot } = await discoverProjectRoot(process.cwd())
   const declared = runtime?.layers.profile.bindings ?? []
-  const adapters = monitorAdapters()
   const key = `${projectRoot}|${declared.map((b) => `${b.role}:${b.adapter}:${b.resource}`).join(',')}`
-  let pending = planCache.get(key)
-  if (!pending) {
-    pending = composeBindings({
-      context: { projectRoot, env: process.env },
+  let cached = planCache.get(key)
+  if (!cached) {
+    const adapters = monitorAdapters()
+    cached = {
       adapters,
-      roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
-    })
-    planCache.set(key, pending)
+      plan: composeBindings({
+        context: { projectRoot, env: process.env },
+        adapters,
+        roles: declared.map((b) => ({ adapterId: b.adapter, resource: b.resource, role: b.role })),
+      }),
+    }
+    planCache.set(key, cached)
   }
-  return { plan: await pending, declared, projectRoot, adapters }
+  return { plan: await cached.plan, declared, projectRoot, adapters: cached.adapters }
 }
 
 /**
@@ -7657,6 +7656,7 @@ async function composedReadChannels(runtime?: ResolvedRuntime): Promise<{ ids: s
     roles: { ...rolesFor(plan, declared), ...workItemRoles(plan, declared) },
     ...jamComposition(projectRoot),
     endpointFor: (binding) => endpointOf(adapters, binding),
+    remoteFor: (binding) => remoteOf(adapters, binding),
   })
   return { ids: built.channels.map((channel) => channel.eventSource.id), unavailable: built.unavailable }
 }

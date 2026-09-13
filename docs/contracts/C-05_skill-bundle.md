@@ -93,8 +93,8 @@ Verifier에게 구현 판단 책임을 주지 않는다. 반환은 판정이지 
 | Verifier | lifecycle용 사용 | 원칙적으로 사용 안 함 | 주 사용 |
 
 배치는 **worker 계약이 노출하는 지시**로 표현한다 — Implementer 계약문에 asc-inbox 호출
-지시를 넣지 않는다. Skill 파일 자체는 host 전역에 설치되므로 물리적 접근 차단은 아니며,
-차단이 필요한 것은 external write이고 그것은 C-03 §5.3 guard가 이미 맡는다.
+지시를 넣지 않는다. Skill 파일 자체는 host 전역에 설치되므로 물리적 접근 차단은 아니다
+(0.9.0 부터는 셸을 막는 층이 아예 없다 — 관리 실행의 경계는 Grant·Executor 가 진다).
 여기서 다루는 것은 **무엇을 하라고 지시받는가**다.
 
 ---
@@ -214,7 +214,8 @@ uninstall은 ASC 설치물만 제거 (settings.json 바이트 복원)
 ```
 
 3개로 늘어나도 계약 변경이 아니다 — manifest가 파일 딕셔너리이므로 항목이 늘 뿐이다.
-**hook은 하나로 유지한다.** guard는 안전 층이고 중복 등록은 그 자체가 위험이다.
+**hook은 하나로 유지한다.** 0.9.0 부터 그 하나는 SessionStart(front restore)이고, 중복 등록은
+그 자체가 결함이다.
 
 Bundle 메타(`bundleVersion` / `ascCompatibility` / `defaultDepth` 등)의 구체 포맷은
 **필요가 증명되기 전에 만들지 않는다** — 지금 3개 파일을 설치하는 데 매니페스트 위의 또 다른

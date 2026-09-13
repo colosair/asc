@@ -19,9 +19,9 @@ const keyOf = (logicalSessionId: string) => `runtime-binding:${logicalSessionId}
  * 한다. 지금까지는 release가 파일을 지워서 회수 뒤에는 몇 개의 실행이 거쳐 갔는지조차
  * 복원할 수 없었다.
  *
- * **접두어가 `runtime-binding`이면 안 된다.** Host Adapter의 guard hook은 이 scope에서
- * `runtime-binding` 으로 시작하는 파일을 훑어 관리 대상 세션을 찾는다. 묘비가 그 앞에
- * 걸리면 이미 내려놓은 세션이 계속 관리 대상으로 읽혀 죽은 소유권으로 차단 판정이 선다.
+ * **접두어가 `runtime-binding`이면 안 된다.** `current()` 는 이 scope에서 `runtime-binding`
+ * 으로 시작하는 파일을 훑어 살아 있는 소유권을 찾는다. 묘비가 그 앞에 걸리면 이미 내려놓은
+ * 세션이 계속 소유된 것으로 읽혀 죽은 소유권이 다음 결합을 막는다.
  */
 const logKey = (logicalSessionId: string, seq: number) => `binding-log:${logicalSessionId}:${seq}`
 const logPrefix = (logicalSessionId: string) => `binding-log:${logicalSessionId}:`
@@ -61,8 +61,8 @@ export class ScopedRuntimeBindings implements RuntimeBindings {
     // 지금까지 원자성은 Logical 쪽에서만 봤다 — 같은 physical 이 다른 세션을 하나 더
     // 집는 것은 아무도 막지 않았고, 실측에서 그 겹침이 회차마다 나타났다
     // (S-03 이 살아 있는 동안 S-04 가 같은 physical 로 집혔고, 그 뒤로도 계속).
-    // 그 상태에서는 guard 가 "이 physical 은 관리 대상" 이라고 답할 때 어느 계약을
-    // 말하는지 정해지지 않는다. 뺏지 않는다 — 그 결정은 사람의 것이다 (C-03 §3.2).
+    // 그 상태에서는 "이 Run 이 어느 계약을 위해 도는가" 가 정해지지 않는다.
+    // 뺏지 않는다 — 그 결정은 사람의 것이다 (C-03 §3.2).
     const held = await this.#currentOf(parsed.physicalSessionId)
     if (held && held.logicalSessionId !== parsed.logicalSessionId) {
       return { ok: false, reason: 'RUNTIME_CONFLICT', current: held }

@@ -39,12 +39,30 @@ export function discoverToken(env: NodeJS.ProcessEnv = process.env): string | nu
  */
 export type ProcessRunner = (command: string, args: readonly string[]) => Promise<string>
 
-export async function glabAvailable(run: ProcessRunner): Promise<boolean> {
+/**
+ * `glab` 은 host 를 cwd 의 git 컨텍스트에서 추론한다. ASC 는 결합이 어느 host 를 가리키는지
+ * 발견 단계에서 이미 알고 있으므로 그 값을 넘긴다 — cwd 가 다른 저장소(hook·홈 디렉터리)여도
+ * 같은 host 를 묻게 된다. 실측: 자체 호스팅 host 에만 로그인된 기계에서 `/tmp` 에서 돌린
+ * `glab auth status` 는 gitlab.com 을 물어 exit 1 이었고, 결합은 UNCONFIGURED 로 읽혔다.
+ */
+const hostArgs = (host: string | undefined): string[] => (host ? ['--hostname', host] : [])
+
+export async function glabAvailable(run: ProcessRunner, host?: string): Promise<boolean> {
   try {
-    await run('glab', ['auth', 'status'])
+    await run('glab', ['auth', 'status', ...hostArgs(host)])
     return true
   } catch {
     return false
+  }
+}
+
+/** endpoint(`https://host/api/v4`)에서 host 만 꺼낸다. 없거나 이상하면 undefined — 추측하지 않는다. */
+export function hostOf(baseUrl: string | undefined): string | undefined {
+  if (!baseUrl) return undefined
+  try {
+    return new URL(baseUrl).host || undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -54,16 +72,22 @@ export async function glabAvailable(run: ProcessRunner): Promise<boolean> {
  */
 export class GlabApiClient implements GitLabReader, GitLabWriter {
   #run: ProcessRunner
+  #host: string | undefined
 
-  constructor(run: ProcessRunner) {
+  constructor(run: ProcessRunner, host?: string) {
     this.#run = run
+    this.#host = host
+  }
+
+  #api(...rest: string[]): string[] {
+    return ['api', ...hostArgs(this.#host), ...rest]
   }
 
   async get<T>(path: string): Promise<GitLabResponse<T>> {
     try {
       // 페이지 헤더는 `glab api` 가 돌려주지 않는다. 다음 페이지를 모르는 채로
       // 있다고 말하지 않는다 — nextPage 를 비워 두면 호출측이 한 페이지로 끝낸다.
-      const stdout = await this.#run('glab', ['api', path.replace(/^\//, '')])
+      const stdout = await this.#run('glab', this.#api(path.replace(/^\//, '')))
       return { ok: true, status: 200, data: JSON.parse(stdout) as T }
     } catch (error) {
       return { ok: false, status: 0, data: null, error: String((error as Error).message ?? error).slice(0, 200) }
@@ -77,7 +101,7 @@ export class GlabApiClient implements GitLabReader, GitLabWriter {
       value === undefined ? [] : ['-f', `${key}=${String(value)}`],
     )
     try {
-      const stdout = await this.#run('glab', ['api', '--method', 'POST', path.replace(/^\//, ''), ...fields])
+      const stdout = await this.#run('glab', this.#api('--method', 'POST', path.replace(/^\//, ''), ...fields))
       return { ok: true, status: 201, data: JSON.parse(stdout) as T }
     } catch (error) {
       return { ok: false, status: 0, data: null, error: String((error as Error).message ?? error).slice(0, 200) }
@@ -89,7 +113,7 @@ export class GlabApiClient implements GitLabReader, GitLabWriter {
       value === undefined ? [] : ['-f', `${key}=${String(value)}`],
     )
     try {
-      const stdout = await this.#run('glab', ['api', '--method', 'PUT', path.replace(/^\//, ''), ...fields])
+      const stdout = await this.#run('glab', this.#api('--method', 'PUT', path.replace(/^\//, ''), ...fields))
       return { ok: true, status: 200, data: JSON.parse(stdout) as T }
     } catch (error) {
       return { ok: false, status: 0, data: null, error: String((error as Error).message ?? error).slice(0, 200) }
