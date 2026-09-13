@@ -200,4 +200,13 @@ describe('갱신은 새 build 가 한다 (0.7.1)', () => {
     // 못 찾으면 조용히 넘어가지 않는다 — 낡은 hook 이 새 runtime 옆에 남는다
     assert.match(block, /could not find the installed runtime/)
   })
+
+  it('새 build 가 걷어낸 것도 update 화면에 남는다 (0.9.0 acceptance 관측)', async () => {
+    // 0.8.5 → 0.9.0 실기계 갱신이 guard hook 을 걷었는데 `asc update` 는 그 줄을 필터로
+    // 떨어뜨려 화면에 아무 말도 없었다. 동작은 맞았고 보고만 빠졐다 — 조용한 업그레이드는 없다.
+    const source = await readFile(CLI, 'utf8')
+    const start = source.indexOf('async function refreshWithNewRuntime(')
+    const block = source.slice(start, source.indexOf('\n}', start))
+    assert.match(block, /line\.startsWith\('removed:'\)/)
+  })
 })
