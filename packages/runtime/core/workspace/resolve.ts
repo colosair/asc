@@ -1,7 +1,7 @@
 // Workspace Resolution — "지금 여기는 어느 ASC runtime인가"를 정하는 **한 곳** (C-11 §3·B-45).
 //
 // 지금까지 이 질문의 답은 네 군데에 따로 있었다: CLI의 discoverRoot, attach의
-// discoverProjectRoot, bootstrap의 내부 조립, 그리고 guard hook 안의 복제본.
+// discoverProjectRoot, bootstrap의 내부 조립, 그리고 SessionStart hook 안의 복제본.
 // 넷이 조금씩 다르게 답하면 "어디는 되고 어디는 안 되는" 상태가 생기고, 실제로 그랬다
 // (`--root` 가 host 명령에만 안 먹던 비대칭).
 //
@@ -14,7 +14,7 @@
 //   5. UNRESOLVED         모르면 모른다고 한다
 //
 // **3번은 index가 빗나갔을 때만 돈다.** 등록된 locator로 풀리는 정상 경로는 예전 그대로
-// 파일 접근 하나이며, Git을 부르지 않는다 — guard hook이 매 Bash 호출마다 지나는 길이다.
+// 파일 접근 하나이며, Git을 부르지 않는다 — SessionStart hook 이 세션마다 지나는 길이다.
 //
 // **3번의 탐색에는 경계가 있다.** 예전에는 파일시스템 루트까지 올라갔는데, 사용자 홈에
 // `~/.asc` 가 생기는 순간 홈 아래 아무 저장소나 그 뿌리로 오인 매칭된다. 그래서 홈을
@@ -63,7 +63,7 @@ export type ResolveInput = {
   /**
    * 이 경로가 속한 Git repository의 checkout 전부(main + linked). 없으면 이 갈래를 건너뛴다.
    *
-   * **주입이 기본값이다** — guard hook처럼 매 호출마다 도는 소비자는 이것을 넘기지 않고,
+   * **주입이 기본값이다** — SessionStart hook 처럼 가볍게 도는 소비자는 이것을 넘기지 않고,
    * 그러면 예전과 똑같이 index만 본다.
    */
   worktrees?: WorktreeProbe

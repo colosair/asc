@@ -329,7 +329,7 @@ FAIL 기준 8항 검증:
 | Human control — Agent 자체 Decision 가능하면 FAIL | PASS | read/transition 분리, 명시적 사람 입력 + Identity Binding (§5) |
 | Race safety — 동시 승인 중복 실행 가능하면 FAIL | PASS | expectedVersion CAS + STALE/ALREADY_DECIDED (§8), Grant single_use는 v5.1 §11.5 |
 | Temporal correctness — 과거 분석과 현재 상태 혼합하면 FAIL | PASS | Stored Packet / Current Context Overlay 분리 + freshness (§6~7) |
-| External write safety — Grant 우회 직접 게시 가능하면 FAIL | PASS | 결정 후에도 Grant→Executor→Drift Guard 경로만 (§10) |
+| External write safety — Grant 우회 직접 게시 가능하면 FAIL | PASS | 결정 후에도 Grant→Executor→Drift Guard 경로만 (§10). 0.9.0 부터 이 항목의 범위는 **ASC 가 관리·실행하는** 게시다 — 같은 OS 사용자의 셸이 직접 치는 raw 게시는 ASC 의 경계 밖이고, ASC 는 그것을 막는다고 주장하지 않는다 |
 
 ## 14. 구현 단계 확정 항목 (의도된 미확정)
 

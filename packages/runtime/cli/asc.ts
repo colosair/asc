@@ -260,7 +260,7 @@ These are the primitives the public commands are built on. A healthy path does n
 require them: \`setup\` · \`status\` · \`work\` · \`inbox\` · \`mode\` cover normal use.
 They stay because recovery, diagnosis and scripting need them.
 
-  asc proceed [--session <id>] [--work <WORK-ID>] [--goal <text>] [--json]
+  asc proceed [--session <id>] [--work <WORK-ID>] [--goal <text>] [--json]   # deprecated since 0.8.0 — use asc work start
 
   asc inbox trace  <REQUEST_ID> [--json]   # how it got here — an exploratory trace
   asc inbox digest [--flush] [--json]      # batched view (P0 stays separate)
@@ -355,7 +355,7 @@ They stay because recovery, diagnosis and scripting need them.
                    [--audience <who>] [--known <objectId>] [--work <ref>] [--json]
   asc coordination observe [--json]    # did anything come back on what we published
 
-  asc progress show   [<S-ID>]
+  asc progress show   [<S-ID>]            # deprecated since 0.8.0 — use asc work status
   asc progress report <S-ID> [--physical <id>] --phase <text>   # --physical defaults to this Run
                       [--milestone <text>...] [--next <text>] [--unresolved <text>...]
                       [--decision none|later|now] [--decision-ref <text>]

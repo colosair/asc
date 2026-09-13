@@ -6,6 +6,8 @@
 //
 // guard는 optional이 아니다. CLI가 아닌 Host Adapter가 직접 불러도 profile.lock 검증을
 // 건너뛸 수 없어야 하며(C-03 §1.2), 정본 조립은 Surface가 아니라 factory가 진다.
+// 이 `guard` 는 bootstrap/profile.lock 검증(bootstrapGuard)이다 — 0.9.0 에서 폐기한 host 의
+// external-write guard hook 과 이름만 같고 무관하다.
 
 import type { Session } from '../model/entities.ts'
 import type { StateStore } from '../../ports/state-store.ts'
