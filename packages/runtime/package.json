@@ -42,8 +42,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "prepack": "node scripts/build.mjs",
-    "test": "node --test \"tests/*.test.ts\"",
-    "dist:smoke": "node scripts/dist-smoke.mjs"
+    "test": "node --test \"tests/*.test.ts\""
   },
   "dependencies": {
     "zod": "^3.25.76"

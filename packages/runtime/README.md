@@ -3,8 +3,8 @@
 The ASC (Agent Session Control) runtime: core, CLI, and adapters.
 
 This package provides the `asc` command. Everything ASC decides — sessions, checkpoints,
-proceed-by-default, escalation, audit, the external-write guard, host integration — lives
-here.
+proceed-by-default, escalation, the managed execution path (grant → review → execute →
+verify), audit, host integration — lives here.
 
 ```bash
 npm install -g @asc-agent/runtime@0.9.0

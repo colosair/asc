@@ -70,8 +70,11 @@ From the published packages, never a local build:
    `INSTALLED_CURRENT` — no leftover hook registration, user hooks untouched.
 4. Whatever the release changed, exercised through the published artefact.
 
-Record the run in the version's checklist. A measurement not taken is recorded
-as not taken — never written up as a pass. Only then dispatch finalize.
+Record the run in the version's checklist under a `## 실행 기록` section and merge
+that record to `main`. A measurement not taken is recorded as not taken — never
+written up as a pass. Only then dispatch finalize: it refuses while the checklist
+on `main` has no `## 실행 기록` section (the record lands after publish by
+construction, so the gate reads `main` HEAD, not the published commit).
 
 ## Failure recovery
 

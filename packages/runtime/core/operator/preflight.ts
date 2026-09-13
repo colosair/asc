@@ -10,8 +10,8 @@
 //   안 한다 — 범위 확장, role 변경, 세션 발급. 판정은 여기서, 결정은 Controller가.
 //
 // 판정 로직은 새로 만들지 않는다. scope.ts의 패턴 대 패턴 판정을 그대로 쓴다 —
-// policy.evaluate()를 쓰지 않는 이유는 그쪽이 단수 path + 경로 대 패턴이라
-// `specs/**` 같은 패턴 입력을 오판하기 때문이다.
+// 단수 path 를 받는 경로 대 패턴 판정은 `specs/**` 같은 패턴 입력을 오판하므로 여기 맞지
+// 않고, 0.9.1 에서 제품에서 걷어냈다.
 
 import { lookupAuthority, type AuthorityLookup, type OwnershipMap } from '../policy/ownership.ts'
 import { isWithinScopes, parseScope } from '../policy/scope.ts'

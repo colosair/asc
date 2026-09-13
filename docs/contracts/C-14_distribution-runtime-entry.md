@@ -61,7 +61,7 @@ JAM      MCP server — editor가 spawn하는 자식. stdout이 프로토콜 채
 ASC      사람이 터미널에서 치거나 세션이 직접 부르는 local control plane.
          committed 실행물 지목 파일이 없다 — Claude host 통합은 생성된 hook을
          `~/.claude/settings.json` 에 절대경로로 적고, 그 경로는 이미 machine-local이다.
-         `asc proceed` 는 하루에 수십 번 불린다.
+         `asc work start` 는 하루에 수십 번 불린다.
 ```
 
 이 차이가 아래 §3·§4의 두 갈림길을 결정한다.
@@ -206,7 +206,7 @@ mode: package        설치된 runtime이 스스로 돈다. 재실행도, 중간
 mode: development    설치된 bin이 지정된 checkout의 build를 대신 실행한다.
 ```
 
-**JAM의 package mode(매 기동 `npx --yes`)를 그대로 쓰지 않는다.** `asc proceed` 가 npm
+**JAM의 package mode(매 기동 `npx --yes`)를 그대로 쓰지 않는다.** `asc work start` 가 npm
 가용성에 묶이면 §0 기준문과 C-12가 깨진다.
 
 ### 4.1 development source 검증은 resolver에서 끝낸다

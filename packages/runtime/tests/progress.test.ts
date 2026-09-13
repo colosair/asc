@@ -348,47 +348,18 @@ describe('B-17 Gate — staleness와 lifecycle', () => {
   })
 })
 
-describe('B-18 Gate — liveness는 보조 정보다', () => {
-  const liveness = { lastActivityAt: '2026-08-23T14:50:00+09:00', lastTool: 'Bash' }
-
-  it('보고가 없고 활동만 있으면 "활동이 관찰됐다"까지만 말한다 — 진척은 지어내지 않는다', () => {
-    const { body, detail } = renderProgress({
-      session: session(),
-      progress: null,
-      liveness,
-      now: new Date(NOW),
-    })
-
-    assertHumanFirst(body)
-    assert.match(body.join('\n'), /10분 전에 활동이 관찰됐지만, 진행 내용 보고는 아직 없습니다/)
-    assert.match(detail, /최근 활동 10분 전\(Bash\)/)
-    // heartbeat만으로 만들어서는 안 되는 의미론 문구들
-    for (const invented of ['순조롭게', '진행 중입니다.', '마쳤', '검증']) {
-      assert.ok(!body.slice(1).join('\n').includes(invented), `heartbeat에서 진척을 지어냈다: ${invented}`)
-    }
-  })
-
-  it('liveness가 없으면 활동에 대해 아무 말도 하지 않는다 — 부재는 판정이 아니다', () => {
+describe('B-18 Gate — 활동 흔적은 진척이 아니다', () => {
+  // 0.9.1: hook heartbeat 입력(liveness)은 걷어냈다. 남는 계약은 하나 — 보고가 없으면
+  // 없다고 말하고, 활동 여부를 지어내지 않는다.
+  it('보고가 없으면 어디까지 됐는지 모른다고 말하고, 활동에 대해 아무 말도 하지 않는다', () => {
     const { body, detail } = renderProgress({ session: session(), progress: null, now: new Date(NOW) })
+    assertHumanFirst(body)
+    assert.match(body.join('\n'), /아직 진행 내용 보고가 없어/)
     assert.ok(!body.join('\n').includes('활동'))
     assert.ok(!detail.includes('활동'))
-  })
-
-  it('오래된 heartbeat를 멈춤으로 읽지 않는다 — Bash를 안 쓰는 구간이 있을 뿐이다', async () => {
-    const { report } = await reportOf({ phase: '설계 문서를 읽는 중입니다' }, NOW)
-    const { body, detail } = renderProgress({
-      session: session(),
-      progress: report,
-      liveness: { lastActivityAt: '2026-08-23T09:00:00+09:00' }, // 6시간 전
-      now: new Date(NOW),
-    })
-
-    // 진행 보고는 방금이므로 stale 경고가 없어야 한다 — staleness 근거는 progress뿐이다
-    assert.ok(!body.join('\n').includes('달라졌을 수 있습니다'))
-    for (const negative of ['멈춘', '활동이 없', '응답이 없']) {
-      assert.ok(!body.join('\n').includes(negative), `heartbeat 부재를 부정 판정으로 썼다: ${negative}`)
+    for (const invented of ['순조롭게', '마쳤', '검증']) {
+      assert.ok(!body.slice(1).join('\n').includes(invented), `진척을 지어냈다: ${invented}`)
     }
-    assert.match(detail, /최근 활동 360분 전/)
   })
 })
 

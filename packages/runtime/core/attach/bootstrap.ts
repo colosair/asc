@@ -187,7 +187,7 @@ export async function planBootstrap(input: BootstrapInput): Promise<BootstrapPla
   }
 
   steps.push('asc status')
-  if (attached) steps.push('asc proceed')
+  if (attached) steps.push('asc work start')
 
   return {
     projectRoot,

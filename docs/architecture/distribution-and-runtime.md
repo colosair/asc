@@ -47,7 +47,7 @@ editor will spawn, and because an MCP server is a long-lived process for which a
 
 ASC has neither property. Nothing committed names the ASC executable — host integration
 writes a generated hook to an absolute path that is already machine-local. And
-`asc proceed` is typed dozens of times a day: putting an indirection in front of every
+`asc work start` is typed dozens of times a day: putting an indirection in front of every
 local command would buy nothing and cost latency.
 
 So runtime selection is a step **inside** the runtime's own bin, not a package. If

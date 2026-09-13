@@ -3,14 +3,15 @@
 // 저장 위치가 저장소 밖으로 나가면 "여기가 어느 workspace인가"를 경로 탐색만으로는
 // 알 수 없다. 그 답을 이 파일 하나가 진다.
 //
-// **가장 까다로운 독자는 Host guard hook이다.** hook은 어떤 프로젝트에서든 도는 무의존
-// 단일 파일이고, 매 Bash 호출마다 실행된다. 그래서 포맷의 상한이 정해져 있다:
+// **가장 까다로운 독자는 Host 의 SessionStart hook 이다.** hook은 어떤 프로젝트에서든 도는
+// 무의존 단일 파일이고, 세션이 열릴 때마다 실행된다 (0.8.x 까지는 PreToolUse guard hook 이
+// 매 Bash 호출마다 같은 표를 읽었다). 그래서 포맷의 상한이 정해져 있다:
 //
 //   readFileSync 한 번 + JSON.parse 한 번 + 문자열 조회
 //
 // 데이터베이스도, 다단 조회도, 스키마 협상도 두지 않는다 (C-11 불변식 ⑩).
 //
-// 쓰기는 tmp+rename이다. 반쯤 쓰인 index를 guard가 읽으면 관리 대상 판정이 흔들린다
+// 쓰기는 tmp+rename이다. 반쯤 쓰인 index를 hook 이 읽으면 workspace 판정이 흔들린다
 // (C-11 불변식 ⑨).
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
@@ -24,7 +25,7 @@ export const WORKSPACE_INDEX_FILE = 'workspace-index.json'
 
 const LocatorEntry = z.object({
   workspaceId: z.string().min(1),
-  /** 이 locator에 붙는 ASC runtime 뿌리. guard가 이 값만 있으면 판정할 수 있다. */
+  /** 이 locator에 붙는 ASC runtime 뿌리. hook 은 이 값만 있으면 workspace 를 찾는다. */
   root: z.string().min(1),
   kind: z.enum(['checkout', 'worktree']).optional(),
   platform: z.string().min(1),
@@ -35,7 +36,7 @@ export type LocatorEntry = z.infer<typeof LocatorEntry>
 export const WorkspaceIndex = z.object({
   version: z.literal(1),
   workspaces: z.record(Workspace).default({}),
-  /** 정규화된 경로 → workspace. guard가 cwd에서 위로 올라가며 찾는 표다. */
+  /** 정규화된 경로 → workspace. hook 과 CLI 가 cwd에서 위로 올라가며 찾는 표다. */
   locators: z.record(LocatorEntry).default({}),
 })
 export type WorkspaceIndex = z.infer<typeof WorkspaceIndex>

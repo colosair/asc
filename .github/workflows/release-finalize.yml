@@ -123,6 +123,27 @@ jobs:
           done
           grep -qF "$V" "$NOTE" || { echo "::error::$NOTE never names $V"; exit 1; }
 
+      - name: acceptance record is on main
+        run: |
+          V="${{ inputs.version }}"
+          # Acceptance is a human run against the PUBLISHED packages, so its record lands on main
+          # after the publish commit — we read main HEAD here, not the published SHA. The checklist
+          # at the published SHA is the blank template by construction. What we refuse is a tag cut
+          # before the record exists: 0.9.0 was tagged six minutes ahead of its evidence commit.
+          # Unchecked `[ ]` lines are NOT the signal — "not taken" is recorded as `[ ]` on purpose.
+          CHECKLIST="docs/release/v$V-checklist.md"
+          if [ ! -f "$CHECKLIST" ]; then
+            echo "::error::$CHECKLIST is missing on main"; exit 1
+          fi
+          if ! grep -q '^## 실행 기록' "$CHECKLIST"; then
+            if ${{ inputs.dry_run }}; then
+              echo "dry run: $CHECKLIST has no '## 실행 기록' section yet (a real finalize would stop here)"
+            else
+              echo "::error::$CHECKLIST has no '## 실행 기록' section — run the published acceptance, record it, merge to main, then finalize"
+              exit 1
+            fi
+          fi
+
       - name: annotated tag
         if: ${{ !inputs.dry_run }}
         run: |

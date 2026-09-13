@@ -249,9 +249,9 @@ The person says *publish it* · *open the MR* · *get it onto develop*. That sen
 approval, and it is not asked for twice. It is also not wider than itself: **"open the MR"
 is not "approve the merge"**.
 
-Nothing reaches an external system except through an approved grant. One command carries
-that whole path — read-only review, decision authority, grant, atomic claim, revalidation,
-exactly one write, read-back, audit:
+Nothing ASC executes reaches an external system except through an approved grant. One
+command carries that whole path — read-only review, decision authority, grant, atomic
+claim, revalidation, exactly one write, read-back, audit:
 
 \`\`\`text
 asc work publish [<S-ID>] --action <key> --target <ref> --body-file <path> --as <actor>

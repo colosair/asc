@@ -1,8 +1,9 @@
-// ASC scope grammar와 두 가지 판정.
+// ASC scope grammar와 패턴 대 패턴 판정.
 //
-// 이 둘은 다른 질문이고 다른 답을 준다. 섞으면 권한이 새어 나간다:
-//   pathInScope   — "이 파일을 써도 되는가"           (경로 대 패턴)
 //   isScopeSubset — "이 범위가 저 범위 안에 드는가"   (패턴 대 패턴, 집합 포함)
+//
+// 경로 대 패턴 판정(pathInScope)은 0.9.1 에서 걷어냈다 — 실행 시점에 파일 경로를 보는 자리가
+// 제품에 없고, 발급 시점 검사는 전부 패턴 대 패턴이다.
 //
 // glob 매처로 패턴 대 패턴을 판정하면 안 된다. `node:path`의 matchesGlob으로
 // `frontend/**`가 `frontend/*`의 부분집합인지 물으면 true가 나온다 — `**`가 리터럴처럼
@@ -45,25 +46,6 @@ const startsWith = (path: readonly string[], prefix: readonly string[]): boolean
 
 const sameSegments = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((segment, i) => segment === b[i])
-
-/** 실제 경로가 이 범위들 중 하나에 드는가. */
-export function pathInScope(path: string, scopes: readonly string[]): boolean {
-  const segments = path.split('/')
-  return scopes.some((scope) => {
-    const parsed = parseScope(scope)
-    if (!parsed) return false // 잘못 쓴 범위는 아무것도 허용하지 않는다
-    switch (parsed.kind) {
-      case 'all':
-        return true
-      case 'recursive':
-        return startsWith(segments, parsed.segments) && segments.length > parsed.segments.length
-      case 'children':
-        return startsWith(segments, parsed.segments) && segments.length === parsed.segments.length + 1
-      case 'exact':
-        return sameSegments(segments, parsed.segments)
-    }
-  })
-}
 
 /**
  * sub가 가리키는 경로 집합이 sup 안에 전부 들어가는가.

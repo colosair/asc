@@ -4,8 +4,6 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
-  denyResponse,
-  evaluate,
   intersectScopes,
   mergePolicyLayers,
   mergeReplaceList,
@@ -13,7 +11,7 @@ import {
   mergeUnionList,
   type PolicyLayer,
 } from '../core/policy/policy.ts'
-import { isScopeSubset, parseScope, pathInScope } from '../core/policy/scope.ts'
+import { isScopeSubset, parseScope } from '../core/policy/scope.ts'
 import { resolveProfile, type ConfigLayer } from '../core/resolver/resolve.ts'
 
 const vanilla: PolicyLayer = {
@@ -55,7 +53,7 @@ describe('merge semantics — 필드 유형별 규칙 (OM §4.7)', () => {
   })
 })
 
-describe('scope 판정 — 경로 매칭과 집합 포함은 다른 질문이다', () => {
+describe('scope 판정 — 패턴 대 패턴 집합 포함', () => {
   it('재귀 범위는 1단계 범위의 부분집합이 아니다', () => {
     // glob 매처로 패턴끼리 비교하면 여기서 true가 나와 권한 확장이 통과한다
     assert.equal(isScopeSubset('frontend/**', 'frontend/*'), false)
@@ -75,11 +73,10 @@ describe('scope 판정 — 경로 매칭과 집합 포함은 다른 질문이다
   })
 
   it('재귀 범위는 prefix 자신을 품지 않는다', () => {
-    // pathInScope('frontend', ['frontend/**'])가 false이므로 subset 판정도 같아야 한다
+    // 디렉터리 자신은 그 이하가 아니다 — 재귀 범위는 prefix 아래만 품는다
     assert.equal(isScopeSubset('frontend', 'frontend/**'), false)
     assert.equal(isScopeSubset('frontend/a.ts', 'frontend/**'), true)
     assert.equal(isScopeSubset('frontend/src/a.ts', 'frontend/**'), true)
-    assert.equal(pathInScope('frontend', ['frontend/**']), false)
   })
 
   it('정확 경로는 자기 자신과 상위 범위에만 든다', () => {
@@ -90,18 +87,9 @@ describe('scope 판정 — 경로 매칭과 집합 포함은 다른 질문이다
     assert.equal(isScopeSubset('frontend/**', 'frontend/a.ts'), false)
   })
 
-  it('경로 매칭은 깊이를 구분한다', () => {
-    assert.equal(pathInScope('frontend/src/a.ts', ['frontend/**']), true)
-    assert.equal(pathInScope('frontend/src/a.ts', ['frontend/*']), false)
-    assert.equal(pathInScope('frontend/a.ts', ['frontend/*']), true)
-    assert.equal(pathInScope('frontend', ['frontend/**']), false) // 디렉터리 자신은 이하가 아니다
-    assert.equal(pathInScope('backend/a.ts', ['**']), true)
-  })
-
   it('중간 와일드카드·확장자 패턴은 문법 밖이라 아무것도 허용하지 않는다', () => {
     for (const bad of ['frontend/*/studio/**', 'src/*.ts', '*', '', 'frontend/**/*.ts']) {
       assert.equal(parseScope(bad), null, bad)
-      assert.equal(pathInScope('frontend/x/studio/a.ts', [bad]), false, bad)
       assert.equal(isScopeSubset(bad, '**'), false, bad)
     }
   })
@@ -157,46 +145,6 @@ describe('계층 병합', () => {
     assert.equal(violations[0]!.kind, 'LOCKED_SETTING')
   })
 })
-
-describe('판정 (OM §5)', () => {
-  const { policy } = mergePolicyLayers([vanilla, { id: 'profile', roleScopes: { implementer: ['frontend/**'] } }])
-
-  it('계약 안의 행위는 자율이다', () => {
-    assert.equal(evaluate(policy, { action: 'code.edit', path: 'frontend/src/a.ts', role: 'implementer' }).verdict, 'ALLOW')
-  })
-
-  it('SOFT DENY는 Policy Exception으로 열린다', () => {
-    assert.equal(evaluate(policy, { action: 'dependency.add' }).verdict, 'SOFT_DENY')
-    assert.equal(
-      evaluate(policy, { action: 'dependency.add', policyExceptions: ['dependency.add'] }).verdict,
-      'ALLOW',
-    )
-  })
-
-  it('HARD DENY는 Policy Exception으로도 열리지 않는다', () => {
-    const forced = evaluate(policy, { action: 'external.write', policyExceptions: ['external.write'] })
-    assert.equal(forced.verdict, 'HARD_DENY')
-  })
-
-  it('Write Boundary 밖 경로는 거절한다', () => {
-    const outside = evaluate(policy, {
-      action: 'code.edit',
-      path: 'backend/src/a.java',
-      writeBoundary: ['frontend/src/studio/**'],
-    })
-    assert.equal(outside.verdict, 'HARD_DENY')
-    assert.match(outside.reason, /outside the write boundary/)
-  })
-
-  it('DENY 접촉 시 동작은 Goal 차단 여부로 갈린다 (OM §5.3)', () => {
-    assert.equal(denyResponse('HARD_DENY', true), 'CHECKPOINT_AND_RETURN')
-    assert.equal(denyResponse('HARD_DENY', false), 'RECORD_UNRESOLVED_AND_CONTINUE')
-    assert.equal(denyResponse('SOFT_DENY', false), 'DEFER_AND_CONTINUE')
-    assert.equal(denyResponse('SOFT_DENY', true), 'CHECKPOINT_AND_RETURN')
-    assert.equal(denyResponse('ALLOW', true), 'CONTINUE')
-  })
-})
-
 describe('Profile Resolver', () => {
   const layers: ConfigLayer[] = [
     { ...vanilla, kind: 'vanilla', requiredCapabilities: ['scm.github'], optionalCapabilities: ['messenger.mattermost'] },

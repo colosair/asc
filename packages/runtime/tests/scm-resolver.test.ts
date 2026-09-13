@@ -275,9 +275,9 @@ describe('선언과 구현이 어긋나지 않는다 (실제 어댑터)', () => 
   })
 })
 
-// AUTO dead-end — Guard 가 막는데 관리 경로가 없으면 그 사실이 이름으로 나와야 한다.
-// 실사용에서 사람이 mode manual 로 내려간 것은 화면이 그것을 권해서가 아니라, 막힌 뒤
-// 아무 말도 없었기 때문이다.
+// 통로가 실을 수 있는 행위는 통로가 말한다 — 0.8.3 의 dead-end(mirror 가 executor 를 맡아
+// push 를 못 실었던 것)는 이 답으로 잡힌다. 0.9.0 부터 막는 hook 은 없으므로 여기서 보는
+// 것은 "이 통로가 무엇을 싣는가" 하나다.
 // 0.9.0 — 실행이 향하는 remote 는 **선택된 execution binding 을 발견한 remote** 다. canonical
 // source 의 첫 항목이나 `origin` 을 가정하면 mirror 와 정본이 갈린 저장소에서 다른 곳으로 민다.
 describe('실행 remote 는 선택된 결합이 정한다 — canonical 순서가 아니다', () => {
