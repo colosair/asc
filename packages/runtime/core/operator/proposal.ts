@@ -99,6 +99,11 @@ export class ProposalLedger {
     return parsed.success ? parsed.data : null
   }
 
+  /** 이 장부가 아는 모든 제안 id — 닫힌 것까지. 새 세션 id 가 그 위에 겹치지 않게 (0.10.2). */
+  async ids(): Promise<string[]> {
+    return (await this.#scope.keys('proposal:')).map((key) => key.slice('proposal:'.length))
+  }
+
   /** 아직 발급되지 않은 제안들. */
   async open(): Promise<ContractProposal[]> {
     const out: ContractProposal[] = []
