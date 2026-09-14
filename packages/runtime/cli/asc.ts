@@ -3759,7 +3759,11 @@ async function runWorkIssue(
   // grant 처럼 검증으로 막지 않는다 — 발급은 계약이고, 밖으로 나가는 것은 grant 가 따로 지킨다.
   const issuer = resolveIssuer(values.as ?? values['issued-by'], await loadIdentityMap(root))
   const issuedBy = issuer.ok ? issuer.actor : '(미상)'
+  // 발급은 정본 baseline 을 읽는다 — scm 없이 만들면 canonical 이 선언된 workspace 에서
+  // CANONICAL_UNAVAILABLE 로 거절된다 (0.10.0 게시본 acceptance Q-4 에서 실측). `session issue` 와 같다.
+  const scm = await scmFor(resolved)
   const sessions = new SessionRuntime(store, resolved?.resolved.policy ?? null, {
+    ...(scm ? { scm } : {}),
     canonicalSources: (resolved?.canonicalSources ?? []).map((sourceId) => ({ sourceId })),
     ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
   })

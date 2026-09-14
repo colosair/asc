@@ -329,11 +329,17 @@ export function exactKeyPattern(key: string): string {
   return `(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`
 }
 
-/** 두 경로가 같은 자리인가 — 하나가 다른 하나의 접두 디렉터리이거나 같다. */
+/**
+ * 두 경로가 같은 자리인가 — 같거나, 하나가 다른 하나의 접두 디렉터리이거나, 작업 항목이 적은 경로가
+ * 저장소 경로의 **꼬리**와 맞는다. 마지막 것이 필요한 이유: monorepo 에서 작업 항목은 패키지 안의
+ * 상대 경로(`tools/devGateway.mjs`)를 적고 commit 은 뿌리 기준(`festa-frontend/tools/devGateway.mjs`)
+ * 으로 남는다 — 0.10.0 게시본 acceptance 에서 병합된 작업이 이 차이로 UNDECIDABLE 이 됐다.
+ */
 function sharesPath(changed: string, workPath: string): boolean {
   const a = changed.replace(/\/+$/, '')
-  const b = workPath.replace(/\/+$/, '').replace(/\/\*\*?$/, '')
-  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
+  const b = workPath.replace(/^\.?\//, '').replace(/\/+$/, '').replace(/\/\*\*?$/, '')
+  if (b.length === 0) return false
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`) || a.endsWith(`/${b}`) || a.includes(`/${b}/`)
 }
 
 /** `--name-status` 출력에서 지금도 존재할 수 있는 경로만. 삭제(D)는 세지 않는다. */

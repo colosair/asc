@@ -218,3 +218,23 @@ describe('사람의 override 는 history 에 남는다', () => {
     assert.match(entry.detail ?? '', /judged IN_PROGRESS_ELSEWHERE — overridden: 그 worktree 는 내가 버린 것이다/)
   })
 })
+
+// 0.10.1 — monorepo 상대 경로. 작업 항목은 패키지 안 경로를 적고 commit 은 뿌리 기준으로 남는다.
+describe('언급 commit 의 경로 겹침 — monorepo 꼬리 일치 (0.10.1)', () => {
+  it('작업 항목의 tools/devGateway.mjs 는 commit 의 festa-frontend/tools/devGateway.mjs 와 겹친다', async () => {
+    const git = gitWith({
+      ...base,
+      'for-each-ref --format=%(refname:short) refs/heads refs/remotes': '',
+      [LOG]: `4de91e8 [${KEY}][FE] gateway\n`,
+      'show --name-status --format= 4de91e8': 'M\tfesta-frontend/tools/devGateway.mjs\nM\tfesta-frontend/src/pages/login/LoginPage.tsx\n',
+      'cat-file -e origin/develop:festa-frontend/tools/devGateway.mjs': '',
+    })
+    const seen = await new LocalRepoAdapter({ cwd: '/x', git }).observe({
+      refHint: KEY,
+      canonicalRef: 'develop',
+      remote: 'origin',
+      paths: ['tools/devGateway.mjs', '/oauth2', 'SecurityConfiguration/CORS'],
+    })
+    assert.equal(seen.mentionedPathsOverlap, true)
+  })
+})
