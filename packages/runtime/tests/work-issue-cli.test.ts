@@ -100,3 +100,14 @@ describe('asc work issue', () => {
     }
   })
 })
+
+// 0.10.1 — 발급은 정본 baseline 을 읽는다. scm 없이 SessionRuntime 을 만들면 canonical 이 선언된
+// workspace 에서 CANONICAL_UNAVAILABLE 로 거절됐다 (0.10.0 게시본 acceptance Q-4).
+describe('asc work issue 는 session issue 와 같은 정본 통로를 쓴다', () => {
+  it('runWorkIssue 가 scmFor(resolved) 를 SessionRuntime 에 넘긴다', async () => {
+    const source = await readFile(new URL('../cli/asc.ts', import.meta.url), 'utf8')
+    const body = source.slice(source.indexOf('async function runWorkIssue('), source.indexOf('async function runSessionPlan('))
+    assert.match(body, /const scm = await scmFor\(resolved\)/)
+    assert.match(body, /new SessionRuntime\(store, resolved\?\.resolved\.policy \?\? null, \{\s*\.\.\.\(scm \? \{ scm \} : \{\}\)/)
+  })
+})
