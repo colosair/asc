@@ -53,6 +53,12 @@ export type RenderInput = {
    * 화면은 거짓말이다 (B-65 dogfood에서 잡힌 것). 여기 값이 있으면 그것이 이긴다.
    */
   awaiting?: readonly string[]
+  /**
+   * 이 Run 이 세션의 소유자인가 (0.10.0 P2). `held: false` 면 화면은 "판단 필요 없음" 이나
+   * "막는 문제 없음" 이라고 말할 수 없다 — 소유권 없이는 진행 보고·중단·완료가 전부 막힌다.
+   * stderr 가 소유권 없음을 말하는 동안 stdout 이 nothing blocking 이라던 자리 (dogfood F5).
+   */
+  ownership?: { held: boolean; holder?: string }
   now?: Date
 }
 
@@ -64,6 +70,9 @@ export function renderProgress(input: RenderInput): RenderedProgress {
   const awaiting = input.awaiting ?? []
   const now = input.now ?? new Date()
   const work = session ? shortGoal(session.goal) : '이'
+  const notOwned = input.ownership !== undefined && !input.ownership.held
+  const ownershipLine = (): string =>
+    `이 Run 은 이 세션의 소유자가 아닙니다 — ${input.ownership?.holder ?? '다른 Run'} 이 잡고 있어 진행 보고·중단·완료를 할 수 없습니다.`
 
   if (!progress) {
     const state = session ? STATUS_WORDS[session.status] : '확인 불가'
@@ -71,7 +80,7 @@ export function renderProgress(input: RenderInput): RenderedProgress {
       body: [
         `${work} 작업이 ${state === '작업 중' ? '진행 중입니다' : `${state} 상태입니다`}.`,
         '아직 진행 내용 보고가 없어 어디까지 됐는지는 알 수 없습니다.',
-        awaiting.length > 0 ? awaitingLine(awaiting) : decisionLine('NONE'),
+        notOwned ? ownershipLine() : awaiting.length > 0 ? awaitingLine(awaiting) : decisionLine('NONE'),
       ],
       detail: detailLine(session, null, now),
     }
@@ -88,15 +97,17 @@ export function renderProgress(input: RenderInput): RenderedProgress {
     body.push(`${done ? `${done}까지 마쳤고, ` : ''}지금은 ${progress.phase}.`)
   }
 
-  // 문제가 있는가 + 다음은 무엇인가
-  const trouble = troubleLine(progress)
+  // 문제가 있는가 + 다음은 무엇인가. 소유권이 없으면 "막는 문제 없음" 은 거짓이다.
+  const trouble = notOwned ? '' : troubleLine(progress)
   const next = progress.terminal ? '' : progress.nextStep ? ` 다음은 ${progress.nextStep}.` : ''
   if (trouble || next) body.push(`${trouble}${next}`.trim())
 
   body.push(
-    awaiting.length > 0
-      ? awaitingLine(awaiting)
-      : decisionLine(progress.needsUserDecision, progress.decisionRef, progress.terminal),
+    notOwned
+      ? ownershipLine()
+      : awaiting.length > 0
+        ? awaitingLine(awaiting)
+        : decisionLine(progress.needsUserDecision, progress.decisionRef, progress.terminal),
   )
 
   if (isStale(progress, now)) {

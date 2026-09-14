@@ -213,6 +213,8 @@ import { renderAscMd, renderControllerMd } from '../core/resolver/render.ts'
 import { ProfileLock, ProjectProfile } from '../schemas/profile.ts'
 import { LocalOperator } from '../core/operator/local-operator.ts'
 import { LOCAL_CHANNEL, issuerResolutionLines, loadIdentityMap, localApprovers, resolveIssuer } from './identity-config.ts'
+import { collectBlockers } from '../core/operator/blockers.ts'
+import { remediationCommand, renderBlocker } from './remediation.ts'
 
 const USAGE = `asc — Agent Session Control
 
@@ -2472,7 +2474,9 @@ async function checkBootstrap(root: string): Promise<{ code: number; runtime?: R
   if (outcome.reason === 'BROKEN_ATTACHMENT') {
     // 붙이다 만 상태다. 무엇으로 도는지 모르는 채 굴러가는 것보다 멈추는 편이 낫다.
     console.error(`The runtime is not intact: ${outcome.detail}`)
-    console.error('Re-attach with `asc init --profile <id>`, or lock it with `asc profile resolve --write`.')
+    console.error(
+      `Re-attach with \`${remediationCommand('REPAIR_ATTACHMENT')}\`, or lock it with \`${remediationCommand('RESOLVE_PROFILE_DRIFT')}\`.`,
+    )
     return { code: 2 }
   }
 
@@ -2484,7 +2488,7 @@ async function checkBootstrap(root: string): Promise<{ code: number; runtime?: R
 
   console.error('Configuration differs from profile.lock. Nothing proceeds until it is settled:')
   for (const drift of outcome.drifts) console.error(`  ${drift.field}: ${drift.locked} → ${drift.current}`)
-  console.error('\nOnce you have checked it, re-lock with `asc profile resolve --write`.')
+  console.error(`\nOnce you have checked it, re-lock with \`${remediationCommand('RESOLVE_PROFILE_DRIFT')}\`.`)
   return { code: 2 }
 }
 
@@ -2793,7 +2797,7 @@ async function claimRuntimeBinding(
     if (other === target) {
       detail =
         `RUNTIME_CONFLICT: ${target} 은 이미 ${claimed.current.physicalSessionId} 가 잡고 있다. ` +
-        '죽은 세션이 확실하면 --force 로 rebind하라.'
+        `그 Run 이 끝났다고 사람이 확인하면 인수한다: ${remediationCommand('RECLAIM_SESSION', target)}`
     } else {
       // 같은 Run 이 다른 세션을 잡고 있는 경우에도 사람이 할 일은 둘로 갈린다.
       // **끝난 세션이 아직 붙들고 있는 것**은 놓아야 할 잔재이고, 살아 있는 세션을
@@ -3094,7 +3098,9 @@ async function runProceed(
         `${binding.holder.physicalSessionId} holds ${binding.holder.logicalSessionId}. ASC does not take it over.`,
     )
     console.error(binding.detail)
-    console.error('only the owner can record progress, pause or finish it; see `asc host claude bind --force` for recovery.')
+    console.error(
+      `only the owner can record progress, pause or finish it — a person decides: ${remediationCommand('RECLAIM_SESSION', outcome.contract.id)}`,
+    )
   }
 
   if (values.json) {
@@ -3125,6 +3131,10 @@ async function runProceed(
           session: outcome.contract,
           progress,
           ...(outcome.awaiting && outcome.awaiting.length > 0 ? { awaiting: outcome.awaiting } : {}),
+          // 소유권이 없으면 stdout 도 그렇게 말한다 — stderr 와 다른 말을 하지 않는다 (0.10.0 P2)
+          ...(binding?.state === 'CONFLICT'
+            ? { ownership: { held: false, holder: binding.holder.physicalSessionId } }
+            : {}),
         })
         console.log(`\n${rendered.body.join('\n\n')}`)
         console.log(`\n> detail: ${rendered.detail}\n`)
@@ -4838,13 +4848,9 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     : []
   const waiting = store ? await new LocalOperator({ store }).list({}) : []
 
-  // 무엇이 지금 걸려 있는가. 사실에서만 뽑는다 — 여기서 추측을 만들지 않는다.
+  // 무엇이 지금 걸려 있는가. 막는 것(blockers)과 상태(degraded)를 가른다 — 막는 것은 하나의
+  // 모델에서 나오고 CLI 는 명령으로 옮기기만 한다 (0.10.0 P2). 여기서 추측을 만들지 않는다.
   const degraded: string[] = []
-  if (setup.attachment !== 'READY' && root) degraded.push(`attachment ${setup.attachment}`)
-  if (host.status !== 'INSTALLED_CURRENT') degraded.push(`host integration ${host.status}`)
-  if (mode?.mode === 'AUTO' && !readiness.ready) {
-    for (const axis of readiness.blocking) degraded.push(`AUTO ${axis.axis} ${axis.state}`)
-  }
   if (service?.action === 'install') degraded.push('this machine has no persistent registration')
   // 판번호만 움직인 lock 은 여기서만 말한다 — 막는 것이 아니라 상태이기 때문이다.
   if (root) {
@@ -4887,20 +4893,39 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
         return stuck
       })()
     : []
-  if (heldByFinished.length > 0) {
-    degraded.push(
-      `${heldByFinished.length} finished session(s) still hold a Run — ${heldByFinished.slice(0, 3).join(', ')}` +
-        `${heldByFinished.length > 3 ? ', …' : ''} (asc host claude release <S-ID> --physical <run>)`,
-    )
-  }
+  const identityMap = root ? await loadIdentityMap(root) : {}
+  const blockers = collectBlockers({
+    ...(root ? { attachment: setup.attachment } : {}),
+    host: { id: 'claude', status: host.status },
+    ...(mode?.mode ? { mode: { mode: mode.mode, ready: readiness.ready, blocking: readiness.blocking } } : {}),
+    ...(root && setup.attachment === 'READY'
+      ? {
+          approval: {
+            hasApprovers: Object.keys(identityMap).length > 0,
+            hasLocalApprover: localApprovers(identityMap).length > 0,
+          },
+        }
+      : {}),
+    bindings: store
+      ? await Promise.all(
+          (await claudeBindings(store).current()).map(async (binding) => {
+            const session = await store.get('session', binding.logicalSessionId)
+            return {
+              sessionId: binding.logicalSessionId,
+              holder: binding.physicalSessionId,
+              ...(session ? { sessionStatus: session.status } : {}),
+            }
+          }),
+        )
+      : [],
+    ...(thisRun ? { thisRun } : {}),
+  })
+  void heldByFinished
 
   const next = ((): string => {
-    if (!root) return 'asc setup'
-    if (setup.attachment === 'LOCK_DRIFT') return 'asc setup — the configuration moved away from the lock'
-    if (host.status !== 'INSTALLED_CURRENT' && host.status !== 'INSTALLED_MODIFIED') return 'asc refresh'
-    if (mode?.mode === 'AUTO' && !readiness.ready) {
-      return 'asc mode manual — or fix what AUTO needs, then `asc mode auto`'
-    }
+    // 막는 것이 먼저다 — 세 번 막힌 publish 동안 `asc inbox` 를 가리키던 자리 (dogfood F5)
+    const first = blockers[0]
+    if (first) return remediationCommand(first.remediation, first.ref)
     if (waiting.length > 0) return 'asc inbox'
     if (sessions.length > 0) return `asc work status ${sessions[0]!.id}`
     return 'asc work start <WORK>'
@@ -4930,6 +4955,7 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
           awaitingHuman: waiting.length,
           ...(service ? { service } : {}),
           ...(background ? { background } : {}),
+          blockers,
           degraded,
           nextAction: next,
         },
@@ -5044,6 +5070,11 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
   }
   if (service) console.log(`Background: ${service.line}`)
   if (background) for (const line of renderBackground(background)) console.log(line)
+  if (blockers.length > 0) {
+    console.log('')
+    console.log('Blocked:')
+    for (const blocker of blockers) for (const line of renderBlocker(blocker)) console.log(line)
+  }
   if (degraded.length > 0) {
     console.log('')
     console.log('Degraded:')

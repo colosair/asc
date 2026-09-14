@@ -113,8 +113,10 @@ describe('#63 — asc work finish 가 physical binding 을 놓는다', () => {
         0,
       )
       const status = run(repo, home, ['status'])
-      assert.match(status.stdout, /finished session\(s\) still hold a Run/)
-      assert.match(status.stdout, /S-20260907-01/)
+      // 0.10.0 P2: 막는 것은 blocker 하나의 모델에서 나온다 — 문구가 아니라 remediation 을 본다
+      assert.match(status.stdout, /Blocked:/)
+      assert.match(status.stdout, /S-20260907-01 is finished but still held by a Run/)
+      assert.match(status.stdout, /asc work reclaim S-20260907-01/)
     } finally {
       await cleanup()
     }

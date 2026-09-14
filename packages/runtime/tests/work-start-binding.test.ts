@@ -148,7 +148,7 @@ describe('0.9.0 — asc work start 가 이 Run 을 세션에 묶는다', () => {
     }
   })
 
-  it('다른 Run 이 이미 쥔 세션을 시작하면 CONFLICT — 뺏지 않고 --force 를 가리킨다', async () => {
+  it('다른 Run 이 이미 쥔 세션을 시작하면 CONFLICT — 뺏지 않고 사람의 인수(work reclaim)를 가리킨다', async () => {
     const { repo, home, root, cleanup } = await attached()
     try {
       issue(repo, home, 'S-20260913-01', '첫 번째')
@@ -158,7 +158,9 @@ describe('0.9.0 — asc work start 가 이 Run 을 세션에 묶는다', () => {
       const outcome = JSON.parse(other.stdout) as { binding: { state: string; holder: { physicalSessionId: string } } }
       assert.equal(outcome.binding.state, 'CONFLICT')
       assert.equal(outcome.binding.holder.physicalSessionId, RUN_A)
-      assert.match(other.stderr, /--force/)
+      // 0.10.0 P2: 복구 표면은 work 안에 있다 — host 명령이나 --force 를 알 필요가 없다
+      assert.match(other.stderr, /asc work reclaim S-20260913-01/)
+      assert.doesNotMatch(other.stderr, /--force|host claude/)
       const holder = JSON.parse(await readFile(bindingFile(root, 'S-20260913-01'), 'utf8')) as { value: string }
       assert.equal((JSON.parse(holder.value) as { physicalSessionId: string }).physicalSessionId, RUN_A, '기존 소유자 무변경')
     } finally {

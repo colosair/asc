@@ -150,7 +150,7 @@ describe('P1 — 건네는 명령은 그대로 붙여 넣을 수 있다', () => 
     const args = issueArgs({
       id: 'S-20260913-03',
       role: 'implementer',
-      goal: 'S15P21A604-520: [FE] Survey Builder rewardCoin 입력 추가',
+      goal: 'PROJ-520: [FE] Survey Builder rewardCoin 입력 추가',
       boundary: ['festa-frontend/src/**'],
       criteria: ['rewardCoin > 0 이면 안내가 보인다'],
       owner: 'planner',
@@ -158,7 +158,7 @@ describe('P1 — 건네는 명령은 그대로 붙여 넣을 수 있다', () => 
     const line = shorthandCommand(args)
     assert.equal(
       line,
-      "asc session issue S-20260913-03 --role implementer --goal 'S15P21A604-520: [FE] Survey Builder rewardCoin 입력 추가' " +
+      "asc session issue S-20260913-03 --role implementer --goal 'PROJ-520: [FE] Survey Builder rewardCoin 입력 추가' " +
         "--boundary 'festa-frontend/src/**' --criteria 'rewardCoin > 0 이면 안내가 보인다' --owner planner",
     )
   })
