@@ -57,6 +57,11 @@ export type IssueForSessionInput = {
   /** 게시 직전 대조할 기준 (OM §11.9). 없으면 대조하지 않는다. */
   snapshot?: CanonicalSnapshot[]
   /**
+   * 이 행위에 본문이 있어야 하는가. 호출자가 행위 계약(`ports/scm.ts ACTION_PAYLOAD`)을 읽어
+   * 넘긴다 — Core 는 행위 이름의 뜻을 모른다. 생략하면 required 다 (0.10.0 P1).
+   */
+  payloadRequired?: boolean
+  /**
    * 승인이 딛고 선 사실 (0.8.0 §L). 검수가 읽어 온 값을 그대로 못 박는다 — 실행 직전
    * 재검수가 이 값과 지금을 견주므로, 승인은 "이 가지" 가 아니라 "이 commit" 에 대한
    * 것이 된다.
@@ -164,7 +169,9 @@ export class GrantService {
     if (session.status === 'READY') {
       return { ok: false, failure: { kind: 'SESSION_NOT_RUNNABLE', status: session.status } }
     }
-    if (input.payload.length === 0) return { ok: false, failure: { kind: 'NO_PAYLOAD' } }
+    if (input.payloadRequired !== false && input.payload.length === 0) {
+      return { ok: false, failure: { kind: 'NO_PAYLOAD' } }
+    }
 
     const authorized = await this.#identity.verify({
       channel: input.channel,

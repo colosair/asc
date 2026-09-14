@@ -14,7 +14,7 @@ import type { StateStore } from '../../ports/state-store.ts'
 import type { RepoObservation } from '../../ports/local-repo.ts'
 import type { ChangeSummary } from '../../ports/change-context.ts'
 import type { ContextComment, ResourceSnapshot } from '../../ports/resource-context.ts'
-import type { SessionContractDraft, SessionContractPlan } from './contract-draft.ts'
+import { issueArgs, type SessionContractDraft, type SessionContractPlan } from './contract-draft.ts'
 import { judgeWorkState, type WorkStateResult } from './work-state.ts'
 import { extractPathHints } from './derive-draft.ts'
 import type { CanonicalDrift, SessionRuntime, StartOutcome } from '../runtime/session.ts'
@@ -430,13 +430,14 @@ function nextActionFor(result: WorkStateResult, workRef: string): string {
   }
 }
 
-/** Controller 가 그대로 실행할 발급 명령. 조립만 하고 실행하지 않는다. */
+/**
+ * Controller 가 그대로 실행할 발급 명령. 조립만 하고 실행하지 않는다.
+ *
+ * `session plan` 과 같은 인자 조립(`issueArgs`)을 쓴다 — 여기서 따로 만들던 동안 owner·domain·
+ * authority 가 빠졌다 (0.10.0 P1).
+ */
 function issueCommand(draft: SessionContractDraft): string[] {
-  const argv = ['asc', 'session', 'issue', draft.id ?? '<S-ID>', '--role', draft.role ?? 'implementer']
-  if (draft.goal) argv.push('--goal', draft.goal)
-  for (const scope of draft.boundary ?? []) argv.push('--boundary', scope)
-  for (const criterion of draft.criteria ?? []) argv.push('--criteria', criterion)
-  return argv
+  return ['asc', ...issueArgs(draft)]
 }
 
 /** 사실상 저장소 전체를 쓰는 범위인가. 문법 판정이 아니라 리터럴 확인이다. */

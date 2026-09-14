@@ -254,9 +254,16 @@ command carries that whole path — read-only review, decision authority, grant,
 claim, revalidation, exactly one write, read-back, audit:
 
 \`\`\`text
-asc work publish [<S-ID>] --action <key> --target <ref> --body-file <path> --as <actor>
+asc work publish [<S-ID>] --action <key> --target <ref> [--body-file <path>] [--as <actor>]
 asc work publish … --review    # read the facts and stop. Nothing goes out
 \`\`\`
+
+\`--body-file\` follows the action's payload contract: \`git.push\` carries no body (passing one is
+refused), \`gitlab.mr.create\` / \`gitlab.note.create\` / \`gitlab.issue.update\` /
+\`github.issue_comment.create\` require the body the person approved. \`--as\` is optional when
+exactly one approver is mapped to this machine (\`local:<name>\` in identities.json); with several,
+naming one is the decision, so say it. Neither is something to invent: if the command refuses,
+show the person its reason.
 
 The review is **not a second approval**. The person's instruction already settled who
 decides; the review settles facts — is this the remote this work is bound to, is the commit

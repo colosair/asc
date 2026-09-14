@@ -82,7 +82,7 @@ import { CoverageLedger, renderHealth } from '../core/monitor/coverage.ts'
 import { evaluateHealth, healthAlertLines, observationState } from '../core/monitor/health-alerts.ts'
 import { Operator, type WorkIngress } from '../core/operator/proceed.ts'
 import { deriveSessionContractDraft } from '../core/operator/derive-draft.ts'
-import { MANAGED_EXTERNAL_ACTIONS, type ScmPort } from '../ports/scm.ts'
+import { MANAGED_EXTERNAL_ACTIONS, payloadContractOf, type ScmPort } from '../ports/scm.ts'
 import { servicePath } from '../core/distribution/external-command.ts'
 import {
   isTransientPath,
@@ -212,7 +212,7 @@ import { ProfileSourceError } from '../core/resolver/profile-source.ts'
 import { renderAscMd, renderControllerMd } from '../core/resolver/render.ts'
 import { ProfileLock, ProjectProfile } from '../schemas/profile.ts'
 import { LocalOperator } from '../core/operator/local-operator.ts'
-import { loadIdentityMap } from './identity-config.ts'
+import { LOCAL_CHANNEL, issuerResolutionLines, loadIdentityMap, localApprovers, resolveIssuer } from './identity-config.ts'
 
 const USAGE = `asc — Agent Session Control
 
@@ -1690,6 +1690,7 @@ async function runSetup(
     : assessSetup({
         attachment: 'UNATTACHED',
         hasApprovers: false,
+        hasLocalApprover: false,
         hasControllerIdentities: false,
         hasMonitorIdentities: false,
         hasScmToken: await hasToken(),
@@ -1749,13 +1750,19 @@ async function identityState(
   ascRoot: string | undefined,
   workspaceComing: boolean,
 ): Promise<Pick<SetupState, 'identity'>> {
-  const wired = ascRoot ? Object.keys(await loadIdentityMap(ascRoot)).length > 0 : false
-  if (wired) return { identity: { wired: true } }
+  const map = ascRoot ? await loadIdentityMap(ascRoot) : {}
+  const wired = Object.keys(map).length > 0
+  // 이 기계에서 승인할 사람이 정해졌는가. 정해지지 않았으면 **후보만** 든다 — git 의 표시
+  // 이름과 OS 사용자 이름은 아무 계정과도 이어지지 않으므로 권한을 지어 주지 않는다 (0.10.0 P1).
+  const localMapped = localApprovers(map).length > 0
+  const localCandidates = ascRoot && !localMapped ? await localIdentityCandidates() : undefined
+  const local = ascRoot ? { localMapped, ...(localCandidates ? { localCandidates } : {}) } : {}
+  if (wired) return { identity: { wired: true, ...local } }
   // **세울 workspace 가 없으면 누구인지 묻지 않는다.** 물으려면 provider CLI 를 불러야
   // 하고, 그 도구는 자기 설정 파일을 만든다 — 멈출 계획이 남기는 자국이 되면 안 된다.
-  if (!workspaceComing) return { identity: { wired: false } }
+  if (!workspaceComing) return { identity: { wired: false, ...local } }
   const actor = await detectActor()
-  return { identity: { wired: false, ...(actor ? { actor } : {}) } }
+  return { identity: { wired: false, ...(actor ? { actor } : {}), ...local } }
 }
 
 /**
@@ -2235,6 +2242,13 @@ async function detectSelf(): Promise<string | null> {
   return user || null
 }
 
+/** local 채널 매핑 후보 — git user.name 과 OS 사용자, 중복 제거. 후보이지 결정이 아니다. */
+async function localIdentityCandidates(): Promise<string[]> {
+  const fromGit = await execText('git', ['config', 'user.name'])
+  const user = userInfo().username
+  return [...new Set([fromGit, user].filter((v): v is string => typeof v === 'string' && v.length > 0))]
+}
+
 /**
  * 바깥 명령 하나의 표준 출력. 실패는 `null` 이다.
  *
@@ -2408,6 +2422,7 @@ async function inspectSetup(root: string): Promise<SetupStatus> {
       : {}),
     ...(runtime ? { canonicalSources: runtime.layers.profile.canonical.sources.length } : {}),
     hasApprovers: Object.keys(await loadIdentityMap(root)).length > 0,
+    hasLocalApprover: localApprovers(await loadIdentityMap(root)).length > 0,
     hasControllerIdentities: Object.keys(runtime?.controllerIdentities ?? {}).length > 0,
     hasMonitorIdentities: (runtime?.monitor.identities?.length ?? 0) > 0,
     hasScmToken: await hasToken(),
@@ -4776,6 +4791,7 @@ async function runStatus(values: Record<string, unknown>): Promise<number> {
     : assessSetup({
         attachment: 'UNATTACHED',
         hasApprovers: false,
+        hasLocalApprover: false,
         hasControllerIdentities: false,
         hasMonitorIdentities: false,
         hasScmToken: await hasToken(),
@@ -5527,7 +5543,7 @@ async function runWork(
     // 승인한 commit 이 아직 그 commit 인지, 같은 것이 이미 올라가 있지는 않은지.
     case 'publish': {
       if (!values.action || !values.target) {
-        console.error('Usage: asc work publish [S-ID] --action <key> --target <ref> --body-file <path> --as <actor>')
+        console.error('Usage: asc work publish [S-ID] --action <key> --target <ref> [--body-file <path>] [--as <actor>]')
         console.error('       asc work publish … --review    # read the facts, change nothing')
         return 2
       }
@@ -5537,14 +5553,13 @@ async function runWork(
         console.error('지금 무엇이 풀리는지: asc status')
         return 2
       }
-      const payload = values['body-file']
-        ? await readFile(values['body-file'] as string, 'utf8').catch(() => null)
-        : ''
-      if (payload === null) {
-        console.error(`내용을 읽지 못했다: ${String(values['body-file'])}`)
+      // 본문은 행위 계약이 정한다 — git.push 에 더미 한 줄을 지어 넣던 자리 (0.10.0 P1, dogfood N4)
+      const read = await readActionPayload(values.action as string, values['body-file'] as string | undefined)
+      if (!read.ok) {
+        for (const line of read.lines) console.error(line)
         return 2
       }
-      const action = { action: values.action as string, target: values.target as string, payload }
+      const action = { action: values.action as string, target: values.target as string, payload: read.payload }
 
       // ① 읽기만 하는 검수. MANUAL 이든 AUTO 든 같은 판정이고, 화면만 다르다 (§E).
       const identity = bindingIdentity(runtime, outward.id)
@@ -5593,13 +5608,9 @@ async function runWork(
         console.error('Which session? `asc work publish --session <S-ID> ...`')
         return 2
       }
-      if (!values['body-file'] || !values.as) {
-        // **호출됐다는 사실이 승인이 아니다** (§R). 내보낼 내용은 사람이 준 것이어야 하고,
-        // 누가 정했는지는 이름으로 남아야 한다. 그 둘이 없으면 Grant 는 만들어지지 않는다.
-        console.error('--body-file <path> 와 --as <actor> 가 필요하다 — 내보낼 내용과 그것을 정한 사람이다.')
-        console.error('Agent 가 스스로 부른 것은 승인이 아니다.')
-        return 2
-      }
+      // **호출됐다는 사실이 승인이 아니다** (§R). 본문은 행위 계약대로 위에서 읽었고,
+      // 누가 정했는지는 grant issue 가 identities 로 정한다 — 이 기계에서 검증되는 승인자가
+      // 한 명이면 그 사람이고, 아니면 --as 를 요구한다 (0.10.0 P1).
 
       // ② 승인이 딛고 선 사실을 못 박는다 (§L). 가지 이름이 아니라 그때의 commit 이다.
       const basis = {
@@ -7141,9 +7152,9 @@ async function runGrant(
     case 'issue': {
       // 근거는 둘 중 하나다 — 밖에서 들어온 판단 요청, 또는 계약 안에서 일한 세션.
       const fromSession = (values.session as string | undefined) ?? undefined
-      if ((!target && !fromSession) || !values.action || !values.target || !values.as) {
-        console.error('Usage: asc grant issue REQ-0042 --action <key> --target <ref> --as <actor>')
-        console.error('   or: asc grant issue --session <S-ID> --action <key> --target <ref> --body-file <path> --as <actor>')
+      if ((!target && !fromSession) || !values.action || !values.target) {
+        console.error('Usage: asc grant issue REQ-0042 --action <key> --target <ref> [--as <actor>]')
+        console.error('   or: asc grant issue --session <S-ID> --action <key> --target <ref> [--body-file <path>] [--as <actor>]')
         return 2
       }
       // **할 수 없는 일을 승인시키지 않는다** (0.7.0 / F-3).
@@ -7173,7 +7184,14 @@ async function runGrant(
       }
 
       // 발급도 승인 권한자만 할 수 있다 — 외부로 나가는 권한이 여기서 만들어지기 때문이다
-      const grants = new GrantService(store, new LocalIdentityBinding(await loadIdentityMap(root)))
+      const identityMap = await loadIdentityMap(root)
+      const grants = new GrantService(store, new LocalIdentityBinding(identityMap))
+      // 누가 정했는가. 이 기계에서 검증되는 승인자가 정확히 한 명일 때만 생략을 허용한다 (0.10.0 P1)
+      const issuer = resolveIssuer(values.as, identityMap)
+      if (!issuer.ok) {
+        for (const line of issuerResolutionLines(issuer)) console.error(line)
+        return 2
+      }
 
       // **범위를 계약에 못 박는다** (0.8.0 보정 P1-3). 이 결합이 가리키는 원격이 곧 이
       // 승인의 실행 범위다 — 행위 하나를 승인했다는 사실이 다른 저장소까지 열어 주지
@@ -7194,14 +7212,9 @@ async function runGrant(
       if (fromSession) {
         // 사람이 지금 내보내라고 한 것이 승인이다. 그 말과 함께 온 내용이 payload 이고,
         // 여기서 지어내지 않는다 — 사람이 본 적 없는 글이 사람의 이름을 달고 나가면 안 된다.
-        const bodyFile = values['body-file'] as string | undefined
-        if (!bodyFile) {
-          console.error('--body-file <path> 가 필요하다 — 내보낼 내용은 사람이 준 것이어야 한다.')
-          return 2
-        }
-        const payload = await readFile(bodyFile, 'utf8').catch(() => null)
-        if (payload === null) {
-          console.error(`내용을 읽지 못했다: ${bodyFile}`)
+        const read = await readActionPayload(values.action as string, values['body-file'] as string | undefined)
+        if (!read.ok) {
+          for (const line of read.lines) console.error(line)
           return 2
         }
         const forSession = await grants.issueForSession({
@@ -7211,11 +7224,12 @@ async function runGrant(
           // 없는 기준선을 지어내면 재검수가 아무것도 지키지 못한다. 범위(resource)만은
           // 결합에서 채운다: 그것이 이 승인이 미치는 곳의 경계다.
           ...(scoped ? { basis: scoped } : {}),
-          issuedBy: values.as as string,
-          channel: 'local',
+          issuedBy: issuer.actor,
+          channel: LOCAL_CHANNEL,
           action: values.action as string,
           target: values.target as string,
-          payload,
+          payload: read.payload,
+          payloadRequired: read.required,
           ...(values.expires ? { expiresAt: values.expires as string } : {}),
           issuedAt: new Date().toISOString(),
         })
@@ -7236,8 +7250,8 @@ async function runGrant(
         grantId: (values['grant-id'] as string) ?? `G-${String(Date.now()).slice(-4)}`,
         requestId: target,
         ...(scoped ? { basis: scoped } : {}),
-        issuedBy: values.as as string,
-        channel: 'local',
+        issuedBy: issuer.actor,
+        channel: LOCAL_CHANNEL,
         action: values.action as string,
         target: values.target as string,
         ...(values.expires ? { expiresAt: values.expires as string } : {}),
@@ -7685,13 +7699,45 @@ function repoOf(target: string): string | undefined {
   return match?.[1]
 }
 
+/**
+ * 행위 계약(`ACTION_PAYLOAD`)대로 본문을 읽는다 (0.10.0 P1).
+ *
+ * forbidden 에 본문이 오면 거절한다 — 경고하고 버리면 "무엇이 나갔는가" 에 사람과 ASC 의 답이
+ * 갈린다. required 에 본문이 없어도 거절한다 — agent 가 지어낸 글은 승인이 아니다.
+ */
+async function readActionPayload(
+  action: string,
+  bodyFile: string | undefined,
+): Promise<{ ok: true; payload: string; required: boolean } | { ok: false; lines: string[] }> {
+  const contract = payloadContractOf(action)
+  if (contract === 'forbidden' && bodyFile) {
+    return {
+      ok: false,
+      lines: [`'${action}' 은 본문을 갖지 않는다 — 나가는 것은 내용이 아니라 상태다. --body-file 을 빼라.`],
+    }
+  }
+  if (contract === 'required' && !bodyFile) {
+    return {
+      ok: false,
+      lines: [
+        `'${action}' 은 내보낼 내용이 있어야 한다 — --body-file <path> 로 사람이 준 것을 넘겨라.`,
+        'Agent 가 스스로 지어낸 본문은 승인이 아니다.',
+      ],
+    }
+  }
+  if (!bodyFile) return { ok: true, payload: '', required: false }
+  const payload = await readFile(bodyFile, 'utf8').catch(() => null)
+  if (payload === null) return { ok: false, lines: [`내용을 읽지 못했다: ${bodyFile}`] }
+  return { ok: true, payload, required: contract === 'required' }
+}
+
 const GRANT_ERROR: Record<string, string> = {
   REQUEST_NOT_FOUND: '요청을 찾지 못했다.',
   NOT_APPROVED: '아직 승인되지 않은 요청이다. 승인 먼저 받아야 한다.',
   FORBIDDEN_ISSUER:
-    '계약을 발급할 권한이 없다. .asc/identities.json 에 `"이름": ["local:계정"]` 형태로 매핑을 추가하라 ' +
-    '(현재 상태는 `asc status`).',
-  NO_PAYLOAD: '내보낼 내용이 없다.',
+    '그 이름은 이 기계에서 승인자로 검증되지 않는다 — identities.json 에 `"이름": ["local:이름"]` 매핑이 있어야 한다. ' +
+    '한 번 매핑한다: asc setup identity --actor local:<이름> --role controller (재고정 불요; 현재 상태는 `asc status`).',
+  NO_PAYLOAD: '내보낼 내용이 없다 — 이 행위는 사람이 준 본문이 있어야 한다 (--body-file <path>).',
   SESSION_NOT_FOUND: '그 세션을 찾지 못했다.',
   SESSION_NOT_RUNNABLE: '아직 시작하지 않은 세션이다 — 내보낼 결과가 없다.',
   GRANT_EXISTS: '같은 id의 계약이 이미 있다.',

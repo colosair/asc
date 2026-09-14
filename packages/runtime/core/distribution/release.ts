@@ -23,10 +23,26 @@ export const BOOTSTRAP_SPEC = `${BOOTSTRAP_PACKAGE}@${RELEASE_VERSION}`
  * 지금 상태에서 도는 것이어야 한다 (불변식 ⑯).
  */
 export function portableCommand(args: readonly string[]): string {
-  return `npx --yes ${BOOTSTRAP_SPEC} ${args.join(' ')}`
+  return `npx --yes ${BOOTSTRAP_SPEC} ${shellWords(args)}`
 }
 
 /** 설치된 뒤 사람이 치는 형태. runtime이 CURRENT면 이것이 곧 portable이다. */
 export function shorthandCommand(args: readonly string[]): string {
-  return `asc ${args.join(' ')}`
+  return `asc ${shellWords(args)}`
+}
+
+/**
+ * argv 를 사람이 그대로 붙여 넣을 수 있는 한 줄로 (0.10.0 P1).
+ *
+ * 공백·`>`·`[`·따옴표가 든 인자는 작은따옴표로 감싼다. 0.9.1 까지는 `join(' ')` 이어서
+ * 건네진 발급 명령의 goal 이 여러 단어로 갈라지고 `>` 가 리다이렉트가 됐다 (dogfood 2026-09-13 F2).
+ * POSIX sh 기준이다 — 안전한 단어(`[A-Za-z0-9_./:=@%+,-]`)는 그대로 둔다.
+ */
+export function shellWords(args: readonly string[]): string {
+  return args.map(shellWord).join(' ')
+}
+
+export function shellWord(arg: string): string {
+  if (arg.length > 0 && /^[A-Za-z0-9_./:=@%+,<>-]*$/.test(arg) && !/[<>]/.test(arg)) return arg
+  return `'${arg.replace(/'/g, `'\\''`)}'`
 }

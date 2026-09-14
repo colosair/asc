@@ -30,6 +30,7 @@ async function tempDir(): Promise<string> {
 const nothing: SetupInput = {
   attachment: 'READY',
   hasApprovers: false,
+  hasLocalApprover: false,
   hasControllerIdentities: false,
   hasMonitorIdentities: false,
   hasScmToken: false,
@@ -78,7 +79,7 @@ describe('B-21 Gate — 판정 정확성', () => {
   })
 
   it('붙었는데 정본 갈래가 없으면 READY 라고 하지 않는다 (C2)', () => {
-    const attached = { ...nothing, attachment: 'READY' as const, hasApprovers: true }
+    const attached = { ...nothing, attachment: 'READY' as const, hasApprovers: true, hasLocalApprover: true }
     assert.equal(
       assessSetup({ ...attached, canonicalSources: 0 }).gates.find((g) => g.id === 'canonical')?.state,
       'BLOCKED',
@@ -92,7 +93,7 @@ describe('B-21 Gate — 판정 정확성', () => {
   })
 
   it('identities만 채우면 승인 결정만 열린다', () => {
-    const status = assessSetup({ ...nothing, hasApprovers: true })
+    const status = assessSetup({ ...nothing, hasApprovers: true, hasLocalApprover: true })
     assert.equal(status.gates.find((g) => g.id === 'approval')?.state, 'OPEN')
     assert.equal(status.gates.find((g) => g.id === 'monitor')?.state, 'BLOCKED')
     // 외부 반영은 토큰도 있어야 한다
@@ -103,6 +104,7 @@ describe('B-21 Gate — 판정 정확성', () => {
     const status = assessSetup({
       attachment: 'READY',
       hasApprovers: true,
+      hasLocalApprover: true,
       hasControllerIdentities: true,
       hasMonitorIdentities: true,
       hasScmToken: true,
@@ -133,7 +135,7 @@ describe('B-21 Gate — BLOCKED와 DEGRADED를 가른다', () => {
   })
 
   it('토큰이 없으면 감시와 외부 반영 양쪽이 막힌다 — 우회는 없다', () => {
-    const input = { ...nothing, hasApprovers: true, hasControllerIdentities: true, hasMonitorIdentities: true }
+    const input = { ...nothing, hasApprovers: true, hasLocalApprover: true, hasControllerIdentities: true, hasMonitorIdentities: true }
     assert.equal(gateOf({ ...input, hasScmToken: false }, 'monitor').state, 'BLOCKED')
     assert.equal(gateOf({ ...input, hasScmToken: false }, 'external-write').state, 'BLOCKED')
     assert.match(gateOf({ ...input, hasScmToken: false }, 'monitor').howTo.join('\n'), /gh auth login/)
@@ -150,6 +152,15 @@ describe('B-21 Gate — 재고정은 필요한 곳에만', () => {
     const text = gateOf(nothing, 'approval').howTo.join('\n')
     assert.ok(!text.includes('profile resolve'), '필요 없는 절차를 시키면 다음부터 안내를 안 믿는다')
     assert.match(text, /no re-lock needed/)
+    assert.match(text, /asc setup identity --actor local:<name>/)
+  })
+
+  // publish 는 local 채널로만 승인자를 확인한다. 원격 채널 이름만 있는 승인자를 OPEN 이라 하면
+  // 그 사실이 publish 의 FORBIDDEN_ISSUER 에서 처음 드러난다 (dogfood 2026-09-13 U2).
+  it('승인자가 있어도 이 기계에 매핑되지 않았으면 approval 은 BLOCKED 다', () => {
+    const gate = gateOf({ ...nothing, hasApprovers: true, hasLocalApprover: false }, 'approval')
+    assert.equal(gate.state, 'BLOCKED')
+    assert.match(gate.missing.join('\n'), /none is mapped to this machine/)
   })
 })
 
@@ -212,6 +223,7 @@ describe('P1-F — 신원 등록은 두 파일을 한 번에 맞춘다', () => {
     const opened = assessSetup({
       attachment: 'READY',
       hasApprovers: Object.keys(merged.identities).some((k) => !k.startsWith('$')),
+      hasLocalApprover: (merged.identities as Record<string, string[]>).colosair!.includes('local:colosair'),
       hasControllerIdentities: Object.keys(controller).length > 0,
       hasMonitorIdentities: (merged.override.monitorIdentities as string[]).length > 0,
       hasScmToken: true,

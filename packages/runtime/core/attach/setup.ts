@@ -51,6 +51,12 @@ export type SetupInput = {
   profile?: { id: string; origin: 'built-in' | 'external' }
   /** 승인 권한자 매핑이 하나라도 있는가. */
   hasApprovers: boolean
+  /**
+   * 그중 **이 기계의 local 채널로 검증되는** 승인자가 있는가 (0.10.0 P1). publish·grant issue 는
+   * local 채널로만 확인하므로, 원격 채널 이름만 있는 승인자는 밖에서는 알아보지만 여기서는
+   * 승인할 수 없다 — 그 상태를 OPEN 이라고 말하면 publish 에서 FORBIDDEN_ISSUER 로 처음 드러난다.
+   */
+  hasLocalApprover: boolean
   /** override의 controller.identities가 채워졌는가. */
   hasControllerIdentities: boolean
   /** override의 monitorIdentities가 채워졌는가. */
@@ -86,17 +92,22 @@ export function assessSetup(input: SetupInput): SetupStatus {
 
 /** 승인 결정. identities.json은 lock digest에 없어 재고정이 필요 없다. */
 function approvalGate(input: SetupInput): SetupGate {
-  if (input.hasApprovers) {
+  if (input.hasLocalApprover) {
     return { id: 'approval', label: 'approval decisions', state: 'OPEN', missing: [], warnings: [], howTo: [] }
   }
   return {
     id: 'approval',
     label: 'approval decisions',
     state: 'BLOCKED',
-    missing: ['identities.json lists no approver'],
+    missing: [
+      input.hasApprovers
+        ? 'identities.json names an approver, but none is mapped to this machine (local: channel)'
+        : 'identities.json lists no approver',
+    ],
     warnings: [],
-    // 여기에 재고정을 적지 않는다 — 필요 없는 절차를 시키면 다음부터 안내를 안 믿는다
-    howTo: ['open identities.json and add an approver in the $example form (no re-lock needed)'],
+    // 여기에 재고정을 적지 않는다 — 필요 없는 절차를 시키면 다음부터 안내를 안 믿는다.
+    // 매핑은 사람의 명시 결정이다 — ASC 가 OS 사용자 이름으로 권한을 지어 주지 않는다.
+    howTo: ['map yourself once: `asc setup identity --actor local:<name> --role controller` (no re-lock needed)'],
   }
 }
 

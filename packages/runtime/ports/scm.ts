@@ -39,6 +39,37 @@ export const MANAGED_EXTERNAL_ACTIONS = [
   'github.issue_comment.create',
 ] as const
 
+export type ManagedExternalAction = (typeof MANAGED_EXTERNAL_ACTIONS)[number]
+
+/**
+ * 행위마다 본문(payload)이 무엇인가 (0.10.0 P1).
+ *
+ *   required   사람이 준 내용이 그대로 나간다 — 없으면 발급하지 않는다
+ *   optional   있으면 싣고 없어도 성립한다
+ *   forbidden  이 행위에는 본문이 없다 — 주면 무엇이 나가는지 아무도 모르므로 거절한다
+ *
+ * `git.push` 가 forbidden 인 이유: 나가는 것은 commit 이지 글이 아니다. 그런데 0.9.1 까지는
+ * 모든 행위가 본문을 요구해 사람이 더미 한 줄을 지어 넣어야 했다 (dogfood 2026-09-13 N4).
+ * 표가 여기 있는 이유는 행위 목록이 여기 있기 때문이다 — Core 는 이 표를 읽지 않고
+ * `payloadRequired` 라는 사실만 입력으로 받는다.
+ */
+export type PayloadContract = 'required' | 'optional' | 'forbidden'
+
+export const ACTION_PAYLOAD: Readonly<Record<ManagedExternalAction, PayloadContract>> = {
+  'git.push': 'forbidden',
+  'coordination.publish': 'required',
+  'gitlab.mr.create': 'required',
+  'gitlab.mr.merge': 'optional',
+  'gitlab.note.create': 'required',
+  'gitlab.issue.update': 'required',
+  'github.issue_comment.create': 'required',
+}
+
+/** 모르는 행위는 required 다 — 본문 없이 나가는 것을 기본값으로 두지 않는다. */
+export function payloadContractOf(action: string): PayloadContract {
+  return (ACTION_PAYLOAD as Record<string, PayloadContract>)[action] ?? 'required'
+}
+
 /**
  * Grant가 지시하는 단일 외부 Action. Executor는 payload를 재작성하지 않는다 —
  * 사람이 승인한 내용 그대로 나간다.
