@@ -11,8 +11,24 @@ export type RepoObservation = {
   /** 현재 체크아웃된 가지. 알 수 없으면 null. */
   branch: string | null
   remotes: readonly { name: string; url: string }[]
-  /** refHint 에 걸린 지역·원격 ref 들 (예: 이슈 키가 들어간 작업 가지). */
+  /** refHint 에 **정확히** 걸린 지역·원격 ref 들 (예: 이슈 키가 든 작업 가지). `KEY-64` 는 `KEY-641` 에 걸리지 않는다. */
   refs: readonly string[]
+  /**
+   * refs 중 정본과 같은 tip 이면서 이 작업의 commit 이 하나도 없는 것 (0.10.0 P5). 방금 정본에서
+   * 만든 빈 가지다 — 조상 관계는 자명하므로 "병합됐다" 의 증거가 아니다. `mergedIntoCanonical`
+   * 은 이것을 세지 않는다.
+   */
+  emptyRefs?: readonly string[]
+  /**
+   * 다른 worktree 에 checkout 된 작업 가지와 그곳의 미커밋 변경 수 (0.10.0 P5). 진행 중인 일이
+   * 여기 보이지 않는 곳에 있다는 뜻이다 — 새 세션을 내기 전에 알아야 한다.
+   */
+  inProgressElsewhere?: readonly { ref: string; path: string; uncommitted: number }[]
+  /**
+   * 언급 commit 이 건드린 파일이 이 작업의 경로(query.paths)와 겹치는가 (0.10.0 P5). 키 충돌·오타로
+   * 다른 작업의 commit 이 걸렸을 때 이것이 false 다. 경로가 없어 못 쟀으면 undefined.
+   */
+  mentionedPathsOverlap?: boolean
   /** 무엇을 정본으로 삼아 비교했는가. Profile 이 정한다 — adapter 가 추측하지 않는다. */
   canonicalRef?: string
   /**

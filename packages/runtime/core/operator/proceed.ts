@@ -45,6 +45,12 @@ export type ProceedIntent = {
     boundary?: readonly string[]
     provenance?: readonly DraftField[]
   }
+  /**
+   * 사람이 WORK_STATE 판정을 뒤집는다 (0.10.0 P5). 판정이 "구현됨" 이나 "다른 곳에서 진행 중" 이어도
+   * 사람이 확인했으면 착수한다 — 그 사실과 이유는 history 에 남고, 뒤집힌 판정의 근거는 outcome 에
+   * 그대로 실린다. 이유 없는 override 는 받지 않는다.
+   */
+  fresh?: { reason: string; by?: string }
 }
 
 /**
@@ -122,6 +128,8 @@ export type ProceedOutcome =
        * `revised` 는 같은 작업 항목의 이전 제안 중 이것이 대체한 것들이다.
        */
       proposal?: { id: string; revised: string[] }
+      /** 사람이 뒤집은 WORK_STATE 판정 (0.10.0 P5) — 무엇을 뒤집었고 그 근거가 무엇이었는가. */
+      overrode?: { judged: WorkStateResult; reason: string }
     }
   /**
    * 조사해 보니 **세션을 낼 일이 아니다** (P0-B). 이미 구현돼 tracker 만 뒤처졌거나,
@@ -212,7 +220,7 @@ export class Operator {
       : runnable
 
     if (candidates.length === 0) {
-      if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress, intent.fill)
+      if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress, intent.fill, intent.fresh)
       // 자동 issue 금지. 초안을 제안할 수는 있으나 발급은 Controller 승인 후 별도 행위다.
       return {
         kind: 'PROPOSE_CONTRACT',
@@ -248,6 +256,7 @@ export class Operator {
     goal: string | undefined,
     ingress: WorkIngress,
     fill?: ProceedIntent['fill'],
+    fresh?: ProceedIntent['fresh'],
   ): Promise<ProceedOutcome> {
     const gathered = await ingress.gather(workRef)
     // 작업 항목이 지목한 경로를 함께 확인한다 — 그것이 좁은 쓰기 범위의 유일한 근거다.
@@ -258,7 +267,21 @@ export class Operator {
     const workState = judgeWorkState({ ...gathered, repo })
 
     const decided = workState.state === 'DECIDABLE_WITH_LIMITATION' ? workState.leaning : workState.state
-    if (decided !== 'ACTIONABLE' || !gathered.workItem) {
+    let overrode: { judged: WorkStateResult; reason: string } | undefined
+    if (decided !== 'ACTIONABLE' && gathered.workItem && fresh?.reason) {
+      // 사람이 판정을 뒤집었다 — 조용히 넘어가지 않는다. 무엇을 뒤집었는지 history 에 남긴다 (P5)
+      await this.#store.appendHistory({
+        at: new Date().toISOString(),
+        actor: fresh.by ?? '(person)',
+        kind: 'work_state_overridden',
+        ref: workRef,
+        detail: `judged ${workState.state}${workState.leaning ? ` (leaning ${workState.leaning})` : ''} — overridden: ${fresh.reason}`,
+      })
+      overrode = { judged: workState, reason: fresh.reason }
+    } else if (decided !== 'ACTIONABLE' || !gathered.workItem) {
+      return { kind: 'WORK_STATE', workRef, result: workState, nextAction: nextActionFor(workState, workRef) }
+    }
+    if (!gathered.workItem) {
       return { kind: 'WORK_STATE', workRef, result: workState, nextAction: nextActionFor(workState, workRef) }
     }
 
@@ -282,6 +305,7 @@ export class Operator {
       },
       full: draft,
       plan,
+      ...(overrode ? { overrode } : {}),
     }
 
     // 계약이 성립하지 않으면 발급하지 않는다. 무엇이 남았는지는 plan 이 이미 말한다.
@@ -475,6 +499,8 @@ function nextActionFor(result: WorkStateResult, workRef: string): string {
       return '선행 작업이 열려 있다 — 그것이 닫히기 전에는 이 작업만으로 끝나지 않는다'
     case 'REVIEW_RESPONSE_REQUIRED':
       return '검토가 답을 기다린다 — 다음 행동은 새 구현이 아니라 응답이다'
+    case 'IN_PROGRESS_ELSEWHERE':
+      return '이 작업의 가지가 다른 worktree 에서 미커밋 상태로 진행 중이다 — 그쪽에서 이어가거나 끝내라. 여기서 새 세션을 내지 않는다'
     default:
       return `결론 요건이 모자라다: ${result.missing.join(', ') || '확인하지 못한 것이 있다'} — 그것을 먼저 확인하라`
   }

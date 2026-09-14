@@ -26,6 +26,8 @@ export type WorkState =
   | 'BLOCKED_DEPENDENCY'
   /** 남의 검토에 답하는 것이 다음 행동이다. */
   | 'REVIEW_RESPONSE_REQUIRED'
+  /** 이 작업의 가지가 다른 worktree 에서 미커밋 상태로 진행 중이다 — 새 세션을 내지 않는다 (0.10.0 P5). */
+  | 'IN_PROGRESS_ELSEWHERE'
   /** 못 본 것이 있지만 판정을 뒤집을 정도는 아니다 — 무엇에 기울었는지 `leaning` 이 말한다. */
   | 'DECIDABLE_WITH_LIMITATION'
   /** 결론 요건이 채워지지 않았다. 추천하지 않는다. */
@@ -111,7 +113,11 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   const mentioned = repo.mentionedOnCanonical ?? []
   // 언급은 그 자체로 증거가 아니다. 되돌리기만 있는 이력도 이 작업을 "언급"하고, 뒤이어
   // 걷혀 나간 변경도 그렇다. 살아남은 것이 있어야 정본에 있다고 말할 수 있다.
-  const mentionSurvives = mentioned.length > 0 && repo.mentionedOnlyReverts !== true && repo.mentionedArtifactsPresent === true
+  // 그리고 그 변경이 **이 작업의 자리**를 건드렸어야 한다 — 키만 같은 다른 작업의 commit 은
+  // 살아 있어도 이 작업의 증거가 아니다 (0.10.0 P5, 키 뒤바뀜 실측).
+  const mentionOffTarget = mentioned.length > 0 && repo.mentionedPathsOverlap === false
+  const mentionSurvives =
+    mentioned.length > 0 && repo.mentionedOnlyReverts !== true && repo.mentionedArtifactsPresent === true && !mentionOffTarget
   // **파일이 있다는 것은 이 요구가 구현됐다는 뜻이 아니다** (0.7.0 / D-01).
   //
   // 경로는 작업 항목 본문에서 뽑아 온다. 그런데 그 경로가 가리키는 파일은 대개 이미
@@ -128,6 +134,12 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
 
   if (repo.canonicalRef) evidence.push(`정본 대조 기준: ${repo.canonicalRef}`)
   if (hasBranch) evidence.push(`작업 가지: ${repo.refs.join(', ')}`)
+  if ((repo.emptyRefs?.length ?? 0) > 0) {
+    evidence.push(`빈 작업 가지 (정본과 같은 tip, 이 작업의 commit 없음 — 구현 증거 아님): ${repo.emptyRefs!.join(', ')}`)
+  }
+  for (const elsewhere of repo.inProgressElsewhere ?? []) {
+    evidence.push(`다른 worktree 에서 진행 중: ${elsewhere.ref} @ ${elsewhere.path} (미커밋 ${elsewhere.uncommitted}건)`)
+  }
   if (repo.mergedIntoCanonical === true) evidence.push('작업 가지가 정본에 병합돼 있다')
   if (repo.contentEquivalent === true) {
     evidence.push('작업 가지의 내용이 전부 정본에 반영돼 있다 (조상은 아니다 — rebase·squash 등가)')
@@ -140,7 +152,10 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
   if (artifacts.length > 0) {
     evidence.push(`작업 트리에 관련 파일이 있다: ${artifacts.map(([p]) => p).join(', ')}`)
   }
-  if (mentioned.length > 0) evidence.push(`정본 이력이 이 작업을 언급한다: ${mentioned.join(' / ')}`)
+  if (mentioned.length > 0) evidence.push(`정본 이력에 이 키를 정확히 언급하는 commit: ${mentioned.join(' / ')}`)
+  if (mentionOffTarget) {
+    evidence.push('그 commit 이 건드린 파일은 이 작업의 경로와 겹치지 않는다 — 키만 같은 다른 작업일 수 있어 증거로 세지 않는다')
+  }
   if (repo.mentionedOnlyReverts === true) {
     evidence.push('그 언급은 전부 되돌리기다 — 구현이 정본에 남아 있다는 증거가 아니다')
   }
@@ -208,6 +223,13 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
     return decided('IMPLEMENTATION_COMPLETE_BLOCKED_VERIFICATION', evidence, limitations, { demote: true, grade: evidenceGrade })
   }
 
+  // ②′ 이 작업의 가지가 다른 worktree 에서 미커밋으로 진행 중이다 — 새 세션을 내지 않는다 (P5).
+  //    병합된 것도 아니고 없는 것도 아니다: 누군가 지금 하고 있다.
+  const elsewhere = (repo.inProgressElsewhere ?? []).filter((e) => e.uncommitted > 0)
+  if (!merged && elsewhere.length > 0) {
+    return decided('IN_PROGRESS_ELSEWHERE', evidence, limitations, { demote: false, grade: evidenceGrade })
+  }
+
   // ③ 가지는 있는데 병합 전이고 선행 작업이 열려 있다.
   if (hasBranch && !merged && openDependencies.length > 0) {
     return decided('BLOCKED_DEPENDENCY', evidence, limitations, { demote: false, grade: evidenceGrade })
@@ -234,6 +256,11 @@ export function judgeWorkState(input: WorkStateInput): WorkStateResult {
       return { state: 'UNDECIDABLE', evidence, limitations, missing: ['canonical-freshness'], evidenceGrade }
     }
     evidence.push('이 작업 키를 직접 가리키는 증거를 확인하지 못했다')
+    if (mentionOffTarget) {
+      // 키는 있는데 자리가 다르다 — 모르는 것을 "없다" 로도 "있다" 로도 확정하지 않는다
+      limitations.push('이 키를 언급하는 commit 이 있으나 이 작업의 경로를 건드리지 않았다 — 키 충돌·오타 가능성. 구현 여부는 사람이 확인한다')
+      return { state: 'UNDECIDABLE', evidence, limitations, missing: ['implementation-evidence'], evidenceGrade }
+    }
     const result = decided('ACTIONABLE', evidence, limitations, { demote: true, grade: evidenceGrade })
     // 구조적 한계 — 키 대조는 proxy 다. 다른 키의 커밋이 이 작업의 인수 조건을 이미
     // 충족했을 가능성은 여기서 대조하지 않았다. 표기는 하되 이 한 줄로 판정을 되돌리지는

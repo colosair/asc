@@ -236,6 +236,7 @@ Execution
 
 Work
   asc work start [WORK]     start or resume the work, inside a contract — binds this Run to it
+                            (--fresh "<reason>" overrides a WORK_STATE verdict; recorded)
   asc work issue <S-ID>     a person issues the contract ASC proposed (--reject <reason> declines it)
   asc work reclaim <S-ID>   take over a session another Run holds — your call, recorded as one
   asc work status [S-ID]    where it is right now
@@ -790,6 +791,7 @@ function parseArgsOrThrow(argv: string[]) {
   /** 초안의 출처 — `<field>=<FACT|PROPOSAL|DECISION_REQUIRED>[:<source>]` (session plan). */
   provenance: { type: 'string', multiple: true },
   reject: { type: 'string' },
+  fresh: { type: 'string' },
   offline: { type: 'boolean', default: false },
   id: { type: 'string' },
   intent: { type: 'string' },
@@ -3192,11 +3194,19 @@ async function runProceed(
     ...(values.boundary ? { boundary: values.boundary as string[] } : {}),
     ...(provenance.length > 0 ? { provenance } : {}),
   }
+  // 사람이 WORK_STATE 판정을 뒤집는다 — 이유가 있어야 하고, history 에 남는다 (0.10.0 P5)
+  if (values.fresh !== undefined && !String(values.fresh)) {
+    console.error('--fresh <이유> — 판정을 뒤집는 이유 없이는 받지 않는다.')
+    return 2
+  }
   const outcome = await operator.proceed({
     ...(values.session ? { sessionId: values.session as string } : {}),
     ...(values.goal ? { goal: values.goal as string } : {}),
     ...(workRef ? { workRef } : {}),
     ...(Object.keys(fill).length > 0 ? { fill } : {}),
+    ...(values.fresh !== undefined
+      ? { fresh: { reason: String(values.fresh), by: observedRunId() ? `person via run:${observedRunId()}` : '(person)' } }
+      : {}),
   })
 
   // 도구 자식(JAM MCP 서버 등)을 여기서 닫는다 — 안 닫으면 출력까지 끝내고도 종료하지 못한다.
@@ -3332,6 +3342,13 @@ async function runProceed(
       return outcome.result.state === 'UNDECIDABLE' ? 1 : 0
     }
     case 'PROPOSE_CONTRACT':
+      if (outcome.overrode) {
+        // 뒤집은 판정의 근거를 다시 보인다 — 무엇을 무시했는지 모른 채 착수하지 않는다 (P5)
+        console.log(`WORK_STATE ${outcome.overrode.judged.state}${outcome.overrode.judged.leaning ? ` (${outcome.overrode.judged.leaning})` : ''} 을 사람이 뒤집었다 — ${outcome.overrode.reason}`)
+        for (const line of outcome.overrode.judged.evidence) console.log(`  근거      ${line}`)
+        for (const line of outcome.overrode.judged.limitations) console.log(`  한계      ${line}`)
+        console.log('')
+      }
       if (outcome.plan) {
         console.log(`${outcome.plan.status}${outcome.full?.id ? ` — ${outcome.full.id}` : ''}`)
         for (const fact of outcome.plan.facts) console.log(`  fact      ${fact.field} (${fact.source})`)

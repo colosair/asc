@@ -6,7 +6,7 @@
 
 import { execFile } from 'node:child_process'
 import { access } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import type { LocalRepoPort, RepoObservation, RepoQuery } from '../../ports/local-repo.ts'
@@ -48,11 +48,15 @@ export class LocalRepoAdapter implements LocalRepoPort {
   readonly #cwd: string
   readonly #git: GitRunner
   readonly #exists: (path: string) => Promise<boolean>
+  readonly #gitIn: (cwd: string, args: readonly string[]) => Promise<string | null>
 
   constructor(deps: LocalRepoDeps) {
     this.#cwd = deps.cwd
     this.#git = deps.git ?? defaultGit(deps.cwd)
     this.#exists = deps.exists ?? defaultExists
+    // 다른 worktree 를 볼 때만 쓴다. 주입된 runner 는 이 저장소 하나에 묶여 있으므로, 테스트가
+    // 주입한 경우에는 그 runner 에 `-C <path>` 를 앞세워 넘긴다 — 같은 가짜가 답한다.
+    this.#gitIn = deps.git ? async (cwd, args) => deps.git!(['-C', cwd, ...args]) : async (cwd, args) => defaultGit(cwd)(args)
   }
 
   async observe(query: RepoQuery): Promise<RepoObservation> {
@@ -79,6 +83,9 @@ export class LocalRepoAdapter implements LocalRepoPort {
         await this.#git(['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes']),
         query.refHint,
       )
+      // 그 가지가 다른 worktree 에서 진행 중인가 — 여기 없는 곳의 미커밋 작업까지 본다 (P5)
+      const elsewhere = await this.#inProgressElsewhere(observation.refs)
+      if (elsewhere.length > 0) observation.inProgressElsewhere = elsewhere
     }
 
     // 신선도가 먼저다. 로컬 브랜치를 정본처럼 읽으면 원격이 전진한 사실을 모른 채
@@ -88,14 +95,28 @@ export class LocalRepoAdapter implements LocalRepoPort {
     observation.freshness = canonical.freshness
     if (canonicalRef) {
       observation.canonicalRef = canonicalRef
-      observation.mergedIntoCanonical = await this.#anyMerged(observation.refs, canonicalRef)
-      if (observation.mergedIntoCanonical !== true && observation.refs.length > 0) {
-        const equivalent = await this.#contentEquivalent(observation.refs, canonicalRef)
+      // 정본에서 방금 만든 빈 가지는 자명하게 조상이다 — 그것을 "병합됐다" 로 읽던 자리 (P5).
+      // 이 작업의 commit 이 하나도 없는 가지는 증거에서 뺀다.
+      const empty = query.refHint ? await this.#emptyRefs(observation.refs, canonicalRef, query.refHint) : []
+      if (empty.length > 0) observation.emptyRefs = empty
+      const substantive = observation.refs.filter((ref) => !empty.includes(ref))
+      observation.mergedIntoCanonical = await this.#anyMerged(substantive, canonicalRef)
+      if (observation.mergedIntoCanonical !== true && substantive.length > 0) {
+        const equivalent = await this.#contentEquivalent(substantive, canonicalRef)
         if (equivalent !== undefined) observation.contentEquivalent = equivalent
       }
       if (query.refHint) {
-        // 가지가 지워졌어도 이력은 남는다 — 커밋 메시지가 이 작업을 언급하는지 본다.
-        const log = await this.#git(['log', '--format=%h %s', `--grep=${query.refHint}`, '-n', '5', canonicalRef])
+        // 가지가 지워졌어도 이력은 남는다 — 커밋 메시지가 이 작업을 **정확히** 언급하는지 본다.
+        // 부분 문자열(`KEY-64` ⊂ `KEY-641`)은 다른 작업이다 (P5).
+        const log = await this.#git([
+          'log',
+          '--format=%h %s',
+          '-E',
+          `--grep=${exactKeyPattern(query.refHint)}`,
+          '-n',
+          '5',
+          canonicalRef,
+        ])
         const mentions = (log ?? '')
           .split('\n')
           .map((line) => line.trim())
@@ -105,11 +126,12 @@ export class LocalRepoAdapter implements LocalRepoPort {
         if (mentions.length > 0) {
           // 언급만으로는 부족하다. 무엇을 건드린 커밋인지, 그 결과가 지금도 남아 있는지
           // 본다 — 되돌린 커밋도 이 작업을 "언급"하기 때문이다.
-          const survival = await this.#survivalOf(mentions, canonicalRef)
+          const survival = await this.#survivalOf(mentions, canonicalRef, query.paths ?? [])
           observation.mentionedOnlyReverts = survival.onlyReverts
           if (survival.artifactsPresent !== undefined) {
             observation.mentionedArtifactsPresent = survival.artifactsPresent
           }
+          if (survival.pathsOverlap !== undefined) observation.mentionedPathsOverlap = survival.pathsOverlap
         }
       }
     }
@@ -205,7 +227,8 @@ export class LocalRepoAdapter implements LocalRepoPort {
   async #survivalOf(
     mentions: readonly string[],
     canonicalRef: string,
-  ): Promise<{ onlyReverts: boolean; artifactsPresent?: boolean }> {
+    workPaths: readonly string[] = [],
+  ): Promise<{ onlyReverts: boolean; artifactsPresent?: boolean; pathsOverlap?: boolean }> {
     const commits = mentions.map((line) => {
       const at = line.indexOf(' ')
       return { hash: at > 0 ? line.slice(0, at) : line, subject: at > 0 ? line.slice(at + 1) : '' }
@@ -213,18 +236,63 @@ export class LocalRepoAdapter implements LocalRepoPort {
     const onlyReverts = commits.every((commit) => /^revert\b/i.test(commit.subject.trim()))
 
     let readAny = false
+    let present = false
+    let overlap: boolean | undefined = workPaths.length > 0 ? false : undefined
     for (const commit of commits) {
       if (/^revert\b/i.test(commit.subject.trim())) continue
       const listed = await this.#git(['show', '--name-status', '--format=', commit.hash])
       if (listed === null) continue
       readAny = true
-      for (const path of changedPaths(listed).slice(0, 20)) {
-        if ((await this.#git(['cat-file', '-e', `${canonicalRef}:${path}`])) !== null) {
-          return { onlyReverts, artifactsPresent: true }
+      const changed = changedPaths(listed)
+      // 이 작업의 경로와 겹치는가 — 키가 같아도 다른 작업의 commit 일 수 있다 (P5)
+      if (overlap === false && changed.some((path) => workPaths.some((wp) => sharesPath(path, wp)))) overlap = true
+      if (!present) {
+        for (const path of changed.slice(0, 20)) {
+          if ((await this.#git(['cat-file', '-e', `${canonicalRef}:${path}`])) !== null) {
+            present = true
+            break
+          }
         }
       }
     }
-    return readAny ? { onlyReverts, artifactsPresent: false } : { onlyReverts }
+    if (!readAny) return { onlyReverts }
+    return { onlyReverts, artifactsPresent: present, ...(overlap !== undefined ? { pathsOverlap: overlap } : {}) }
+  }
+
+  /**
+   * 정본과 같은 tip 이면서 이 작업의 commit 이 없는 가지 (P5). `rev-list --count canonical..ref` 가 0 이고
+   * tip 의 제목이 키를 언급하지 않으면 "방금 정본에서 만든 가지" 다 — 조상 관계는 증거가 아니다.
+   */
+  async #emptyRefs(refs: readonly string[], canonicalRef: string, key: string): Promise<string[]> {
+    const out: string[] = []
+    const exact = new RegExp(exactKeyPattern(key), 'i')
+    for (const ref of refs) {
+      const ahead = await this.#git(['rev-list', '--count', `${canonicalRef}..${ref}`])
+      if (ahead === null || Number(ahead.trim()) !== 0) continue
+      const subject = (await this.#git(['log', '-1', '--format=%s', ref])) ?? ''
+      if (!exact.test(subject)) out.push(ref)
+    }
+    return out
+  }
+
+  /** 작업 가지가 다른 worktree 에 checkout 돼 있고 거기 미커밋 변경이 있는가 (P5). */
+  async #inProgressElsewhere(refs: readonly string[]): Promise<{ ref: string; path: string; uncommitted: number }[]> {
+    if (refs.length === 0) return []
+    const listed = await this.#git(['worktree', 'list', '--porcelain'])
+    if (!listed) return []
+    const out: { ref: string; path: string; uncommitted: number }[] = []
+    let path: string | undefined
+    for (const line of listed.split('\n')) {
+      if (line.startsWith('worktree ')) path = line.slice('worktree '.length).trim()
+      if (line.startsWith('branch ') && path && resolve(path) !== resolve(this.#cwd)) {
+        const branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '')
+        if (!refs.includes(branch)) continue
+        const status = await this.#gitIn(path, ['status', '--porcelain'])
+        const uncommitted = (status ?? '').split('\n').filter((l) => l.trim().length > 0).length
+        out.push({ ref: branch, path, uncommitted })
+      }
+    }
+    return out
   }
 
   async #anyMerged(refs: readonly string[], canonicalRef: string): Promise<boolean> {
@@ -247,11 +315,25 @@ function parseRemotes(stdout: string | null): { name: string; url: string }[] {
 
 function filterRefs(stdout: string | null, hint: string): string[] {
   if (!stdout) return []
-  const needle = hint.toLowerCase()
+  // 정확한 키 일치 — `PROJ-64` 는 `feat/PROJ-641-x` 에 걸리지 않는다 (P5)
+  const exact = new RegExp(exactKeyPattern(hint), 'i')
   return stdout
     .split('\n')
     .map((line) => line.trim())
-    .filter((ref) => ref.length > 0 && ref.toLowerCase().includes(needle))
+    .filter((ref) => ref.length > 0 && exact.test(ref))
+}
+
+/** 키가 단어 경계 안에서 통째로 나타나는 ERE. 앞뒤에 영숫자가 붙으면 다른 키다. */
+export function exactKeyPattern(key: string): string {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return `(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`
+}
+
+/** 두 경로가 같은 자리인가 — 하나가 다른 하나의 접두 디렉터리이거나 같다. */
+function sharesPath(changed: string, workPath: string): boolean {
+  const a = changed.replace(/\/+$/, '')
+  const b = workPath.replace(/\/+$/, '').replace(/\/\*\*?$/, '')
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
 }
 
 /** `--name-status` 출력에서 지금도 존재할 수 있는 경로만. 삭제(D)는 세지 않는다. */
