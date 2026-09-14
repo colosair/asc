@@ -204,9 +204,21 @@ describe('B-69 Gate — agent 표면 (C-14 §7, 불변식 ⑫)', () => {
     const { repo, env, cleanup } = await scratch()
     try {
       const viaAgent = run(repo, env, ['setup', 'apply', '--profile', 'pilot-local', '--agent'])
-      const viaJson = run(repo, env, ['setup', 'plan', '--profile', 'pilot-local', '--json'])
       assert.equal(JSON.parse(viaAgent.stdout).status, 'applied')
-      assert.equal(JSON.parse(viaJson.stdout).status, 'already_configured', 'apply가 실제로 붙였어야 한다')
+      // 0.10.0 P3: 붙은 뒤에도 사람이 답할 것이 남는다 — 이 기계의 승인자 매핑과 발급 위임.
+      // 둘 다 사람의 한 마디이고, 답하기 전까지 setup 은 "끝났다" 고 말하지 않는다.
+      const pending = JSON.parse(run(repo, env, ['setup', 'plan', '--profile', 'pilot-local', '--json']).stdout)
+      assert.equal(pending.requiresUserAction, true)
+      assert.ok(
+        ['ASC_LOCAL_IDENTITY_REQUIRED', 'ASC_ISSUANCE_DELEGATION_DECISION'].includes(pending.code),
+        `apply 뒤 남는 결정은 둘 중 하나다: ${pending.code}`,
+      )
+      if (pending.code === 'ASC_LOCAL_IDENTITY_REQUIRED') {
+        assert.equal(run(repo, env, ['setup', 'identity', '--actor', 'local:tester', '--role', 'controller']).status, 0)
+      }
+      assert.equal(run(repo, env, ['setup', 'delegate', '--none']).status, 0)
+      const viaJson = run(repo, env, ['setup', 'plan', '--profile', 'pilot-local', '--json'])
+      assert.equal(JSON.parse(viaJson.stdout).status, 'already_configured', '두 결정이 끝나면 더 물을 것이 없다')
     } finally {
       await cleanup()
     }

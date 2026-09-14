@@ -83,7 +83,7 @@ describe('P0-2 — 언급 커밋이 남긴 것이 지금도 있는가', () => {
     const repo = new LocalRepoAdapter({
       cwd: '/x',
       git: historyGit({
-        'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'd2cadb0 feat: PROJ-87 구현\n',
+        'log --format=%h %s -E --grep=(^|[^A-Za-z0-9])PROJ-87([^A-Za-z0-9]|$) -n 5 origin/develop': 'd2cadb0 feat: PROJ-87 구현\n',
         'show --name-status --format= d2cadb0': 'A\tfe/src/Slot.tsx\nM\tfe/src/index.ts\n',
         'cat-file -e origin/develop:fe/src/Slot.tsx': '',
       }),
@@ -99,7 +99,7 @@ describe('P0-2 — 언급 커밋이 남긴 것이 지금도 있는가', () => {
     const repo = new LocalRepoAdapter({
       cwd: '/x',
       git: historyGit({
-        'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'd2cadb0 feat: PROJ-87 구현\n',
+        'log --format=%h %s -E --grep=(^|[^A-Za-z0-9])PROJ-87([^A-Za-z0-9]|$) -n 5 origin/develop': 'd2cadb0 feat: PROJ-87 구현\n',
         'show --name-status --format= d2cadb0': 'A\tfe/src/Slot.tsx\n',
       }),
     })
@@ -131,7 +131,7 @@ describe('P0-2 — 언급 커밋이 남긴 것이 지금도 있는가', () => {
   it('파일 목록을 못 읽으면 없다고 하지 않고 모른다고 한다', async () => {
     const repo = new LocalRepoAdapter({
       cwd: '/x',
-      git: historyGit({ 'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'd2cadb0 feat: PROJ-87\n' }),
+      git: historyGit({ 'log --format=%h %s -E --grep=(^|[^A-Za-z0-9])PROJ-87([^A-Za-z0-9]|$) -n 5 origin/develop': 'd2cadb0 feat: PROJ-87\n' }),
     })
 
     const seen = await repo.observe({ refHint: 'PROJ-87', canonicalRef: 'origin/develop' })
@@ -143,7 +143,7 @@ describe('P0-2 — 언급 커밋이 남긴 것이 지금도 있는가', () => {
     const repo = new LocalRepoAdapter({
       cwd: '/x',
       git: historyGit({
-        'log --format=%h %s --grep=PROJ-87 -n 5 origin/develop': 'aaa1111 chore: PROJ-87 정리\n',
+        'log --format=%h %s -E --grep=(^|[^A-Za-z0-9])PROJ-87([^A-Za-z0-9]|$) -n 5 origin/develop': 'aaa1111 chore: PROJ-87 정리\n',
         'show --name-status --format= aaa1111': 'D\tfe/src/Old.tsx\n',
       }),
     })

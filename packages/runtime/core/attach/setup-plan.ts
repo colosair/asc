@@ -78,7 +78,20 @@ export type SetupState = {
    * 이 workspace 에 승인 권한자가 서 있는가, 그리고 지금 이 사람을 무엇으로 알아볼 수
    * 있는가. `actor` 는 인증된 provider 가 말한 값이며 ASC 가 지어내지 않는다.
    */
-  identity?: { wired: boolean; actor?: string }
+  identity?: {
+    wired: boolean
+    actor?: string
+    /** 이 기계의 local 채널로 검증되는 승인자가 있는가. 없으면 사람이 한 번 매핑해야 한다 (0.10.0 P1). */
+    localMapped?: boolean
+    /** 매핑 후보 — git user.name, OS 사용자. **후보일 뿐이다**: 고르는 것은 사람이다. */
+    localCandidates?: readonly string[]
+  }
+  /**
+   * 계약 발급 위임이 결정됐는가 (0.10.0 P3). `undecided` 면 Profile 도 override 도 말한 적이
+   * 없다 — 그때 기본은 "위임 없음" 이지만, 사람이 한 번 답하기 전까지 setup 은 끝난 것이 아니다.
+   * 답은 `declared`(역할 목록) 또는 `none`(명시적으로 빈 목록) 이다.
+   */
+  issuanceDelegation?: 'undecided' | 'declared' | 'none'
   /**
    * 발견이 **갈리지 않고** 제안하는 결합. Profile 에 결합 선언이 없을 때만 본다.
    * 갈리면 비어 있다 — 고르는 것은 사람이다 (C-09 §4.2).
@@ -170,6 +183,16 @@ export type SetupCode =
    * ASC 는 토큰을 받지도 저장하지도 않는다.
    */
   | 'ASC_WORK_BINDING_NEEDS_USER'
+  /**
+   * 이 기계에서 승인할 사람이 정해지지 않았다 (0.10.0 P1). 후보는 발견하지만 권한은 지어 주지
+   * 않는다 — 사람이 `setup identity --actor local:<name>` 으로 한 번 말한다.
+   */
+  | 'ASC_LOCAL_IDENTITY_REQUIRED'
+  /**
+   * 계약 발급을 agent 에 위임할지 사람이 정하지 않았다 (0.10.0 P3). 위임하면 `work start` 가
+   * 제안한 범위 안에서 발급까지 하고, 위임하지 않으면 사람이 제안 id 로 발급한다.
+   */
+  | 'ASC_ISSUANCE_DELEGATION_DECISION'
 
 /**
  * 다음에 할 일 하나. **두 형태를 함께 든다** (C-14 §3.4, 불변식 ⑯).
@@ -179,7 +202,16 @@ export type SetupCode =
  * agent는 `portable` 만 실행하면 되고, 산문을 읽을 필요가 없다.
  */
 export type NextAction = {
-  type: 'select_profile' | 'adopt_profile' | 'install_runtime' | 'apply_setup' | 'proceed' | 'force_host_install'
+  type:
+    | 'select_profile'
+    | 'adopt_profile'
+    | 'install_runtime'
+    | 'apply_setup'
+    | 'proceed'
+    | 'force_host_install'
+    | 'map_local_identity'
+    | 'delegate_issuance'
+    | 'keep_issuance'
   display: string
   portable: string
 }
@@ -447,6 +479,41 @@ function finish(
     (Boolean(state.ascRoot) && !state.attachmentBroken) || raw.some((c) => c.target === 'attach-workspace')
   const changes = orderChanges(raw, settled)
   if (changes.length === 0) {
+    // 붙어 있고 고칠 것도 없는데 이 기계에서 승인할 사람이 없다 — 그것은 apply 가 할 수 있는
+    // 일이 아니다. 후보를 보이고 사람의 한 마디를 기다린다 (0.10.0 P1).
+    if (state.ascRoot && state.identity && state.identity.localMapped === false) {
+      const candidates = state.identity.localCandidates ?? []
+      evidence.push(`local approver=none (candidates: ${candidates.join(', ') || '(none detected)'})`)
+      return {
+        status: 'user_action_required',
+        code: 'ASC_LOCAL_IDENTITY_REQUIRED',
+        changes,
+        requiresUserAction: true,
+        ...actions(
+          mode,
+          evidence,
+          (candidates.length > 0 ? candidates : ['<name>']).map((name) => ({
+            type: 'map_local_identity' as const,
+            ...command(['setup', 'identity', '--actor', `local:${name}`, '--role', 'controller']),
+          })),
+        ),
+      }
+    }
+    // 승인자가 섰으면 다음은 위임이다 — 사람이 한 번 답한다. 답하기 전까지 기본은 "위임 없음" 이라
+    // 동작은 안전하지만, 물은 적 없는 기본값을 결정으로 셈하지 않는다 (0.10.0 P3).
+    if (state.ascRoot && state.issuanceDelegation === 'undecided') {
+      evidence.push('issuance delegation=undecided')
+      return {
+        status: 'user_action_required',
+        code: 'ASC_ISSUANCE_DELEGATION_DECISION',
+        changes,
+        requiresUserAction: true,
+        ...actions(mode, evidence, [
+          { type: 'delegate_issuance', ...command(['setup', 'delegate', '--role', 'implementer']) },
+          { type: 'keep_issuance', ...command(['setup', 'delegate', '--none']) },
+        ]),
+      }
+    }
     return {
       status: 'already_configured',
       changes,
@@ -454,7 +521,7 @@ function finish(
       ...actions(
         mode,
         evidence,
-        state.ascRoot ? [{ type: 'proceed', ...command(['proceed']) }] : [],
+        state.ascRoot ? [{ type: 'proceed', ...command(['work', 'start']) }] : [],
       ),
     }
   }

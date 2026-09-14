@@ -185,7 +185,8 @@ report as one.
    **When the person named work to do — an issue key, a ticket — pass it: \`asc work start --work <KEY> --json\`.**
    Inside Claude Code the command also binds this Run to the session it started; the JSON
    carries \`binding\` (\`CLAIMED\` / \`ALREADY\` / \`NO_RUN\` / \`CONFLICT\`). \`CONFLICT\` exits 1:
-   the session is started but this Run did not obtain ownership — show the holder and stop.
+   the session is started but this Run did not obtain ownership — show the holder and stop;
+   taking it over is the person's call (\`asc work reclaim <S-ID>\`), never yours.
    ASC then investigates before proposing anything: it reads the work item, observes this
    repository (branch, refs, whether the work is already on the canonical branch), and judges
    what state the work is actually in. A tracker saying "in progress" is not that judgement.
@@ -195,9 +196,9 @@ report as one.
 |---|---|
 | STARTED / RESUMED / CONTINUE_ACTIVE | read contract, checkpoint and doneCriteria, then start. If there is a checkpoint, continue from that point |
 | NEEDS_SELECTION | show the candidates to the person as they are and let them choose. **Do not pick one yourself** |
-| WORK_STATE | there is nothing to build here. Read \`result.state\`: IMPLEMENTED_STALE_TRACKER means it is already on the canonical branch and the tracker lags — the remaining act is a status correction, which is an external write and goes through the existing approval path, never straight from you. BLOCKED_* means something outside this work has to move first. UNDECIDABLE means the evidence required for a recommendation is missing — \`result.missing\` names it. **Do not issue a session to work around any of these**, and report \`evidence\` and \`limitations\` as they are |
-| PROPOSE_CONTRACT (with \`plan\`) | ASC already derived the contract and measured it. Read \`plan\`: on NEEDS_DECISION ask about the one field it names — but **never ask for a goal, a boundary or criteria that the work item or this repository already answers**; if one of those shows up as a decision, the derivation is wrong and that is what to fix. When \`forController\` is present the contract holds and issuing it is the person's — hand them that command and stop |
-| PROPOSE_CONTRACT (no \`plan\` — no work reference was given) | fill in what the request, the work item and the profile actually support, then check it with \`asc session plan --json\` — it answers READY_TO_ISSUE, NEEDS_DECISION or INVALID and writes nothing. Mark each value with \`--provenance <field>=FACT\|PROPOSAL:<source>\`. On NEEDS_DECISION ask about the one field it names, with its options and recommendation. **Never invent a goal, a boundary or acceptance to fill a gap**, and never create a session just to show that setup worked. **Never issue automatically on a READY_TO_ISSUE alone** — issuance is the Controller's, meaning a person's, unless \`issuance.authority\` says \`delegated\` for this role; when it says \`controller\`, hand them the command in \`forController\` and stop |
+| WORK_STATE | there is nothing to build here. Read \`result.state\`: IMPLEMENTED_STALE_TRACKER means it is already on the canonical branch and the tracker lags — the remaining act is a status correction, which is an external write and goes through the existing approval path, never straight from you. BLOCKED_* means something outside this work has to move first. IN_PROGRESS_ELSEWHERE means this work's branch is checked out in another worktree with uncommitted changes — someone is on it; do not start a second session here. UNDECIDABLE means the evidence required for a recommendation is missing — \`result.missing\` names it (\`implementation-evidence\` = a commit mentions this key but touched none of this work's paths: a key collision, and only a person can say). **Do not issue a session to work around any of these**, and report \`evidence\` and \`limitations\` as they are. If the person looks at that evidence and overrules it, the override is theirs: \`asc work start <KEY> --fresh "<their reason>"\` records it and proceeds |
+| PROPOSE_CONTRACT (with \`plan\`) | ASC already derived the contract and measured it. Read \`plan\`: on NEEDS_DECISION ask about the one field it names — but **never ask for a goal, a boundary or criteria that the work item or this repository already answers**; if one of those shows up as a decision, the derivation is wrong and that is what to fix. When \`proposal\` is present the contract holds and ASC has **saved it**: issuing is the person's, and all they say is \`asc work issue <proposal.id>\` (or \`--reject <reason>\`) — show them that one line and stop. Do not retype the draft and do not run \`session issue\` yourself. If the workspace delegated issuance (\`asc setup delegate --role implementer\`, a person's one-time decision), \`work start\` issues and starts on its own and you never see this row |
+| PROPOSE_CONTRACT (no \`plan\` — no work reference was given) | fill in what the request, the work item and the profile actually support, then check it with \`asc session plan --json\` — it answers READY_TO_ISSUE, NEEDS_DECISION or INVALID and writes nothing. Mark each value with \`--provenance <field>=FACT\|PROPOSAL:<source>\`. On NEEDS_DECISION ask about the one field it names, with its options and recommendation. **Never invent a goal, a boundary or acceptance to fill a gap**, and never create a session just to show that setup worked. **Never issue automatically on a READY_TO_ISSUE alone** — issuance is the Controller's, meaning a person's, unless \`issuance.authority\` says \`delegated\` for this role; when it says \`controller\`, hand them the command in \`forController\` and stop. (With a work key, prefer \`asc work start <KEY> --criteria … --provenance …\` instead — that saves a proposal the person issues with one \`asc work issue <S-ID>\`) |
 | BLOCKED_CONFIG / BLOCKED_CANONICAL | show the printed reason and stop. Do not re-resolve or re-lock on their behalf |
 | FAILED | show reason and detail to the person |
 
@@ -254,9 +255,16 @@ command carries that whole path — read-only review, decision authority, grant,
 claim, revalidation, exactly one write, read-back, audit:
 
 \`\`\`text
-asc work publish [<S-ID>] --action <key> --target <ref> --body-file <path> --as <actor>
+asc work publish [<S-ID>] --action <key> --target <ref> [--body-file <path>] [--as <actor>]
 asc work publish … --review    # read the facts and stop. Nothing goes out
 \`\`\`
+
+\`--body-file\` follows the action's payload contract: \`git.push\` carries no body (passing one is
+refused), \`gitlab.mr.create\` / \`gitlab.note.create\` / \`gitlab.issue.update\` /
+\`github.issue_comment.create\` require the body the person approved. \`--as\` is optional when
+exactly one approver is mapped to this machine (\`local:<name>\` in identities.json); with several,
+naming one is the decision, so say it. Neither is something to invent: if the command refuses,
+show the person its reason.
 
 The review is **not a second approval**. The person's instruction already settled who
 decides; the review settles facts — is this the remote this work is bound to, is the commit

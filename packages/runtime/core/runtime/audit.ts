@@ -46,10 +46,22 @@ export const DelegationRecord = z.object({
   /** 세션 계약의 사본이 아니라 발급 시점 요약. 정본은 Session entity다. */
   scope: z.array(z.string()).default([]),
   doneCriteria: z.array(z.string()).default([]),
+  /** 실제로 발급 행위를 한 주체 — 사람 이름, 또는 위임 안에서 발급한 Run. */
   issuedBy: z.string().min(1),
   issuedAt: z.string().min(1),
   /** 결과를 누구에게 돌려야 하는가. 보통 parentSessionId. */
   expectedReturnTo: z.string().optional(),
+  /**
+   * 발급 권한의 근거 (0.10.0 P3). `controller` 는 사람이 직접 발급했고, `delegated` 는 정책이
+   * 그 역할의 발급을 미리 허락한 것이다. 없으면 이 필드가 생기기 전 기록이다.
+   */
+  authority: z.enum(['controller', 'delegated']).optional(),
+  /** 위임의 출처 — 어느 정책 층이, 그 층을 세운 controller 가 누구였는가. authority 가 delegated 일 때만. */
+  delegatedBy: z.string().optional(),
+  /** 이 기록을 남긴 Run. issuedBy 와 다를 수 있다 — 사람이 발급해도 적는 것은 Run 이다. */
+  recordedBy: z.string().optional(),
+  /** 보존된 제안에서 발급됐으면 그 id. */
+  proposalId: z.string().optional(),
 })
 export type DelegationRecord = z.infer<typeof DelegationRecord>
 

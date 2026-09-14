@@ -14,7 +14,8 @@ import type { StateStore } from '../../ports/state-store.ts'
 import type { RepoObservation } from '../../ports/local-repo.ts'
 import type { ChangeSummary } from '../../ports/change-context.ts'
 import type { ContextComment, ResourceSnapshot } from '../../ports/resource-context.ts'
-import type { SessionContractDraft, SessionContractPlan } from './contract-draft.ts'
+import { issueArgs, type DraftField, type SessionContractDraft, type SessionContractPlan } from './contract-draft.ts'
+import type { ProposalLedger } from './proposal.ts'
 import { judgeWorkState, type WorkStateResult } from './work-state.ts'
 import { extractPathHints } from './derive-draft.ts'
 import type { CanonicalDrift, SessionRuntime, StartOutcome } from '../runtime/session.ts'
@@ -34,6 +35,22 @@ export type ProceedIntent = {
    * 빈 초안을 돌려주는 대신, 실제로 할 일이 있는지를 먼저 판정한다.
    */
   workRef?: string
+  /**
+   * agent 가 조사에서 채운 값 (0.10.0 P3). 초안의 빈 자리(criteria·boundary)를 이것으로 채우고
+   * 출처는 `provenance` 로 함께 받는다 — 적지 않으면 `agent_proposal` 로 분류된다.
+   * `session plan` 을 따로 돌리고 그 결과를 잃던 자리다.
+   */
+  fill?: {
+    criteria?: readonly string[]
+    boundary?: readonly string[]
+    provenance?: readonly DraftField[]
+  }
+  /**
+   * 사람이 WORK_STATE 판정을 뒤집는다 (0.10.0 P5). 판정이 "구현됨" 이나 "다른 곳에서 진행 중" 이어도
+   * 사람이 확인했으면 착수한다 — 그 사실과 이유는 history 에 남고, 뒤집힌 판정의 근거는 outcome 에
+   * 그대로 실린다. 이유 없는 override 는 받지 않는다.
+   */
+  fresh?: { reason: string; by?: string }
 }
 
 /**
@@ -104,8 +121,15 @@ export type ProceedOutcome =
       full?: SessionContractDraft
       /** planSessionContract 판정 원본. 여기 있는 것을 다시 계산하지 않는다. */
       plan?: SessionContractPlan
-      /** 발급이 Controller 것일 때 사람이 그대로 실행할 명령. */
+      /** 발급이 Controller 것일 때 사람이 그대로 실행할 명령 (advanced 표면). */
       forController?: string[]
+      /**
+       * 보존된 제안 (0.10.0 P3). 사람은 이 id 하나로 발급한다 — 초안을 다시 치지 않는다.
+       * `revised` 는 같은 작업 항목의 이전 제안 중 이것이 대체한 것들이다.
+       */
+      proposal?: { id: string; revised: string[] }
+      /** 사람이 뒤집은 WORK_STATE 판정 (0.10.0 P5) — 무엇을 뒤집었고 그 근거가 무엇이었는가. */
+      overrode?: { judged: WorkStateResult; reason: string }
     }
   /**
    * 조사해 보니 **세션을 낼 일이 아니다** (P0-B). 이미 구현돼 tracker 만 뒤처졌거나,
@@ -143,6 +167,13 @@ export type OperatorDeps = {
    * 실 조립은 factory(cli의 createOperator)가 bootstrapGuard로 고정한다.
    */
   guard: () => Promise<ConfigCheck>
+  /**
+   * 제안 장부 (0.10.0 P3). 주면 발급이 Controller 의 것일 때 초안을 보존한다 —
+   * 주지 않으면 예전처럼 명령만 건넨다(기존 호출자 무손상).
+   */
+  proposals?: ProposalLedger
+  /** 이 명령을 부른 Run — 제안의 createdBy 에 적는다. 소유가 아니다. */
+  runId?: string
 }
 
 const RUNNABLE = new Set<Session['status']>(['READY', 'PAUSED', 'ACTIVE'])
@@ -150,6 +181,8 @@ const RUNNABLE = new Set<Session['status']>(['READY', 'PAUSED', 'ACTIVE'])
 export class Operator {
   #store: StateStore
   #sessions: SessionRuntime
+  #proposals: ProposalLedger | undefined
+  #runId: string | undefined
   #escalations: EscalationLedger | undefined
   #ingress: WorkIngress | undefined
   #guard: () => Promise<ConfigCheck>
@@ -158,6 +191,8 @@ export class Operator {
     this.#store = deps.store
     this.#sessions = deps.sessions
     this.#escalations = deps.escalations
+    this.#proposals = deps.proposals
+    this.#runId = deps.runId
     this.#ingress = deps.ingress
     this.#guard = deps.guard
   }
@@ -185,7 +220,7 @@ export class Operator {
       : runnable
 
     if (candidates.length === 0) {
-      if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress)
+      if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress, intent.fill, intent.fresh)
       // 자동 issue 금지. 초안을 제안할 수는 있으나 발급은 Controller 승인 후 별도 행위다.
       return {
         kind: 'PROPOSE_CONTRACT',
@@ -216,7 +251,13 @@ export class Operator {
    * 순서에 뜻이 있다: **조사 → 실제 상태 판정 → (필요하면) 계약**. 계약부터 만들면 이미
    * 끝난 일에 세션을 내게 되고, 그것이 이 경로를 고치게 된 사고였다.
    */
-  async #ingest(workRef: string, goal: string | undefined, ingress: WorkIngress): Promise<ProceedOutcome> {
+  async #ingest(
+    workRef: string,
+    goal: string | undefined,
+    ingress: WorkIngress,
+    fill?: ProceedIntent['fill'],
+    fresh?: ProceedIntent['fresh'],
+  ): Promise<ProceedOutcome> {
     const gathered = await ingress.gather(workRef)
     // 작업 항목이 지목한 경로를 함께 확인한다 — 그것이 좁은 쓰기 범위의 유일한 근거다.
     const hints = gathered.workItem ? extractPathHints(gathered.workItem) : []
@@ -226,11 +267,25 @@ export class Operator {
     const workState = judgeWorkState({ ...gathered, repo })
 
     const decided = workState.state === 'DECIDABLE_WITH_LIMITATION' ? workState.leaning : workState.state
-    if (decided !== 'ACTIONABLE' || !gathered.workItem) {
+    let overrode: { judged: WorkStateResult; reason: string } | undefined
+    if (decided !== 'ACTIONABLE' && gathered.workItem && fresh?.reason) {
+      // 사람이 판정을 뒤집었다 — 조용히 넘어가지 않는다. 무엇을 뒤집었는지 history 에 남긴다 (P5)
+      await this.#store.appendHistory({
+        at: new Date().toISOString(),
+        actor: fresh.by ?? '(person)',
+        kind: 'work_state_overridden',
+        ref: workRef,
+        detail: `judged ${workState.state}${workState.leaning ? ` (leaning ${workState.leaning})` : ''} — overridden: ${fresh.reason}`,
+      })
+      overrode = { judged: workState, reason: fresh.reason }
+    } else if (decided !== 'ACTIONABLE' || !gathered.workItem) {
+      return { kind: 'WORK_STATE', workRef, result: workState, nextAction: nextActionFor(workState, workRef) }
+    }
+    if (!gathered.workItem) {
       return { kind: 'WORK_STATE', workRef, result: workState, nextAction: nextActionFor(workState, workRef) }
     }
 
-    const draft = ingress.derive({
+    const derived = ingress.derive({
       workRef,
       goal,
       workItem: gathered.workItem,
@@ -239,6 +294,7 @@ export class Operator {
       // 이미 쓴 id 목록은 통로가 안다 — 보관된 것까지 세는 것이 그쪽이다.
       existingIds: await ingress.usedIds(),
     })
+    const draft = applyFill(derived, fill)
     const plan = await ingress.plan(draft)
     const handout = {
       kind: 'PROPOSE_CONTRACT' as const,
@@ -249,14 +305,32 @@ export class Operator {
       },
       full: draft,
       plan,
+      ...(overrode ? { overrode } : {}),
     }
 
     // 계약이 성립하지 않으면 발급하지 않는다. 무엇이 남았는지는 plan 이 이미 말한다.
     if (plan.status !== 'READY_TO_ISSUE') return handout
 
-    // 발급 권한은 사람의 것이다. 위임이 없으면 명령만 건네고 멈춘다 (OM §450).
+    // 발급 권한은 사람의 것이다. 위임이 없으면 초안을 **보존**하고 멈춘다 — 사람은 id 하나로
+    // 발급한다 (0.10.0 P3). 장부가 없으면 예전처럼 명령만 건넨다.
     if (plan.issuance.authority !== 'delegated') {
-      return { ...handout, forController: issueCommand(draft) }
+      const command = issueCommand(draft)
+      if (!this.#proposals || !draft.id) return { ...handout, forController: command }
+      const saved = await this.#proposals.create({
+        id: draft.id,
+        workRef,
+        draft,
+        workItem: {
+          ...(gathered.workItem?.title !== undefined ? { title: gathered.workItem.title } : {}),
+          ...(gathered.trackerDone !== undefined ? { trackerDone: gathered.trackerDone } : {}),
+        },
+        ...(this.#runId ? { createdBy: this.#runId } : {}),
+      })
+      return {
+        ...handout,
+        forController: command,
+        proposal: saved.ok ? { id: saved.proposal.id, revised: saved.revised } : { id: draft.id, revised: [] },
+      }
     }
 
     // 백스톱: 저장소 전체를 쓰겠다는 계약은 위임 범위 안에서 스스로 내지 않는다.
@@ -425,18 +499,46 @@ function nextActionFor(result: WorkStateResult, workRef: string): string {
       return '선행 작업이 열려 있다 — 그것이 닫히기 전에는 이 작업만으로 끝나지 않는다'
     case 'REVIEW_RESPONSE_REQUIRED':
       return '검토가 답을 기다린다 — 다음 행동은 새 구현이 아니라 응답이다'
+    case 'IN_PROGRESS_ELSEWHERE':
+      return '이 작업의 가지가 다른 worktree 에서 미커밋 상태로 진행 중이다 — 그쪽에서 이어가거나 끝내라. 여기서 새 세션을 내지 않는다'
     default:
       return `결론 요건이 모자라다: ${result.missing.join(', ') || '확인하지 못한 것이 있다'} — 그것을 먼저 확인하라`
   }
 }
 
-/** Controller 가 그대로 실행할 발급 명령. 조립만 하고 실행하지 않는다. */
+/**
+ * agent 가 조사에서 채운 값을 초안에 얹는다 (0.10.0 P3). 채운 필드의 출처는 함께 온 provenance 가
+ * 말한다 — 없으면 plan 이 `agent_proposal` 로 분류한다. 파생된 값과 provenance 는 덮지 않고
+ * 채운 필드 것만 바꾼다.
+ */
+function applyFill(draft: SessionContractDraft, fill: ProceedIntent['fill']): SessionContractDraft {
+  if (!fill) return draft
+  const filled: (keyof SessionContractDraft)[] = []
+  const next: SessionContractDraft = { ...draft }
+  if (fill.criteria && fill.criteria.length > 0) {
+    next.criteria = [...fill.criteria]
+    filled.push('criteria')
+  }
+  if (fill.boundary && fill.boundary.length > 0) {
+    next.boundary = [...fill.boundary]
+    filled.push('boundary')
+  }
+  const given = fill.provenance ?? []
+  const kept = (draft.provenance ?? []).filter(
+    (entry) => !filled.includes(entry.field) && !given.some((g) => g.field === entry.field),
+  )
+  next.provenance = [...kept, ...given]
+  return next
+}
+
+/**
+ * Controller 가 그대로 실행할 발급 명령. 조립만 하고 실행하지 않는다.
+ *
+ * `session plan` 과 같은 인자 조립(`issueArgs`)을 쓴다 — 여기서 따로 만들던 동안 owner·domain·
+ * authority 가 빠졌다 (0.10.0 P1).
+ */
 function issueCommand(draft: SessionContractDraft): string[] {
-  const argv = ['asc', 'session', 'issue', draft.id ?? '<S-ID>', '--role', draft.role ?? 'implementer']
-  if (draft.goal) argv.push('--goal', draft.goal)
-  for (const scope of draft.boundary ?? []) argv.push('--boundary', scope)
-  for (const criterion of draft.criteria ?? []) argv.push('--criteria', criterion)
-  return argv
+  return ['asc', ...issueArgs(draft)]
 }
 
 /** 사실상 저장소 전체를 쓰는 범위인가. 문법 판정이 아니라 리터럴 확인이다. */
