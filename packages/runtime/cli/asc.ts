@@ -3411,7 +3411,9 @@ async function usedSessionIds(store: MarkdownStateStore, root: string): Promise<
   } catch {
     archived = []
   }
-  return [...new Set([...active, ...archived])]
+  // 제안 id 도 쓴 id 다 — 거절·폐기된 제안의 id 로 새 초안을 내면 저장이 조용히 실패한다 (0.10.1 acceptance P-2)
+  const proposed = await proposalLedger(store).ids()
+  return [...new Set([...active, ...archived, ...proposed])]
 }
 
 /**

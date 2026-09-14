@@ -326,11 +326,9 @@ export class Operator {
         },
         ...(this.#runId ? { createdBy: this.#runId } : {}),
       })
-      return {
-        ...handout,
-        forController: command,
-        proposal: saved.ok ? { id: saved.proposal.id, revised: saved.revised } : { id: draft.id, revised: [] },
-      }
+      // 저장하지 못했으면 저장했다고 말하지 않는다 — 명령만 건네는 옛 경로로 돌아간다 (0.10.2)
+      if (!saved.ok) return { ...handout, forController: command }
+      return { ...handout, forController: command, proposal: { id: saved.proposal.id, revised: saved.revised } }
     }
 
     // 백스톱: 저장소 전체를 쓰겠다는 계약은 위임 범위 안에서 스스로 내지 않는다.

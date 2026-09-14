@@ -207,3 +207,38 @@ describe('발급 기록 — 발급자와 권한 근거는 다른 칸이다', () 
     assert.notEqual(now.issuedBy, now.delegatedBy)
   })
 })
+
+// 0.10.2 — 닫힌 제안의 id 는 쓴 id 다. 0.10.1 게시본 acceptance 에서 거절된 제안과 같은 id 로 새 초안이
+// 나와 저장이 조용히 실패했고, 화면은 "보존했다" 고 말했다.
+describe('제안 id 는 겹치지 않고, 저장 실패는 저장했다고 말하지 않는다', () => {
+  it('ledger.ids() 는 닫힌 제안까지 든다', async () => {
+    const ledger = ledgerOf(new MemoryStateStore())
+    await ledger.create({ id: 'S-1', draft })
+    await ledger.close('S-1', { status: 'REJECTED', reason: 'x' })
+    assert.deepEqual(await ledger.ids(), ['S-1'])
+  })
+
+  it('같은 id 의 제안이 이미 있으면 outcome 에 proposal 이 없고 forController 만 남는다', async () => {
+    const store = new MemoryStateStore()
+    const sessions = new SessionRuntime(store)
+    const ledger = ledgerOf(store)
+    await ledger.create({ id: 'S-20260914-01', draft })
+    await ledger.close('S-20260914-01', { status: 'REJECTED', reason: 'x' })
+    const workItem: ResourceSnapshot = { reference: 'PROJ-1', state: 's', title: '첫 일', updatedAt: 'u', revisionMarker: 'r' }
+    const ingress: WorkIngress = {
+      gather: async () => ({ workItem, trackerDone: false, comments: [], change: 'UNAVAILABLE' }),
+      observeRepo: async () => ({ branch: 'b', remotes: [], refs: [], canonicalRef: 'origin/develop', freshness: { state: 'FRESH' }, pathsExist: {}, mergedIntoCanonical: false }),
+      derive: () => draft,
+      usedIds: async () => [],
+      plan: async (d) => ({ status: 'READY_TO_ISSUE', draft: d, facts: [], proposals: [], unresolved: [], issuance: { authority: 'controller', delegatedRoles: [], detail: 'f' }, invalid: [] }),
+      issue: async () => ({ ok: false, detail: 'unused' }),
+    }
+    const operator = new Operator({ store, sessions, ingress, guard: async () => ({ ok: true }), proposals: ledger })
+    const outcome = await operator.proceed({ workRef: 'PROJ-1' })
+    assert.equal(outcome.kind, 'PROPOSE_CONTRACT')
+    if (outcome.kind !== 'PROPOSE_CONTRACT') return
+    assert.equal(outcome.proposal, undefined)
+    assert.ok(outcome.forController)
+    assert.equal((await ledger.get('S-20260914-01'))?.status, 'REJECTED', '닫힌 제안을 덮지 않는다')
+  })
+})
