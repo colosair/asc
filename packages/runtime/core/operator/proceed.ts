@@ -14,7 +14,8 @@ import type { StateStore } from '../../ports/state-store.ts'
 import type { RepoObservation } from '../../ports/local-repo.ts'
 import type { ChangeSummary } from '../../ports/change-context.ts'
 import type { ContextComment, ResourceSnapshot } from '../../ports/resource-context.ts'
-import { issueArgs, type SessionContractDraft, type SessionContractPlan } from './contract-draft.ts'
+import { issueArgs, type DraftField, type SessionContractDraft, type SessionContractPlan } from './contract-draft.ts'
+import type { ProposalLedger } from './proposal.ts'
 import { judgeWorkState, type WorkStateResult } from './work-state.ts'
 import { extractPathHints } from './derive-draft.ts'
 import type { CanonicalDrift, SessionRuntime, StartOutcome } from '../runtime/session.ts'
@@ -34,6 +35,16 @@ export type ProceedIntent = {
    * 빈 초안을 돌려주는 대신, 실제로 할 일이 있는지를 먼저 판정한다.
    */
   workRef?: string
+  /**
+   * agent 가 조사에서 채운 값 (0.10.0 P3). 초안의 빈 자리(criteria·boundary)를 이것으로 채우고
+   * 출처는 `provenance` 로 함께 받는다 — 적지 않으면 `agent_proposal` 로 분류된다.
+   * `session plan` 을 따로 돌리고 그 결과를 잃던 자리다.
+   */
+  fill?: {
+    criteria?: readonly string[]
+    boundary?: readonly string[]
+    provenance?: readonly DraftField[]
+  }
 }
 
 /**
@@ -104,8 +115,13 @@ export type ProceedOutcome =
       full?: SessionContractDraft
       /** planSessionContract 판정 원본. 여기 있는 것을 다시 계산하지 않는다. */
       plan?: SessionContractPlan
-      /** 발급이 Controller 것일 때 사람이 그대로 실행할 명령. */
+      /** 발급이 Controller 것일 때 사람이 그대로 실행할 명령 (advanced 표면). */
       forController?: string[]
+      /**
+       * 보존된 제안 (0.10.0 P3). 사람은 이 id 하나로 발급한다 — 초안을 다시 치지 않는다.
+       * `revised` 는 같은 작업 항목의 이전 제안 중 이것이 대체한 것들이다.
+       */
+      proposal?: { id: string; revised: string[] }
     }
   /**
    * 조사해 보니 **세션을 낼 일이 아니다** (P0-B). 이미 구현돼 tracker 만 뒤처졌거나,
@@ -143,6 +159,13 @@ export type OperatorDeps = {
    * 실 조립은 factory(cli의 createOperator)가 bootstrapGuard로 고정한다.
    */
   guard: () => Promise<ConfigCheck>
+  /**
+   * 제안 장부 (0.10.0 P3). 주면 발급이 Controller 의 것일 때 초안을 보존한다 —
+   * 주지 않으면 예전처럼 명령만 건넨다(기존 호출자 무손상).
+   */
+  proposals?: ProposalLedger
+  /** 이 명령을 부른 Run — 제안의 createdBy 에 적는다. 소유가 아니다. */
+  runId?: string
 }
 
 const RUNNABLE = new Set<Session['status']>(['READY', 'PAUSED', 'ACTIVE'])
@@ -150,6 +173,8 @@ const RUNNABLE = new Set<Session['status']>(['READY', 'PAUSED', 'ACTIVE'])
 export class Operator {
   #store: StateStore
   #sessions: SessionRuntime
+  #proposals: ProposalLedger | undefined
+  #runId: string | undefined
   #escalations: EscalationLedger | undefined
   #ingress: WorkIngress | undefined
   #guard: () => Promise<ConfigCheck>
@@ -158,6 +183,8 @@ export class Operator {
     this.#store = deps.store
     this.#sessions = deps.sessions
     this.#escalations = deps.escalations
+    this.#proposals = deps.proposals
+    this.#runId = deps.runId
     this.#ingress = deps.ingress
     this.#guard = deps.guard
   }
@@ -185,7 +212,7 @@ export class Operator {
       : runnable
 
     if (candidates.length === 0) {
-      if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress)
+      if (intent.workRef && this.#ingress) return this.#ingest(intent.workRef, intent.goal, this.#ingress, intent.fill)
       // 자동 issue 금지. 초안을 제안할 수는 있으나 발급은 Controller 승인 후 별도 행위다.
       return {
         kind: 'PROPOSE_CONTRACT',
@@ -216,7 +243,12 @@ export class Operator {
    * 순서에 뜻이 있다: **조사 → 실제 상태 판정 → (필요하면) 계약**. 계약부터 만들면 이미
    * 끝난 일에 세션을 내게 되고, 그것이 이 경로를 고치게 된 사고였다.
    */
-  async #ingest(workRef: string, goal: string | undefined, ingress: WorkIngress): Promise<ProceedOutcome> {
+  async #ingest(
+    workRef: string,
+    goal: string | undefined,
+    ingress: WorkIngress,
+    fill?: ProceedIntent['fill'],
+  ): Promise<ProceedOutcome> {
     const gathered = await ingress.gather(workRef)
     // 작업 항목이 지목한 경로를 함께 확인한다 — 그것이 좁은 쓰기 범위의 유일한 근거다.
     const hints = gathered.workItem ? extractPathHints(gathered.workItem) : []
@@ -230,7 +262,7 @@ export class Operator {
       return { kind: 'WORK_STATE', workRef, result: workState, nextAction: nextActionFor(workState, workRef) }
     }
 
-    const draft = ingress.derive({
+    const derived = ingress.derive({
       workRef,
       goal,
       workItem: gathered.workItem,
@@ -239,6 +271,7 @@ export class Operator {
       // 이미 쓴 id 목록은 통로가 안다 — 보관된 것까지 세는 것이 그쪽이다.
       existingIds: await ingress.usedIds(),
     })
+    const draft = applyFill(derived, fill)
     const plan = await ingress.plan(draft)
     const handout = {
       kind: 'PROPOSE_CONTRACT' as const,
@@ -254,9 +287,26 @@ export class Operator {
     // 계약이 성립하지 않으면 발급하지 않는다. 무엇이 남았는지는 plan 이 이미 말한다.
     if (plan.status !== 'READY_TO_ISSUE') return handout
 
-    // 발급 권한은 사람의 것이다. 위임이 없으면 명령만 건네고 멈춘다 (OM §450).
+    // 발급 권한은 사람의 것이다. 위임이 없으면 초안을 **보존**하고 멈춘다 — 사람은 id 하나로
+    // 발급한다 (0.10.0 P3). 장부가 없으면 예전처럼 명령만 건넨다.
     if (plan.issuance.authority !== 'delegated') {
-      return { ...handout, forController: issueCommand(draft) }
+      const command = issueCommand(draft)
+      if (!this.#proposals || !draft.id) return { ...handout, forController: command }
+      const saved = await this.#proposals.create({
+        id: draft.id,
+        workRef,
+        draft,
+        workItem: {
+          ...(gathered.workItem?.title !== undefined ? { title: gathered.workItem.title } : {}),
+          ...(gathered.trackerDone !== undefined ? { trackerDone: gathered.trackerDone } : {}),
+        },
+        ...(this.#runId ? { createdBy: this.#runId } : {}),
+      })
+      return {
+        ...handout,
+        forController: command,
+        proposal: saved.ok ? { id: saved.proposal.id, revised: saved.revised } : { id: draft.id, revised: [] },
+      }
     }
 
     // 백스톱: 저장소 전체를 쓰겠다는 계약은 위임 범위 안에서 스스로 내지 않는다.
@@ -428,6 +478,31 @@ function nextActionFor(result: WorkStateResult, workRef: string): string {
     default:
       return `결론 요건이 모자라다: ${result.missing.join(', ') || '확인하지 못한 것이 있다'} — 그것을 먼저 확인하라`
   }
+}
+
+/**
+ * agent 가 조사에서 채운 값을 초안에 얹는다 (0.10.0 P3). 채운 필드의 출처는 함께 온 provenance 가
+ * 말한다 — 없으면 plan 이 `agent_proposal` 로 분류한다. 파생된 값과 provenance 는 덮지 않고
+ * 채운 필드 것만 바꾼다.
+ */
+function applyFill(draft: SessionContractDraft, fill: ProceedIntent['fill']): SessionContractDraft {
+  if (!fill) return draft
+  const filled: (keyof SessionContractDraft)[] = []
+  const next: SessionContractDraft = { ...draft }
+  if (fill.criteria && fill.criteria.length > 0) {
+    next.criteria = [...fill.criteria]
+    filled.push('criteria')
+  }
+  if (fill.boundary && fill.boundary.length > 0) {
+    next.boundary = [...fill.boundary]
+    filled.push('boundary')
+  }
+  const given = fill.provenance ?? []
+  const kept = (draft.provenance ?? []).filter(
+    (entry) => !filled.includes(entry.field) && !given.some((g) => g.field === entry.field),
+  )
+  next.provenance = [...kept, ...given]
+  return next
 }
 
 /**

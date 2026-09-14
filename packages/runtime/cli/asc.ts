@@ -133,6 +133,7 @@ import { portableCommand, shorthandCommand } from '../core/distribution/release.
 import { preflight, type PreflightTarget } from '../core/operator/preflight.ts'
 import {
   DraftProvenance,
+  ISSUANCE_DELEGATION_KEY,
   issueArgs,
   planSessionContract,
   type DraftField,
@@ -214,12 +215,15 @@ import { ProfileLock, ProjectProfile } from '../schemas/profile.ts'
 import { LocalOperator } from '../core/operator/local-operator.ts'
 import { LOCAL_CHANNEL, issuerResolutionLines, loadIdentityMap, localApprovers, resolveIssuer } from './identity-config.ts'
 import { collectBlockers } from '../core/operator/blockers.ts'
+import { ProposalLedger, fingerprintMatches } from '../core/operator/proposal.ts'
 import { remediationCommand, renderBlocker } from './remediation.ts'
 
 const USAGE = `asc — Agent Session Control
 
 Lifecycle
   asc setup                 make this machine and this project ready to use
+  asc setup identity        map yourself as an approver on this machine (--actor local:<name>)
+  asc setup delegate        let agents issue contracts for a role (--role <r>) or keep it yours (--none)
   asc status                what is set up, what is running, what is blocked
   asc update                install the newest release and verify it
   asc refresh               re-converge this runtime's own integration
@@ -232,6 +236,8 @@ Execution
 
 Work
   asc work start [WORK]     start or resume the work, inside a contract — binds this Run to it
+  asc work issue <S-ID>     a person issues the contract ASC proposed (--reject <reason> declines it)
+  asc work reclaim <S-ID>   take over a session another Run holds — your call, recorded as one
   asc work status [S-ID]    where it is right now
   asc work publish          send the approved result outside
   asc work publish --review read the target, the SHA and the binding — change nothing
@@ -783,6 +789,7 @@ function parseArgsOrThrow(argv: string[]) {
   why: { type: 'string', multiple: true },
   /** 초안의 출처 — `<field>=<FACT|PROPOSAL|DECISION_REQUIRED>[:<source>]` (session plan). */
   provenance: { type: 'string', multiple: true },
+  reject: { type: 'string' },
   offline: { type: 'boolean', default: false },
   id: { type: 'string' },
   intent: { type: 'string' },
@@ -855,6 +862,7 @@ function parseArgsOrThrow(argv: string[]) {
       worker: { type: 'string' },
       kind: { type: 'string' },
       force: { type: 'boolean', default: false },
+      none: { type: 'boolean', default: false },
       agent: { type: 'boolean', default: false },
       flush: { type: 'boolean', default: false },
       path: { type: 'string', multiple: true },
@@ -1676,6 +1684,7 @@ async function runSetup(
   // plan/apply는 같은 판단을 나눠 쓴다 (C-14 §6). `--agent` 는 apply의 비대화 형태다.
   if (command === 'plan' || command === 'apply') return runSetupLifecycle(command, values, entry)
   if (command === 'identity') return runSetupIdentity(values)
+  if (command === 'delegate') return runSetupDelegate(values)
   if (values.agent) return runSetupLifecycle('apply', values, entry)
   // `asc setup` 은 **준비시키는** 명령이다 (§19). 진단은 `asc status` 가 맡는다 —
   // 같은 이름이 어제는 보고 오늘은 바꾸는 것이면 사람이 둘 중 무엇인지 매번 확인해야 한다.
@@ -1759,6 +1768,7 @@ async function identityState(
   const localMapped = localApprovers(map).length > 0
   const localCandidates = ascRoot && !localMapped ? await localIdentityCandidates() : undefined
   const local = ascRoot ? { localMapped, ...(localCandidates ? { localCandidates } : {}) } : {}
+  void local
   if (wired) return { identity: { wired: true, ...local } }
   // **세울 workspace 가 없으면 누구인지 묻지 않는다.** 물으려면 provider CLI 를 불러야
   // 하고, 그 도구는 자기 설정 파일을 만든다 — 멈출 계획이 남기는 자국이 되면 안 된다.
@@ -1892,6 +1902,30 @@ async function canonicalProposalState(
 }
 
 /** Profile 이 선언한 정본 갈래 수. 파일이 없으면 `null`. */
+/**
+ * 계약 발급 위임이 결정됐는가 (0.10.0 P3). Profile(팀) 이나 override(개인) 어느 쪽이든 키가 있으면
+ * 결정된 것이다 — 빈 목록도 결정이다. 둘 다 없으면 묻는다.
+ */
+async function issuanceDelegationState(
+  ascRoot: string | undefined,
+  profileId: string | undefined,
+): Promise<Pick<SetupState, 'issuanceDelegation'>> {
+  if (!ascRoot) return {}
+  const declared = async (path: string): Promise<unknown> => {
+    try {
+      const parsed = JSON.parse(await readFile(path, 'utf8')) as { policy?: { unionLists?: Record<string, unknown> } }
+      return parsed.policy?.unionLists?.[ISSUANCE_DELEGATION_KEY]
+    } catch {
+      return undefined
+    }
+  }
+  const fromOverride = await declared(join(ascRoot, 'override.json'))
+  const fromProfile = profileId ? await declared(join(externalProfileRoot(), profileId, 'profile.json')) : undefined
+  const value = fromOverride ?? fromProfile
+  if (!Array.isArray(value)) return { issuanceDelegation: 'undecided' }
+  return { issuanceDelegation: value.length > 0 ? 'declared' : 'none' }
+}
+
 async function readProfileCanonical(profileId: string): Promise<number | null> {
   const path = join(externalProfileRoot(), profileId, 'profile.json')
   try {
@@ -1959,6 +1993,7 @@ async function detectSetupState(values: Record<string, unknown>, entry: AscEntry
     // fresh onboarding 이 사람에게 되묻지 않으려면 이 셋이 관측돼 있어야 한다 (P0 F2).
     ...adoptable,
     ...(await identityState(ascRoot, Boolean(ascRoot) || Boolean(targetProfile))),
+    ...(await issuanceDelegationState(ascRoot, attachedProfile)),
     ...(await bindingProposalState(projectRoot, targetProfile, Boolean(adoptable.adoptable && !adoptable.adoptable.exists))),
     ...(await canonicalProposalState(
       projectRoot,
@@ -2221,6 +2256,53 @@ async function runSetupIdentity(values: Record<string, unknown>): Promise<number
 
   console.log('')
   console.log(renderSetup(await inspectSetup(root)))
+  return 0
+}
+
+/**
+ * `asc setup delegate --role <r>... | --none` — 계약 발급 위임을 사람이 정한다 (0.10.0 P3).
+ *
+ * override.json 의 `policy.unionLists.issuanceDelegation` 에 쓴다. `--none` 은 **명시적인 빈 목록**
+ * 이다 — 키가 없는 것(묻지 않음)과 다르다. override 는 lock digest 에 들어가므로 재고정한다.
+ */
+async function runSetupDelegate(values: Record<string, unknown>): Promise<number> {
+  const root = await discoverRoot(process.cwd(), values.root as string | undefined)
+  if (!root) {
+    console.error('No attached ASC runtime found. Attach with `asc setup` first.')
+    return 2
+  }
+  const roles = (values.role as string | string[] | undefined) === undefined ? [] : ([] as string[]).concat(values.role as string | string[])
+  const none = Boolean(values.none)
+  if ((roles.length === 0 && !none) || (roles.length > 0 && none)) {
+    console.error('Say one: --role <role>... (delegate issuance for those roles) or --none (a person issues every contract).')
+    return 2
+  }
+  for (const role of roles) {
+    if (!SessionRole.safeParse(role).success) {
+      console.error(`'${role}' is not a role this build knows — choose from: ${SessionRole.options.join('|')}`)
+      return 2
+    }
+  }
+  const attachedProfile = (values.profile as string | undefined) ?? (await lockedProfileId(root))
+  if (!attachedProfile) {
+    console.error('붙어 있는 Profile 을 알 수 없다 — `asc status` 를 보고, 필요하면 --profile 로 지목하라.')
+    return 1
+  }
+  const overridePath = join(root, 'override.json')
+  const override = await readJson(overridePath)
+  const policy = { ...((override.policy as Record<string, unknown> | undefined) ?? {}) }
+  const unionLists = { ...((policy.unionLists as Record<string, unknown> | undefined) ?? {}) }
+  unionLists[ISSUANCE_DELEGATION_KEY] = roles
+  policy.unionLists = unionLists
+  await writeJson(overridePath, { ...override, policy })
+  console.log(
+    roles.length > 0
+      ? `issuance delegated to: ${roles.join(', ')} — \`asc work start\` may issue a contract inside the range it proposes`
+      : 'issuance kept with a person — `asc work start` saves a proposal and a person issues it (`asc work issue <S-ID>`)',
+  )
+  console.log('  override.json    policy.unionLists.issuanceDelegation')
+  const relocked = await runProfile('resolve', { ...values, profile: attachedProfile, write: true }, root)
+  if (relocked !== 0) return relocked
   return 0
 }
 
@@ -2757,6 +2839,35 @@ type BindingOutcome =
       detail: string
     }
 
+/**
+ * 끝난 세션이 아직 쥐고 있는 결합을 **기록을 남기고** 놓는다 (0.10.0 P4).
+ *
+ * 조용한 forget 이 아니다: binding-log 에 RELEASED(reason=terminal-holder), RUNNING 이던 실행 증거는
+ * RELEASED 로 닫고, history 에 누가 왜 놓았는지 한 줄이 남는다. 세션이 끝났다는 사실이 근거이므로
+ * owner 확인은 하지 않는다 — 그 Run 은 대개 이미 없다.
+ */
+async function releaseTerminalHolder(
+  store: MarkdownStateStore,
+  sessionId: string,
+  at: string,
+  by: string,
+): Promise<{ released: boolean; holder?: string }> {
+  const bindings = claudeBindings(store)
+  const audit = auditLedger(store)
+  const running = (await audit.executionsOf(sessionId)).filter((evidence) => evidence.status === 'RUNNING')
+  const previous = await bindings.releaseTerminal(sessionId, 'terminal-holder')
+  if (!previous) return { released: false }
+  for (const evidence of running) await audit.endExecution(evidence.executionId, 'RELEASED', at)
+  await store.appendHistory({
+    at,
+    actor: by,
+    kind: 'binding_released',
+    ref: sessionId,
+    detail: `terminal holder released — ${previous.physicalSessionId} held a finished session`,
+  })
+  return { released: true, holder: previous.physicalSessionId }
+}
+
 async function claimRuntimeBinding(
   store: MarkdownStateStore,
   target: string,
@@ -2767,6 +2878,15 @@ async function claimRuntimeBinding(
 ): Promise<BindingOutcome> {
   const bindings = claudeBindings(store)
   const audit = auditLedger(store)
+
+  // 이 Run 이 끝난 세션을 아직 쥐고 있으면 여기서 놓는다 — 기록과 함께 (0.10.0 P4). 0.8.1 이
+  // 남긴 잔재의 모양이고, 그것 때문에 다음 결합이 RUNTIME_CONFLICT 로 막혔다 (#63).
+  for (const mine of (await bindings.current()).filter((b) => b.physicalSessionId === physical)) {
+    const session = await store.get('session', mine.logicalSessionId)
+    if (session && session.status !== 'DONE') continue
+    const outcome = await releaseTerminalHolder(store, mine.logicalSessionId, at, `run:${physical}`)
+    if (outcome.released) say(`(terminal holder released: ${mine.logicalSessionId} ← ${physical}, audited)`)
+  }
 
   // 지워졌어야 할 결합이 남아 있으면 여기서 치운다 (0.7.0).
   // 별도 migration 명령을 만들지 않는 이유는 하나다 — 이 상태를 만나는 자리가
@@ -2807,10 +2927,10 @@ async function claimRuntimeBinding(
       const finished = holder?.status === 'DONE'
       detail = finished
         ? `RUNTIME_CONFLICT: 이 Run(${physical}) 은 끝난 세션 ${other} 을 아직 잡고 있다. ` +
-          `놓아라: asc host claude release ${other} --physical ${physical}`
+          `놓는다: ${remediationCommand('RELEASE_TERMINAL_HOLDER', other)}`
         : `RUNTIME_CONFLICT: 이 Run(${physical}) 은 지금 ${other} 을 잡고 있다. ` +
           '한 Run 은 한 세션만 잡는다 — 그 세션을 계속 쓸 것이면 이 작업은 다른 Run 으로 하고, ' +
-          `아니면 먼저 놓아라: asc host claude release ${other} --physical ${physical}`
+          `아니면 먼저 끝내라: asc work finish ${other}`
     }
     return {
       state: 'CONFLICT',
@@ -3051,6 +3171,9 @@ async function runProceed(
   const operator = new Operator({
     store,
     sessions,
+    // 발급이 Controller 의 것일 때 초안을 보존한다 — 사람은 id 하나로 발급한다 (0.10.0 P3)
+    proposals: proposalLedger(store),
+    ...(observedRunId() ? { runId: observedRunId()! } : {}),
     // 막힌 node만 보고 판단한다 — checkpoint를 발행했다는 이유로 멈추지 않는다 (C-13 §3.1)
     escalations: escalationLedger(store),
     ...(ingress ? { ingress } : {}),
@@ -3061,10 +3184,19 @@ async function runProceed(
     },
   })
 
+  // agent 가 조사에서 채운 값 — 초안의 빈 자리를 채우고 출처를 함께 적는다 (0.10.0 P3)
+  const provenance = parseProvenance(values)
+  if (provenance === null) return 2
+  const fill = {
+    ...(values.criteria ? { criteria: values.criteria as string[] } : {}),
+    ...(values.boundary ? { boundary: values.boundary as string[] } : {}),
+    ...(provenance.length > 0 ? { provenance } : {}),
+  }
   const outcome = await operator.proceed({
     ...(values.session ? { sessionId: values.session as string } : {}),
     ...(values.goal ? { goal: values.goal as string } : {}),
     ...(workRef ? { workRef } : {}),
+    ...(Object.keys(fill).length > 0 ? { fill } : {}),
   })
 
   // 도구 자식(JAM MCP 서버 등)을 여기서 닫는다 — 안 닫으면 출력까지 끝내고도 종료하지 못한다.
@@ -3210,7 +3342,13 @@ async function runProceed(
         for (const item of outcome.plan.unresolved) {
           console.log(`  decide    ${item.field} [${item.reason}]: ${item.detail}`)
         }
-        if (outcome.forController) {
+        if (outcome.proposal) {
+          // 사람은 id 하나로 발급한다 — 초안을 다시 치지 않는다 (0.10.0 P3)
+          console.log(`\n계약은 성립한다. 발급은 Controller 의 것이다 — ${outcome.plan.issuance.detail}.`)
+          console.log(`제안을 보존했다: ${outcome.proposal.id}${outcome.proposal.revised.length > 0 ? ` (대체: ${outcome.proposal.revised.join(', ')})` : ''}`)
+          console.log(`  발급: ${shorthandCommand(['work', 'issue', outcome.proposal.id])}`)
+          console.log(`  거절: ${shorthandCommand(['work', 'issue', outcome.proposal.id, '--reject', '<이유>'])}`)
+        } else if (outcome.forController) {
           console.log(`\n계약은 성립한다. 발급은 Controller 의 것이다 — ${outcome.plan.issuance.detail}:`)
           console.log(`  ${shorthandCommand(outcome.forController.slice(1))}`)
         }
@@ -3434,13 +3572,19 @@ async function buildWorkIngress(
       if (!issued.ok) {
         return { ok: false, detail: issued.failures.map((f) => `${f.kind}: ${f.detail}`).join('; ') }
       }
+      // 발급자와 권한 근거를 섞지 않는다 (0.10.0 P3): 발급한 것은 이 Run 이고, 그럴 수 있었던
+      // 근거는 정책의 위임이며, 그 정책을 세운 controller 가 delegatedBy 다.
+      const runId = observedRunId()
       await auditLedger(store).delegate({
         childSessionId: issued.session.id,
         role: issued.session.role,
         goal: issued.session.goal,
         scope: issued.session.writeBoundary,
         doneCriteria: issued.session.doneCriteria,
-        issuedBy: issued.session.owner ?? '(위임 범위 내 자동 발급)',
+        issuedBy: runId ? `run:${runId}` : 'agent (delegated)',
+        authority: 'delegated',
+        delegatedBy: `policy:issuanceDelegation${resolved?.controllerIdentities ? ` (${Object.keys(resolved.controllerIdentities).join(', ') || 'controller unnamed'})` : ''}`,
+        ...(runId ? { recordedBy: runId } : {}),
         issuedAt: new Date().toISOString(),
       })
       return { ok: true, sessionId: issued.session.id }
@@ -3495,6 +3639,152 @@ function parseAuthority(
  * 구조·경계로 성립하는지 확인한다. 판정은 셋뿐이다 — 발급해도 된다 / 사람이 정할 것이
  * 남았다 / 이 초안으로는 계약이 안 된다.
  */
+/** `--provenance <field>=<STATUS>[:<source>]` 를 초안 출처로. 형식이 틀리면 null 이고 이유는 이미 말했다. */
+function parseProvenance(values: Record<string, unknown>): DraftField[] | null {
+  const provenance: DraftField[] = []
+  for (const raw of (values.provenance as string[] | undefined) ?? []) {
+    const [field, rest] = raw.split('=', 2)
+    const [status, source] = (rest ?? '').split(':', 2)
+    const parsed = DraftProvenance.safeParse({
+      field,
+      status,
+      source: source ?? 'agent_proposal',
+      ...(values.why ? { reason: (values.why as string[])[0] } : {}),
+    })
+    if (!parsed.success) {
+      console.error(`--provenance 는 <field>=<FACT|PROPOSAL|DECISION_REQUIRED>[:<source>] 형식이다: '${raw}'`)
+      return null
+    }
+    provenance.push(parsed.data)
+  }
+  return provenance
+}
+
+const proposalLedger = (store: MarkdownStateStore) => new ProposalLedger(store.scope('proposals'))
+
+/**
+ * `asc work issue <S-ID> [--reject <이유>]` — 보존된 제안을 사람이 발급하거나 거절한다 (0.10.0 P3).
+ *
+ * 발급 경로는 그대로 SessionRuntime.issue 다. 여기가 더하는 것은 셋뿐이다: 초안을 다시 치지
+ * 않는다, 작업 항목이 저장 시점과 다르면 OBSOLETE 로 닫고 다시 계획하게 한다, 발급자와 권한
+ * 근거를 나눠 적는다.
+ */
+async function runWorkIssue(
+  target: string | undefined,
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+  root: string,
+  resolved?: ResolvedRuntime,
+): Promise<number> {
+  const ledger = proposalLedger(store)
+  if (!target) {
+    const open = await ledger.open()
+    if (open.length === 0) {
+      console.error('발급을 기다리는 제안이 없다. 제안은 `asc work start <WORK-KEY>` 가 만든다.')
+      return 2
+    }
+    console.error('어느 제안인가: asc work issue <S-ID>')
+    for (const proposal of open) console.error(`  ${proposal.id} — ${proposal.draft.goal ?? ''}`)
+    return 2
+  }
+  const proposal = await ledger.get(target)
+  if (!proposal) {
+    console.error(`제안 '${target}' 이 없다. 열린 제안: asc work status`)
+    return 2
+  }
+  if (proposal.status !== 'CREATED') {
+    const because = proposal.issuedSessionId
+      ? ` — 세션 ${proposal.issuedSessionId}`
+      : proposal.supersededBy
+        ? ` — ${proposal.supersededBy} 가 대체했다`
+        : proposal.reason
+          ? ` — ${proposal.reason}`
+          : ''
+    console.error(`${target} 은 이미 ${proposal.status} 다${because}.`)
+    return 1
+  }
+  const at = new Date().toISOString()
+  if (values.reject !== undefined) {
+    const reason = String(values.reject)
+    if (!reason) {
+      console.error('--reject <이유> — 이유 없는 거절은 남기지 않는다.')
+      return 2
+    }
+    const closed = await ledger.close(target, { status: 'REJECTED', reason })
+    if (closed.ok) console.log(`${target} REJECTED — ${reason}`)
+    return closed.ok ? 0 : 1
+  }
+
+  // 작업 항목이 그대로인가. 다르면 이 초안은 다른 일을 위한 것이다 — 발급하지 않고 다시 계획한다.
+  if (proposal.workRef && proposal.workItem) {
+    const probe = new SessionRuntime(store, resolved?.resolved.policy ?? null, {})
+    const ingress = await buildWorkIngress(store, root, probe, resolved)
+    if (ingress) {
+      const now = await ingress.gather(proposal.workRef)
+      await closeToolClients()
+      const current = {
+        ...(now.workItem?.title !== undefined ? { title: now.workItem.title } : {}),
+        ...(now.trackerDone !== undefined ? { trackerDone: now.trackerDone } : {}),
+      }
+      if (!fingerprintMatches(proposal.workItem, current)) {
+        await ledger.close(target, {
+          status: 'OBSOLETE',
+          reason: `작업 항목이 제안 시점과 다르다 (${proposal.workItem.title ?? '?'} → ${current.title ?? '?'})`,
+        })
+        console.error(`${target} OBSOLETE — 작업 항목 ${proposal.workRef} 이 제안 시점과 다르다. 다시 계획한다:`)
+        console.error(`  ${shorthandCommand(['work', 'start', proposal.workRef])}`)
+        return 1
+      }
+    }
+  }
+
+  // 발급자. 이 기계에서 검증되는 승인자가 한 명이면 그 사람이고, 아니면 --as 다. 발급은
+  // grant 처럼 검증으로 막지 않는다 — 발급은 계약이고, 밖으로 나가는 것은 grant 가 따로 지킨다.
+  const issuer = resolveIssuer(values.as ?? values['issued-by'], await loadIdentityMap(root))
+  const issuedBy = issuer.ok ? issuer.actor : '(미상)'
+  const sessions = new SessionRuntime(store, resolved?.resolved.policy ?? null, {
+    canonicalSources: (resolved?.canonicalSources ?? []).map((sourceId) => ({ sourceId })),
+    ...(resolved?.ownership ? { ownership: resolved.ownership } : {}),
+  })
+  const draft = proposal.draft
+  const issued = await sessions.issue({
+    id: proposal.id,
+    role: SessionRole.parse(draft.role ?? 'implementer'),
+    goal: draft.goal ?? '',
+    ...(draft.criteria ? { doneCriteria: [...draft.criteria] } : {}),
+    ...(draft.boundary ? { writeBoundary: [...draft.boundary] } : {}),
+    ...(draft.owner ? { owner: draft.owner } : {}),
+    ...(draft.decisionDomains ? { decisionDomains: [...draft.decisionDomains] } : {}),
+    ...(draft.decisionAuthority ? { decisionAuthority: { ...draft.decisionAuthority } } : {}),
+  })
+  if (!issued.ok) {
+    console.error('Could not issue the session:')
+    for (const failure of issued.failures) console.error(`  - ${failure.kind}: ${failure.detail}`)
+    return 1
+  }
+  const runId = observedRunId()
+  const delegated = await auditLedger(store).delegate({
+    childSessionId: issued.session.id,
+    role: issued.session.role,
+    goal: issued.session.goal,
+    scope: issued.session.writeBoundary,
+    doneCriteria: issued.session.doneCriteria,
+    issuedBy,
+    authority: 'controller',
+    ...(runId ? { recordedBy: runId } : {}),
+    proposalId: proposal.id,
+    issuedAt: at,
+  })
+  await ledger.close(target, { status: 'ISSUED', issuedSessionId: issued.session.id })
+  console.log(`${issued.session.id} READY — ${issued.session.goal}`)
+  if (delegated.ok) console.log(delegationLine(delegated.record, issued.session.id))
+  if (!issuer.ok) console.log('  발급자 (미상) — 이 기계에 매핑된 승인자가 하나가 아니다. --as <이름> 으로 남길 수 있다.')
+  console.log(
+    `  이제 잡는다: ${shorthandCommand(['work', 'start', ...(proposal.workRef ? [proposal.workRef] : ['--session', issued.session.id])])}`,
+  )
+  return 0
+}
+
 async function runSessionPlan(
   values: Record<string, unknown>,
   store: MarkdownStateStore,
@@ -3508,22 +3798,8 @@ async function runSessionPlan(
 
   // 출처는 `<field>=<status>[:<source>]` 로 받는다 — 초안을 만든 쪽이 무엇을 확인했고
   // 무엇을 제안했는지 스스로 적게 한다. 적지 않으면 제안으로 셈한다(사실로 올리지 않는다).
-  const provenance: DraftField[] = []
-  for (const raw of (values.provenance as string[] | undefined) ?? []) {
-    const [field, rest] = raw.split('=', 2)
-    const [status, source] = (rest ?? '').split(':', 2)
-    const parsed = DraftProvenance.safeParse({
-      field,
-      status,
-      source: source ?? 'agent_proposal',
-      ...(values.why ? { reason: (values.why as string[])[0] } : {}),
-    })
-    if (!parsed.success) {
-      console.error(`--provenance 는 <field>=<FACT|PROPOSAL|DECISION_REQUIRED>[:<source>] 형식이다: '${raw}'`)
-      return 2
-    }
-    provenance.push(parsed.data)
-  }
+  const provenance = parseProvenance(values)
+  if (provenance === null) return 2
 
   const draft: SessionContractDraft = {
     ...(values.id ? { id: values.id as string } : {}),
@@ -5483,6 +5759,76 @@ async function liveWork(root: string): Promise<{ sessions: string[]; bindings: s
  * 계약 초안·세션·물리 결합·preflight·진행·handoff·collect·Grant·Executor. 달라지는 것은
  * 사람이 그 순서를 외우지 않아도 된다는 것 하나다.
  */
+/**
+ * `asc work reclaim <S-ID>` — 다른 Run 이 쥔 세션을 **사람이 확인하고** 인수한다 (0.10.0 P4).
+ *
+ * 자동 탈취가 아니다: 이 명령을 치는 것이 확인이고, 치기 전에 볼 수 있도록 근거(누가·언제부터·
+ * 마지막 보고)를 먼저 보인다. 내부는 `host claude bind --force` 와 같은 rebind 다 — 표면만 work 로
+ * 옮겼다. 세션이 이미 끝났으면 인수할 것이 없다 — 기록을 남기고 놓는다.
+ */
+async function runWorkReclaim(
+  target: string | undefined,
+  values: Record<string, unknown>,
+  store: MarkdownStateStore,
+): Promise<number> {
+  if (!target) {
+    console.error('Usage: asc work reclaim <S-ID>')
+    return 2
+  }
+  const at = new Date().toISOString()
+  const bindings = claudeBindings(store)
+  const held = await bindings.get(target)
+  const session = await store.get('session', target)
+  if (!held) {
+    console.error(`${target} 은 어느 Run 도 쥐고 있지 않다 — 인수할 것이 없다. 잡으려면: asc work start --session ${target}`)
+    return 1
+  }
+  if (!session || session.status === 'DONE') {
+    const released = await releaseTerminalHolder(store, target, at, `person via run:${observedRunId() ?? 'cli'}`)
+    console.log(`${target} 은 끝난 세션이다 — ${released.holder ?? held.physicalSessionId} 가 쥐고 있던 결합을 놓았다 (audited).`)
+    return 0
+  }
+  const physical = effectivePhysical(values)
+  if (!physical) {
+    console.error('이 명령은 Claude Code Run 안에서 부른다 — 인수하는 쪽이 어느 Run 인지 알아야 한다 (밖에서는 --physical <run>).')
+    return 2
+  }
+  if (held.physicalSessionId === physical) {
+    console.log(`${target} 은 이미 이 Run 이 쥐고 있다.`)
+    return 0
+  }
+  // 근거를 먼저 보인다 — 무엇을 뺏는지 모른 채 인수하지 않는다
+  const progress = await progressService(store).get(target)
+  console.log(`${target} — ${session.status} · ${session.goal}`)
+  console.log(`  holder:        ${held.physicalSessionId} (since ${held.updatedAt})`)
+  console.log(`  last progress: ${progress ? `${progress.lastUpdatedAt} — ${progress.phase}` : '(none reported)'}`)
+  console.log('  ASC cannot tell whether that Run is alive. Reclaiming is your call — it is recorded as one.')
+
+  const audit = auditLedger(store)
+  const superseded = (await audit.executionsOf(target)).filter((e) => e.status === 'RUNNING')
+  const rebound = await bindings.rebind({ logicalSessionId: target, provider: CLAUDE_PROVIDER, physicalSessionId: physical }, at)
+  for (const evidence of superseded) await audit.endExecution(evidence.executionId, 'SUPERSEDED', at)
+  const recorded = await audit.execute({
+    logicalSessionId: target,
+    hostAdapter: CLAUDE_PROVIDER,
+    principal: physical,
+    principalSource: 'derived',
+    physicalReference: physical,
+    startedAt: at,
+    evidenceSource: 'work reclaim',
+  })
+  await store.appendHistory({
+    at,
+    actor: `run:${physical}`,
+    kind: 'binding_reclaimed',
+    ref: target,
+    detail: `a person reclaimed ${target} from ${held.physicalSessionId}`,
+  })
+  console.log(`execution evidence ${recorded.evidence.executionId} · principal ${physical} (derived)`)
+  console.log(`${target} ← ${rebound.physicalSessionId} (reclaimed — previous holder ${held.physicalSessionId} superseded)`)
+  return 0
+}
+
 async function runWork(
   command: string | undefined,
   target: string | undefined,
@@ -5507,8 +5853,24 @@ async function runWork(
     case 'start':
       return runProceed({ ...values, ...(target ? { work: target } : {}) }, store, root, runtime)
 
-    case 'status':
+    case 'status': {
+      // 발급을 기다리는 제안이 있으면 먼저 보인다 — 사람이 결정할 것이 있다는 뜻이다 (0.10.0 P3)
+      const open = await proposalLedger(store).open()
+      for (const proposal of open) {
+        console.log(`Proposed (awaiting issue): ${proposal.id} — ${proposal.draft.goal ?? ''}`)
+        console.log(`  발급: ${shorthandCommand(['work', 'issue', proposal.id])}`)
+      }
+      if (open.length > 0) console.log('')
       return runProgress('show', target ?? (values.session as string | undefined), values, store)
+    }
+
+    // 보존된 제안을 사람이 발급한다 (0.10.0 P3). 초안을 다시 치지 않는다 — id 하나다.
+    case 'issue':
+      return runWorkIssue(target, values, store, root, runtime)
+
+    // 사람이 소유권을 인수한다 (0.10.0 P4). host 명령이나 --force 를 몰라도 되는 자리다.
+    case 'reclaim':
+      return runWorkReclaim(target, values, store)
 
     case 'inspect': {
       const session = await currentSession()

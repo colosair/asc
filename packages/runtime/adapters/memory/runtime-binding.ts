@@ -42,6 +42,8 @@ export type BindingLogEntry = {
   /** 집은 시각. CLAIMED 에서는 `endedAt` 과 같다 — 아직 끝나지 않았다. */
   claimedAt: string
   endedAt: string
+  /** 왜 놓였는가 — owner 가 아닌 손이 놓았을 때만 적는다 (0.10.0 P4: `terminal-holder`). */
+  reason?: string
 }
 
 export class ScopedRuntimeBindings implements RuntimeBindings {
@@ -139,6 +141,21 @@ export class ScopedRuntimeBindings implements RuntimeBindings {
     return true
   }
 
+  /**
+   * 끝난 세션이 쥐고 있던 결합을 owner 가 아닌 손이 놓는다 (0.10.0 P4).
+   *
+   * `release` 는 owner 만 부를 수 있다 — 그런데 끝난 세션의 owner Run 은 대개 이미 없다. 조용히
+   * `forget` 하면 이력이 반쪽이 되므로, 여기서는 RELEASED 묘비에 **이유를 적고** 지운다.
+   * 세션이 끝났는지는 부르는 쪽이 확인한다 — 이 store 는 세션을 모른다.
+   */
+  async releaseTerminal(logicalSessionId: string, reason: string): Promise<RuntimeBinding | null> {
+    const current = await this.get(logicalSessionId)
+    if (!current) return null
+    await this.#log(current, 'RELEASED', reason)
+    await this.#scope.delete(keyOf(logicalSessionId))
+    return current
+  }
+
   async rebind(binding: Omit<RuntimeBinding, 'updatedAt'>, at: string): Promise<RuntimeBinding> {
     const previous = await this.get(binding.logicalSessionId)
     // 승계는 덮어쓰기지만, 덮이는 쪽도 있었던 일이다.
@@ -202,7 +219,7 @@ export class ScopedRuntimeBindings implements RuntimeBindings {
    * 묘비를 append한다. 순번은 setIfAbsent가 성공할 때까지 올린다 — 같은 세션의 두
    * 내려놓음이 겹쳐도 하나가 조용히 사라지지 않는다.
    */
-  async #log(binding: RuntimeBinding, kind: BindingLogEntry['kind']): Promise<void> {
+  async #log(binding: RuntimeBinding, kind: BindingLogEntry['kind'], reason?: string): Promise<void> {
     const entry: BindingLogEntry = {
       logicalSessionId: binding.logicalSessionId,
       physicalSessionId: binding.physicalSessionId,
@@ -211,6 +228,7 @@ export class ScopedRuntimeBindings implements RuntimeBindings {
       kind,
       claimedAt: binding.updatedAt,
       endedAt: this.#now(),
+      ...(reason ? { reason } : {}),
     }
     const existing = await this.#scope.keys(logPrefix(binding.logicalSessionId))
     let seq = existing.reduce((max, key) => Math.max(max, Number(key.slice(key.lastIndexOf(':') + 1)) || 0), 0) + 1

@@ -87,6 +87,12 @@ export type SetupState = {
     localCandidates?: readonly string[]
   }
   /**
+   * 계약 발급 위임이 결정됐는가 (0.10.0 P3). `undecided` 면 Profile 도 override 도 말한 적이
+   * 없다 — 그때 기본은 "위임 없음" 이지만, 사람이 한 번 답하기 전까지 setup 은 끝난 것이 아니다.
+   * 답은 `declared`(역할 목록) 또는 `none`(명시적으로 빈 목록) 이다.
+   */
+  issuanceDelegation?: 'undecided' | 'declared' | 'none'
+  /**
    * 발견이 **갈리지 않고** 제안하는 결합. Profile 에 결합 선언이 없을 때만 본다.
    * 갈리면 비어 있다 — 고르는 것은 사람이다 (C-09 §4.2).
    */
@@ -182,6 +188,11 @@ export type SetupCode =
    * 않는다 — 사람이 `setup identity --actor local:<name>` 으로 한 번 말한다.
    */
   | 'ASC_LOCAL_IDENTITY_REQUIRED'
+  /**
+   * 계약 발급을 agent 에 위임할지 사람이 정하지 않았다 (0.10.0 P3). 위임하면 `work start` 가
+   * 제안한 범위 안에서 발급까지 하고, 위임하지 않으면 사람이 제안 id 로 발급한다.
+   */
+  | 'ASC_ISSUANCE_DELEGATION_DECISION'
 
 /**
  * 다음에 할 일 하나. **두 형태를 함께 든다** (C-14 §3.4, 불변식 ⑯).
@@ -199,6 +210,8 @@ export type NextAction = {
     | 'proceed'
     | 'force_host_install'
     | 'map_local_identity'
+    | 'delegate_issuance'
+    | 'keep_issuance'
   display: string
   portable: string
 }
@@ -484,6 +497,21 @@ function finish(
             ...command(['setup', 'identity', '--actor', `local:${name}`, '--role', 'controller']),
           })),
         ),
+      }
+    }
+    // 승인자가 섰으면 다음은 위임이다 — 사람이 한 번 답한다. 답하기 전까지 기본은 "위임 없음" 이라
+    // 동작은 안전하지만, 물은 적 없는 기본값을 결정으로 셈하지 않는다 (0.10.0 P3).
+    if (state.ascRoot && state.issuanceDelegation === 'undecided') {
+      evidence.push('issuance delegation=undecided')
+      return {
+        status: 'user_action_required',
+        code: 'ASC_ISSUANCE_DELEGATION_DECISION',
+        changes,
+        requiresUserAction: true,
+        ...actions(mode, evidence, [
+          { type: 'delegate_issuance', ...command(['setup', 'delegate', '--role', 'implementer']) },
+          { type: 'keep_issuance', ...command(['setup', 'delegate', '--none']) },
+        ]),
       }
     }
     return {
